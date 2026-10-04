@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>미니 벨트스크롤</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; display: grid; place-items: center; }
+  canvas { width: min(100vw, 100vh * 16 / 9); aspect-ratio: 16 / 9; }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+<script>
+// ===== 1. 기본 설정 =====
+const W = 960, H = 540;                       // 게임 내부 해상도 (화면 크기와 상관없이 고정)
+const FLOOR_TOP = 330, FLOOR_BOTTOM = 500;    // 캐릭터가 걸어다닐 수 있는 바닥 띠 = '깊이' 범위
+const GRAVITY = 0.6;
+const ctx = document.getElementById('game').getContext('2d');
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ===== 2. 입력 =====
+const down = {}, pressed = {};                // down: 누르는 중 / pressed: 막 눌린 순간
+addEventListener('keydown', e => {
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+  if (!down[e.code]) pressed[e.code] = true;
+  down[e.code] = true;
+});
+addEventListener('keyup', e => { down[e.code] = false; });
+
+// ===== 3. 캐릭터 데이터 =====
+const player = { x: 200, y: 420, z: 0, vz: 0, face: 1, attackT: 0, hitDone: false };
+const enemy  = { x: 600, y: 420, z: 0, vx: 0, hp: 30, maxHp: 30, flash: 0, respawn: 0 };
+let hitstop = 0;                              // 타격감: 때린 순간 게임이 잠깐 멈춤
+let popups = [];                              // 떠오르는 데미지 숫자
+
+// ===== 4. 매 프레임 계산 (1/60초마다 한 번) =====
+function update() {
+  if (hitstop > 0) { hitstop--; return; }     // 멈춘 동안 눌린 키는 기억해 둠(입력 버퍼)
+
+  // 이동
+  const dx = (down.ArrowRight ? 1 : 0) - (down.ArrowLeft ? 1 : 0);
+  const dy = (down.ArrowDown ? 1 : 0) - (down.ArrowUp ? 1 : 0);
+  if (player.attackT === 0) {                 // 공격 중에는 못 움직임
+    player.x += dx * 4;
+    player.y += dy * 3;
+    if (dx) player.face = dx;
+  }
+  player.x = clamp(player.x, 20, W - 20);
+  player.y = clamp(player.y, FLOOR_TOP, FLOOR_BOTTOM);
+
+  // 점프 (z = 땅에서 떠 있는 높이)
+  if (pressed.KeyX && player.z === 0) player.vz = 11;
+  if (player.z > 0 || player.vz > 0) {
+    player.z += player.vz;
+    player.vz -= GRAVITY;
+    if (player.z <= 0) { player.z = 0; player.vz = 0; }
+  }
+
+  // 공격: 20프레임짜리 동작 중 6~10프레임에만 타격 판정이 켜짐
+  if (pressed.KeyZ && player.attackT === 0) { player.attackT = 20; player.hitDone = false; }
+  if (player.attackT > 0) {
+    player.attackT--;
+    const t = 20 - player.attackT;
+    if (t >= 6 && t <= 10 && !player.hitDone) tryHit();
+  }
+
+  // 적
+  enemy.x = clamp(enemy.x + enemy.vx, 20, W - 20);
+  enemy.vx *= 0.85;                           // 넉백이 점점 느려짐
+  if (enemy.flash > 0) enemy.flash--;
+  if (enemy.hp <= 0 && --enemy.respawn <= 0) { enemy.hp = enemy.maxHp; enemy.x = 600; enemy.vx = 0; }
+
+  // 떠오르는 숫자
+  popups.forEach(p => { p.y -= 1; p.t--; });
+  popups = popups.filter(p => p.t > 0);
+
+  for (const k in pressed) delete pressed[k]; // '막 눌림'은 한 번만 처리
+}
+
+function tryHit() {
+  const reach = 80;                           // 공격 사거리
+  const x1 = player.face > 0 ? player.x : player.x - reach;
+  const x2 = player.face > 0 ? player.x + reach : player.x;
+  const inX = enemy.x + 20 > x1 && enemy.x - 20 < x2;
+  const inDepth = Math.abs(enemy.y - player.y) < 25;    // 벨트스크롤의 핵심: 깊이(y)가 비슷해야 맞는다
+  const inHeight = Math.abs(enemy.z - player.z) < 60;
+  if (enemy.hp <= 0 || !(inX && inDepth && inHeight)) return;
+
+  const dmg = 5 + Math.floor(Math.random() * 4);
+  enemy.hp = Math.max(0, enemy.hp - dmg);
+  enemy.flash = 6;                            // 하얗게 번쩍
+  enemy.vx = player.face * 7;                 // 넉백
+  if (enemy.hp === 0) enemy.respawn = 90;
+  hitstop = 4;                                // 히트스톱
+  popups.push({ x: enemy.x, y: enemy.y - 100, t: 40, text: dmg });
+  player.hitDone = true;                      // 한 번 휘두르면 한 번만 맞게
+}
+
+// ===== 5. 그리기 =====
+function drawActor(a, color) {
+  const shadowScale = 1 - Math.min(a.z, 100) / 200;     // 높이 뜰수록 그림자가 작아짐
+  ctx.fillStyle = 'rgba(0,0,0,.35)';
+  ctx.beginPath(); ctx.ellipse(a.x, a.y, 26 * shadowScale, 8 * shadowScale, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = a.flash > 0 ? '#fff' : color;
+  ctx.fillRect(a.x - 20, a.y - a.z - 80, 40, 80);       // 몸통 (나중에 스프라이트 이미지로 교체)
+}
+
+function draw() {
+  ctx.fillStyle = '#2b2d42'; ctx.fillRect(0, 0, W, FLOOR_TOP - 40);   // 벽
+  ctx.fillStyle = '#5c4b3a'; ctx.fillRect(0, FLOOR_TOP - 40, W, H);   // 바닥
+
+  // y가 작은(화면 위쪽 = 먼) 캐릭터부터 그려야 앞 캐릭터가 위에 덮인다 (y-sort)
+  const actors = [{ a: player, c: '#4aa3ff' }];
+  if (enemy.hp > 0) actors.push({ a: enemy, c: '#ff6b6b' });
+  actors.sort((p, q) => p.a.y - q.a.y).forEach(o => drawActor(o.a, o.c));
+
+  // 칼 휘두르는 이펙트
+  const t = 20 - player.attackT;
+  if (player.attackT > 0 && t >= 4 && t <= 12) {
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    ctx.fillRect(player.face > 0 ? player.x + 20 : player.x - 100, player.y - player.z - 60, 80, 10);
+  }
+  // 적 HP바
+  if (enemy.hp > 0) {
+    ctx.fillStyle = '#400'; ctx.fillRect(enemy.x - 25, enemy.y - 110, 50, 6);
+    ctx.fillStyle = '#f44'; ctx.fillRect(enemy.x - 25, enemy.y - 110, 50 * enemy.hp / enemy.maxHp, 6);
+  }
+  // 데미지 숫자 + 안내 문구
+  ctx.font = 'bold 26px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#ffd93d';
+  popups.forEach(p => ctx.fillText(p.text, p.x, p.y));
+  ctx.font = '18px sans-serif'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff';
+  ctx.fillText('방향키: 이동   Z: 공격   X: 점프', 16, 28);
+}
+
+// ===== 6. 게임 루프: 어떤 모니터에서도 같은 속도로 =====
+const STEP = 1000 / 60;
+let last = performance.now(), acc = 0;
+function frame(now) {
+  acc += Math.min(now - last, 100);           // 탭을 오래 떠났다 와도 폭주하지 않게 제한
+  last = now;
+  while (acc >= STEP) { update(); acc -= STEP; }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
