@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>젤리 던전</title>
+<?!= include('style') ?>
+</head>
+<body>
+<div id="app">
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="ui"></div>
+  <div id="touch"></div>
+</div>
+<?!= include('js_core') ?>
+<?!= include('js_player') ?>
+<?!= include('js_enemies') ?>
+<?!= include('js_stage') ?>
+<?!= include('js_ui') ?>
+<?!= include('js_server') ?>
+<?!= include('js_main') ?>
+</body>
+</html>
