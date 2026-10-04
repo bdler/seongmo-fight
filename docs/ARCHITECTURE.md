@@ -479,3 +479,31 @@ STAGES = [{ id:'stage1', name:'사탕 숲', theme:'candy',
 - `localStorage` 는 항상 `Store` 로(try/catch). 쿠키 금지.
 - `google.script.run` 은 `js_server.html` 에서만 사용. 서버로 보내는 값은 숫자/문자열/객체/배열만 (Date/함수 금지).
 - iframe 안이므로 포커스가 없을 수 있음 → 「시작」 버튼 클릭으로 포커스 확보, `blur` 시 입력 해제.
+
+## 12. 커널 구현 노트 (코드가 문서보다 우선)
+
+core 구현 결과, 계약과 달라지거나 **추가된** 부분입니다. 다른 모듈은 이쪽을 기준으로 맞추세요.
+
+**동작이 구체화된 부분**
+- `Combat.frontBox` 는 `dir = owner.face` 도 설정 → 앞쪽 공격은 항상 앞으로 넉백. `aroundBox` 는 `dir` 없이 "owner 로부터 멀어지는 방향".
+- `Combat.damage` 는 **실제 적용된 피해량**(무시되면 0)을 반환. `applyHitbox` 는 실제로 피해를 입은 엔티티만 반환하며, 무시된 대상(무적/죽음/untargetable/god)은 `hitSet` 에 넣지 않음 → 무적이 풀리면 같은 hb 로 다시 맞을 수 있음.
+- `Entities.list` 는 Array 하위 클래스 — `for-of`/`forEach` 는 스냅샷을 순회해서 순회 중 add/remove 해도 안전. `Entities.add()` 는 엔티티를 반환. `make` 는 값이 `undefined` 인 props 를 무시. `removeT` 가 NaN/undefined 인 죽은 엔티티는 즉시 제거(영원히 남지 않음).
+- `Draw.text`: `y` 는 알파벳 기준선(baseline), `\n` 으로 여러 줄(줄 높이 `size*1.2`), 가장 넓은 줄의 폭을 반환. 추가 헬퍼 `Draw.star(ctx, x, y, rOuter, rInner, rot, points)`.
+- `Game.resetRun` 은 `Game.frame = 0` 도 초기화. `Game.pause(on)` 의 기본값은 `true`. `Game.setScene` 은 `Game.paused` 를 건드리지 않음.
+- 씬/훅/이벤트 핸들러에서 난 예외는 잡아서 같은 메시지당 1번만 `console.error` (루프가 죽지 않음).
+- `Loop.tick`: 훅은 히트스톱 중에도 실행(봇이 입력을 쌓을 수 있게)되지만 일시정지 중에는 실행되지 않음. `Loop.draw` 가 매 프레임 캔버스를 지움.
+- FX 한도: freeze ≤ 30프레임, shake ≤ 16px, flash 최대 알파 0.55(0.6 초과 금지), 20 `FX.update` 이내의 두 번째 flash 는 합쳐짐(알파는 올리지 않고 페이드만 늘림). 한도 초과 팝업/입자는 오래된 것부터 버림. `FX.reduceMotion`(Store `reduceMotion`)이 켜지면 흔들림/번쩍임 없음.
+- 연출용 난수(`FX`, `SFX`)는 별도 시드 스트림(`RNG.fx`)을 써서 입자 개수가 게임 난수열(`rand()`)을 바꾸지 않음. `RNG.seed(n)` 이 둘 다 시드.
+- Input: `keyup` 은 대상이 INPUT 이어도 항상 처리(키 눌림 고착 방지). INPUT/TEXTAREA/SELECT 에 포커스가 가면 `Input.clear()`. `Input.release` 는 키를 `down` 에서 **삭제**(false 대입이 아님). `bindButton` 은 해제 함수를 반환. `Input` 은 `KeyM` 을 **기록만** 하고 음소거는 토글하지 않음.
+- Audio: 첫 pointer/mouse/key/touch 이벤트가 자동으로 `SFX.init()` 호출. `Music.play` 를 init 전에 불러도 기억했다가 init 성공 시 시작. 탭이 숨겨지면 AudioContext 일시중단. 같은 효과음은 30ms 안에 중복 재생 안 됨, 동시 최대 10개(우선순위 효과음 `ultimate bossDie go clear gameover warn` 제외). `SFX.play(name, {vol, rate, delay})`.
+- `comboChanged` 는 콤보가 오를 때마다, 그리고 플레이어가 맞거나 `Game.tickCombo()` 로 리셋될 때도 emit. `playerHit` 은 `kind==='player'` 일 때만.
+- 캔버스 백버퍼는 `960*dpr × 540*dpr`(dpr 최대 2). 모든 모듈은 논리 좌표(960×540)로 그리면 됨. `Loop.start` 가 영(0) 특이도의 폴백 스타일 `:where(#game){display:block;width:960px}` 를 주입(UI CSS 가 항상 덮어씀).
+
+**추가된 공개 API / 이벤트**
+`Loop.draw/canvas/ctx/dpr/tickCount`, `Events.clear`, `Store.remove`, `Game.tickCombo`, `SFX.names/info/active/render`, `Music.names/current/isPlaying/stop/info/render`, `FX.popups/particles/shakeOff/flashAlpha/flashColor/reduceMotion`, `Debug.{god, noVariance, showHitboxes, errors, logOnce}`, 이벤트 `touchDetected`(첫 touchstart).
+
+**다른 모듈이 반드시 지킬 것 (커널 요청 사항)**
+1. **stage:** play 씬 `update` 에서 `FX.update()` 뒤에 **`Game.tickCombo()` 를 매 프레임 정확히 1번** 호출. (커널은 `combo.timer` 를 세팅만 하고 줄이지 않음. 직접 줄이는 코드와 중복 금지)
+2. **ui:** `#game` 에 명시적 CSS 크기 부여(`#app` 16:9 레터박스 안에서 `width:100%; height:auto; display:block`), `--u` 는 CSS 폭 기준으로 계산.
+3. **ui:** `KeyM` 음소거 토글은 **UI 에서 한 곳에서만** 처리. 터치 컨트롤은 `touchDetected` 이벤트(또는 `Game.touch` 폴링)로 표시.
+4. **ui:** 시작 시 포커스가 남은 DOM 버튼을 `blur()` 하거나 숨김 (커널은 Space 의 `preventDefault` 를 INPUT/TEXTAREA/SELECT 외 모든 대상에 적용하므로, 포커스된 `<button>` 이 Space 에 반응하지 않게).

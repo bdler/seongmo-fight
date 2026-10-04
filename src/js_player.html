@@ -1,4 +1,971 @@
 <script>
-/* player 모듈 — 소유 모듈이 구현하기 전까지의 빈 스텁 */
-const Player = {};
+'use strict';
+/* ==========================================================================
+   js_player.html — 주인공 "젤리 용사" (player 모듈)
+   --------------------------------------------------------------------------
+   계약서: docs/ARCHITECTURE.md 5-1.   구성:
+     0. PLAYER_DEF  숫자표 (콤보·스킬·이동 수치 — 숫자만 바꿔도 느낌이 바뀌어요)
+     1. 도우미      입력 버퍼, 동작(act) 시작/진행/끝
+     2. 동작        기본 콤보 3타 / 점프 공격 / 스킬 3개
+     3. 이벤트      tick / update / onHit / onDeath / onLand
+     4. 그리기      포즈 계산 → 귀여운 몸 그리기 → 칼 궤적·스킬 이펙트
+     5. 공개 API    Player.create / revive / heal
+   ※ 전역 이름은 PLAYER_DEF 와 Player 두 개뿐입니다. 나머지는 모두 함수 안에 숨겼어요.
+   ※ 다른 모듈(Enemies, Stage, UI …)은 한 번도 부르지 않아요. 적은 Entities 목록에서 team 으로만 찾습니다.
+   ========================================================================== */
+
+// ===== 0. 숫자표 — 프레임 = 1/60초 =====
+//   각도(swing)는 라디안: 0 = 앞, 양수 = 아래쪽(시계 방향), -1.57 = 바로 위, -3.14 = 뒤
+const PLAYER_DEF = {
+  // ----- 몸과 움직임 -----
+  maxHp: 100, atk: 6,                    // 체력 / 공격력 (모든 피해 = atk × 배율, ±10% 흔들림은 커널이 계산)
+  w: 40, h: 80,
+  walkSpeed: 4, depthSpeed: 3,           // 걷기: 좌우 4px/프레임, 깊이 3px/프레임
+  jumpSpeed: 11,                         // 점프 첫 속도 → 높이 약 106px, 공중에 약 38프레임
+  airSpeedMul: 0.7,                      // 공중에서는 70% 속도로 방향 조종
+  hurtMinStun: 10,                       // 맞으면 적어도 이만큼은 움찔 (피격 모습이 보이도록)
+  reviveInvuln: 120,                     // 부활 직후 무적 프레임
+
+  // ----- 입력 -----
+  inputBuffer: 8,       // 점프/스킬 키를 조금 일찍 눌러도 기억해 주는 프레임 수
+  chainFrac: 0.4,       // 공격 동작의 "마지막 40%" 에 누른 공격 키는 다음 타로 이어짐 (너무 일찍 누른 건 무시)
+  linkWindow: 10,       // 한 타가 끝난 뒤 이 프레임 안에 누르면 콤보가 계속됨 (안 누르면 1타부터 다시)
+
+  // ----- 기본 콤보 3타: 준비(startup) → 판정 ON(active) → 후딜(recovery) -----
+  //   mult 배율 / reach 사거리(px) / depth 깊이 허용 / knock 넉백 / stun 경직 / freeze 히트스톱 / launch 띄우기
+  //   lunge: 칼을 휘두르며 앞으로 살짝 파고드는 속도(px/프레임)와 구간(lungeFrom ~ lungeTo 프레임)
+  //   swing: 칼이 지나가는 각도 from → to, r 궤적 반지름, thick 궤적 두께 비율 (눈에 보이는 연출 전용)
+  combo: [
+    { name: '가로 베기',                                  // 1타
+      startup: 5, active: 3, recovery: 9,
+      mult: 1.0, reach: 76, depth: 30,
+      knock: 3.5, stun: 24, freeze: 3, shake: 0, launch: 0,
+      sfx: 'hit', fx: 'spark',
+      lunge: 3.2, lungeFrom: 2, lungeTo: 8, lean: 0.2,
+      swing: { from: -1.9, to: 0.35, r: 66, thick: 0.5 } },
+    { name: '되돌려 베기',                                // 2타
+      startup: 5, active: 3, recovery: 9,
+      mult: 1.0, reach: 76, depth: 30,
+      knock: 3.5, stun: 24, freeze: 3, shake: 0, launch: 0,
+      sfx: 'hit', fx: 'spark',
+      lunge: 3.2, lungeFrom: 2, lungeTo: 8, lean: 0.2,
+      swing: { from: 0.75, to: -1.9, r: 66, thick: 0.5 } },
+    { name: '내려 찍기',                                  // 3타: 띄우기 + 큰 넉백
+      startup: 9, active: 4, recovery: 17,
+      mult: 1.5, reach: 88, depth: 34,
+      knock: 9, stun: 30, freeze: 6, shake: 4, launch: 7.5,
+      sfx: 'hitBig', fx: 'star', jumpCancel: true,     // 적을 띄웠다면(맞혔다면) 후딜 도중 점프로 곧바로 이어갈 수 있음 → 공중 콤보!
+      lunge: 4, lungeFrom: 5, lungeTo: 13, lean: 0.34,
+      swing: { from: -2.9, to: 1.0, r: 72, thick: 0.55 } },
+  ],
+
+  // ----- 점프 공격: 공중에서 공격 키 → 아래로 내려찍기 -----
+  //   below/above: 판정 높이 범위 (내 발 아래 below ~ 머리 위 above). 이 범위 덕에 띄운 적도, 바닥의 적도 맞아요
+  //   dive: 내려찍는 동안 추가 중력 / steer: 휘두르는 중 공중 조종 배율
+  air: {
+    name: '내려 베기',
+    startup: 4, active: 10, recovery: 6,
+    mult: 1.2, reach: 72, depth: 32, below: 55, above: 25,
+    knock: 5, stun: 20, freeze: 3, shake: 0, launch: 0,
+    sfx: 'hit', fx: 'spark',
+    dive: 0.25, steer: 0.5, lean: 0.3,
+    swingStart: 2, swingEnd: 8,
+    swing: { from: -2.4, to: 1.1, r: 66, thick: 0.5 },
+  },
+
+  // ----- 스킬 3개 (쿨타임식, MP 없음). HUD 는 p.skills 의 { id, key, label, icon, cdMax, cd } 를 읽어요 -----
+  skills: [
+    { id: 'spin', key: 'A', code: 'KeyA', label: '회오리 베기', icon: '🌪️', cdMax: 300, shout: '회오리!',
+      sfx: 'skill1',
+      startup: 7, hits: 4, interval: 6, recovery: 14,      // 6프레임마다 한 번씩 4번 휘두름
+      hitMult: 0.5,                                        // 한 번에 0.5배 × 4번 = 합계 2.0배
+      rx: 104, depth: 44, knock: 1.6, stun: 26, freeze: 2, fx: 'spark', hitSfx: 'hit',
+      last: { knock: 7, launch: 6.5, freeze: 5, shake: 3, fx: 'star', hitSfx: 'hitBig' } },   // 마지막 한 바퀴는 날려 버림
+    { id: 'thrust', key: 'S', code: 'KeyS', label: '돌진 찌르기', icon: '💨', cdMax: 480, shout: '돌진!',
+      sfx: 'skill2',
+      startup: 9, dash: 13, recovery: 15, speed: 11.5,     // 웅크림 9 → 13프레임 돌진 → 후딜 15
+      mult: 2.5, reach: 62, depth: 34,                     // 지나가는 적을 관통 (한 번씩만 맞음)
+      knock: 7, launch: 5, stun: 28, freeze: 5, shake: 4, fx: 'star', hitSfx: 'hitBig' },
+    { id: 'nova', key: 'D', code: 'KeyD', label: '별빛 대폭발', icon: '🌟', cdMax: 1800, shout: '별빛 대폭발!',
+      sfx: 'ultimate',
+      charge: 26, recovery: 28,                            // 26프레임 기를 모은 뒤 펑! (발동 내내 무적)
+      mult: 5.0, knock: 9, launch: 9, stun: 60,            // 카메라 화면 안의 모든 적을 한 번씩
+      freeze: 12, shake: 14, shakeFrames: 26, flash: 16, flashColor: '#fff6c8',
+      invulnAfter: 20 },                                   // 끝난 뒤에도 잠깐 더 무적
+  ],
+};
+
+const Player = (() => {
+  const D = PLAYER_DEF;
+  const TAU = Math.PI * 2;
+  const INK = COLORS.ink;
+  const REST = -1.2;                     // 칼을 평소에 든 각도 (위쪽 앞)
+  const ARM_REST = 0.55;                 // 평소에 팔이 향하는 각도 (앞쪽 아래 → 손이 얼굴을 가리지 않음)
+  const SH = { x: 11, y: -37 };          // 앞쪽 어깨 위치 (발 기준). 칼은 여기서 팔 11 + 칼날 54 만큼 뻗어요
+  const ARM = 11, BLADE = 54;
+  const TRAIL = 7;                       // 칼 궤적이 남는 프레임 수
+  const BUF_KEYS = ['KeyZ', 'KeyX', 'KeyA', 'KeyS', 'KeyD'];
+
+  const easeOut = u => 1 - (1 - u) * (1 - u);
+  const easeIn = u => u * u;
+  const easeInOut = u => (u < 0.5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u));
+  const pos = v => Math.max(0.01, v);   // 캔버스 반지름은 음수면 오류가 나서 항상 양수로
+
+  const isAir = p => p.z > 0 || p.vz > 0;
+  const heldDir = () => (Input.isDown('ArrowRight') ? 1 : 0) - (Input.isDown('ArrowLeft') ? 1 : 0);
+  const heldDepth = () => (Input.isDown('ArrowDown') ? 1 : 0) - (Input.isDown('ArrowUp') ? 1 : 0);
+  const totalOf = d => d.startup + d.active + d.recovery;
+  const swingStart = d => (d.swingStart !== undefined ? d.swingStart : Math.max(0, d.startup - 2));
+  const swingEnd = d => (d.swingEnd !== undefined ? d.swingEnd : d.startup + d.active + 1);
+
+  // ===== 1. 입력 버퍼 =====
+  //   점프/스킬/공격 키를 누르면 inputBuffer 프레임 동안 "눌렀음"을 기억해요. 쓰면 지워짐(want)
+  function want(p, code) {
+    if (p.buf[code] > 0) { p.buf[code] = 0; return true; }
+    return false;
+  }
+
+  // 앞에 (몸이 닿을 만큼) 가까운 적이 있으면 더 이상 파고들지 않음 → 겹쳐 서는 일이 없어요
+  function blockedAhead(p) {
+    for (const e of Entities.list) {
+      if (e.team !== 'enemy' || e.dead || e.untargetable || e._removed) continue;
+      const dx = (e.x - p.x) * p.face;
+      if (dx > 0 && dx < (p.w + e.w) / 2 + 4 && Math.abs(e.y - p.y) < 22 && Math.abs(e.z - p.z) < 60) return true;
+    }
+    return false;
+  }
+
+  // 모든 공격이 공통으로 쓰는 판정 필드
+  function hbFields(p, d, hitSet) {
+    return { damage: p.atk * d.mult, depth: d.depth, knock: d.knock, stun: d.stun, freeze: d.freeze,
+             shake: d.shake, launch: d.launch, sfx: d.sfx, fx: d.fx, hitSet };
+  }
+
+  // ===== 2. 동작(act) =====
+  //   p.act = { type, def, t, total, hitSet, ... }  t = 이 동작이 시작된 뒤 처리한 프레임 수 (0 부터)
+  //   type: 'combo'(기본 3타) | 'air'(점프 공격) | 'spin' | 'thrust' | 'nova'(스킬)
+  const ACT = {
+    combo(p, a) {
+      const d = a.def, t = a.t;
+      if (t === Math.max(0, d.startup - 1)) SFX.play('swing', { rate: a.step === 2 ? 0.8 : 1 + a.step * 0.12 });
+      if (t >= d.lungeFrom && t < d.lungeTo && !blockedAhead(p)) p.vx = p.face * d.lunge;      // 앞으로 살짝 파고듦
+      if (t >= d.startup && t < d.startup + d.active) {
+        const hits = Combat.applyHitbox(Combat.frontBox(p, d.reach, hbFields(p, d, a.hitSet)));   // 판정 ON 구간: 매 프레임 같은 hitSet
+        if (hits.length) a.connected = true;
+      }
+      if (t >= a.winStart && Input.wasPressed('KeyZ')) a.queued = true;                        // 후딜 후반에 누르면 다음 타 예약
+    },
+
+    air(p, a) {
+      const d = a.def, t = a.t;
+      if (t === 0 && p.vz > 2) p.vz = 2;                                  // 올라가던 중이면 훅 꺾어 내려찍는 느낌
+      if (t === Math.max(0, d.startup - 1)) SFX.play('swing', { rate: 1.15 });
+      if (t >= d.startup) p.vz -= d.dive;                                 // 내려찍는 동안 조금 더 빨리 떨어짐
+      p.vx = heldDir() * D.walkSpeed * d.steer;                           // 휘두르는 중에도 살짝 조종 (방향은 그대로)
+      p.vy = heldDepth() * D.depthSpeed * d.steer;
+      if (t >= d.startup && t < d.startup + d.active) {
+        Combat.applyHitbox(Combat.frontBox(p, d.reach, Object.assign(hbFields(p, d, a.hitSet), { zMin: p.z - d.below, zMax: p.z + p.h + d.above })));
+      }
+    },
+
+    spin(p, a) {                                                          // 회오리 베기: 6프레임마다 한 바퀴, 360°
+      const d = a.def, t = a.t;
+      if (a.hover) p.vz = 0;                                              // 공중에서 쓰면 그 자리에 떠서 돌아요
+      const rel = t - d.startup;
+      if (rel >= 0 && rel % d.interval === 0 && rel / d.interval < d.hits) {
+        const k = rel / d.interval, last = k === d.hits - 1;
+        SFX.play('swing', { rate: 0.9 + k * 0.1 });
+        const base = { damage: p.atk * d.hitMult, depth: d.depth, knock: d.knock, stun: d.stun, freeze: d.freeze, shake: 0, launch: 0,
+                       fx: d.fx, sfx: d.hitSfx, zMin: p.z - 10, zMax: p.z + p.h + 30 };
+        Combat.applyHitbox(Combat.aroundBox(p, d.rx, last ? Object.assign(base, d.last) : base));   // 바퀴마다 새 hitSet → 다단히트
+      }
+    },
+
+    thrust(p, a) {                                                        // 돌진 찌르기
+      const d = a.def, t = a.t, dashEnd = d.startup + d.dash;
+      if (a.hover) p.vz = 0;
+      if (t >= d.startup && t < dashEnd) {
+        p.vx = p.face * d.speed;
+        Combat.applyHitbox(Combat.frontBox(p, d.reach, { damage: p.atk * d.mult, depth: d.depth, knock: d.knock, stun: d.stun,
+          freeze: d.freeze, shake: d.shake, launch: d.launch, sfx: d.hitSfx, fx: d.fx, hitSet: a.hitSet }));   // 하나의 hitSet = 관통하며 한 번씩
+        if ((t - d.startup) % 2 === 0) pushGhost(p);
+        if ((t - d.startup) % 3 === 0) FX.burst(p.x - p.face * 14, p.y - p.z - 4, { kind: 'puff', count: 2, size: 13, life: 16, speed: 1.2 });
+      } else if (t >= dashEnd) {
+        p.vx = p.face * d.speed * Math.pow(0.6, t - dashEnd + 1);         // 미끄러지며 멈춤
+      }
+    },
+
+    nova(p, a) {                                                          // 별빛 대폭발
+      const d = a.def, t = a.t;
+      if (a.hover) p.vz = 0;
+      if (t === d.charge) {
+        // 카메라에 보이는 가로 범위 전부, 깊이·높이 제한 없음. 한 번씩만 (hitSet)
+        Combat.applyHitbox(Combat.aroundBox(p, W / 2, { x1: Cam.x, x2: Cam.x + W, depth: Infinity, zMin: -Infinity, zMax: Infinity,
+          damage: p.atk * d.mult, knock: d.knock, launch: d.launch, stun: d.stun, freeze: 0, shake: 0, sfx: '', fx: 'star', hitSet: a.hitSet }));
+        FX.flash(d.flashColor, d.flash);
+        FX.freeze(d.freeze);
+        FX.shake(d.shake, d.shakeFrames);
+        const cy = p.y - p.z - p.h * 0.5;
+        FX.burst(p.x, cy, { kind: 'star', count: 26, speed: 10, life: 55, size: 17 });
+        FX.burst(p.x, cy, { kind: 'ring', count: 3, size: 130, life: 26, colors: [COLORS.yellow, COLORS.white, COLORS.pink] });
+        FX.burst(p.x, cy, { kind: 'spark', count: 16, speed: 8, life: 28, size: 15 });
+      }
+      if (t > d.charge && t % 4 === 0 && t < d.charge + 22) {               // 폭발 뒤 반짝이 비
+        FX.burst(p.x + ((t * 37) % 140) - 70, p.y - p.z - 60 - ((t * 53) % 60), { kind: 'spark', count: 2, speed: 1.2, life: 26, size: 11 });
+      }
+    },
+  };
+
+  function stepAct(p, a) { ACT[a.type](p, a); a.t++; }
+
+  // 동작이 끝났을 때. chain=true 면 곧바로 다음 타가 이어지니 콤보 기억을 유지
+  function endAct(p, chain) {
+    const a = p.act;
+    p.act = null;
+    if (a && a.type === 'combo') p.link = D.linkWindow;      // 콤보 이을 수 있는 시간 시작
+    else { p.link = 0; p.step = -1; }
+    if (a && a.type === 'combo' && !chain) p.buf.KeyZ = 0;    // 너무 일찍 눌렀다가 남은 입력이 새어 나오지 않게
+    p.state = isAir(p) ? 'jump' : 'idle';
+  }
+
+  function startCombo(p) {
+    const next = (p.link > 0 && p.step >= 0 && p.step < D.combo.length - 1) ? p.step + 1 : 0;
+    const d = D.combo[next], total = totalOf(d);
+    const dx = heldDir(); if (dx) p.face = dx;                // 누른 방향으로 몸을 돌려서 공격 (뒤의 적도 칠 수 있게)
+    p.act = { type: 'combo', def: d, step: next, t: 0, total, hitSet: new Set(), queued: false, winStart: Math.floor(total * (1 - D.chainFrac)) };
+    p.step = next; p.link = 0; p.state = 'attack';
+    p.buf.KeyZ = 0;
+    stepAct(p, p.act);                                        // 누른 그 프레임부터 바로 시작 (반응 빠르게)
+  }
+
+  function startAir(p) {
+    const d = D.air;
+    p.act = { type: 'air', def: d, t: 0, total: totalOf(d), hitSet: new Set() };
+    p.link = 0; p.step = -1; p.state = 'attack';
+    p.buf.KeyZ = 0;
+    stepAct(p, p.act);
+  }
+
+  function startSkill(p, i, air) {
+    const def = D.skills[i], s = p.skills[i];
+    s.cd = s.cdMax;                                           // 쿨타임은 발동하는 순간 시작
+    const total = def.id === 'spin' ? def.startup + def.hits * def.interval + def.recovery
+      : def.id === 'thrust' ? def.startup + def.dash + def.recovery : def.charge + def.recovery;
+    p.act = { type: def.id, def, t: 0, total, hitSet: new Set(), hover: air };
+    p.link = 0; p.step = -1; p.state = 'skill';
+    const dx = heldDir(); if (dx) p.face = dx;
+    if (def.id === 'nova') p.invuln = Math.max(p.invuln, total + def.invulnAfter);   // 궁극기: 발동 내내 무적
+    SFX.play(def.sfx);
+    FX.popup(p.x, p.y - p.z - p.h - 16, def.shout, { color: COLORS.yellow, size: def.id === 'nova' ? 34 : 26, life: 46 });
+    stepAct(p, p.act);
+  }
+
+  function jump(p) {
+    p.vz = D.jumpSpeed;                                       // 이 프레임의 물리 적분에서 바로 떠오름
+    p.sq = -0.2;                                              // 위로 쭉 늘어나는 모습
+    p.link = 0; p.step = -1;
+    SFX.play('jump');
+    FX.burst(p.x, p.y - 2, { kind: 'puff', count: 3, size: 14, life: 16, speed: 1.2 });
+  }
+
+  function pushGhost(p) {                                     // 돌진 잔상
+    p.ghosts.push({ x: p.x, y: p.y, z: p.z, face: p.face, age: 0, pose: computePose(p) });
+    if (p.ghosts.length > 7) p.ghosts.shift();
+  }
+
+  // ===== 3. 매 프레임 =====
+  // tick: 항상 호출 (경직·죽음 중에도) — 입력 기억, 쿨타임, 잔상, 애니메이션 시계
+  function tick(p) {
+    p.animT++;
+    if (p.dead) {
+      p.downT++;
+      for (const k of BUF_KEYS) p.buf[k] = 0;
+    } else {
+      for (const k of BUF_KEYS) {
+        if (Input.wasPressed(k)) p.buf[k] = D.inputBuffer;
+        else if (p.buf[k] > 0) p.buf[k]--;
+      }
+    }
+    for (const s of p.skills) if (s.cd > 0) s.cd--;           // 쿨타임은 스턴 중에도 흘러요
+    if (p.sq) { p.sq *= 0.8; if (Math.abs(p.sq) < 0.01) p.sq = 0; }
+    if (p.hurtT > 0) p.hurtT--;
+    if (p.reviveT > 0) p.reviveT--;
+    for (let i = p.ghosts.length - 1; i >= 0; i--) if (++p.ghosts[i].age > 10) p.ghosts.splice(i, 1);
+    if (p.state === 'hurt' && !p.dead && p.stun <= 0) p.state = isAir(p) ? 'jump' : 'idle';
+  }
+
+  // update: 살아 있고 경직이 아닐 때만 — 조작
+  function update(p) {
+    if (p.state === 'hurt') p.state = isAir(p) ? 'jump' : 'idle';
+    const a = p.act;
+    if (a) {
+      if (a.type === 'combo' && a.def.jumpCancel && a.connected && a.t > a.def.startup && !isAir(p) && want(p, 'KeyX')) {
+        endAct(p, false); jump(p); move(p, true);              // 띄운 뒤 점프로 이어가기 (후딜 취소)
+        return;
+      }
+      if (a.t < a.total) { stepAct(p, a); return; }
+      // 동작이 끝나는 프레임: 예약된 입력(또는 바로 이 프레임에 누른 공격 키)이 있으면 틈 없이 다음 타로
+      const chain = a.type === 'combo' && (a.queued || Input.wasPressed('KeyZ'));
+      endAct(p, chain);
+      if (chain) { startCombo(p); return; }
+    }
+    free(p);
+  }
+
+  // 자유 상태(서기/걷기/점프 중): 스킬 → 공격 → 점프 → 이동
+  function free(p) {
+    let air = isAir(p);
+    if (p.link > 0 && --p.link === 0) p.step = -1;            // 콤보 이을 시간이 지나면 1타부터 다시
+
+    for (let i = 0; i < p.skills.length; i++) {
+      if (p.skills[i].cd <= 0 && want(p, D.skills[i].code)) { startSkill(p, i, air); return; }
+    }
+    if (want(p, 'KeyZ')) {
+      if (air) startAir(p); else startCombo(p);
+      return;
+    }
+    if (!air && want(p, 'KeyX')) { jump(p); air = true; }
+    move(p, air);
+  }
+
+  // 방향키 이동 (공중이면 70% 속도) + 상태 정하기
+  function move(p, air) {
+    const dx = heldDir(), dy = heldDepth();
+    const mul = air ? D.airSpeedMul : 1;
+    p.vx = dx * D.walkSpeed * mul;                            // 한 프레임짜리 이동 의도 (커널이 적분)
+    p.vy = dy * D.depthSpeed * mul;
+    if (dx) p.face = dx;
+    p.state = air ? 'jump' : (dx || dy ? 'walk' : 'idle');
+    if (p.state === 'walk' && p.animT % 13 === 0) FX.burst(p.x - p.face * 12, p.y - 2, { kind: 'puff', count: 1, size: 9, life: 14, speed: 0.6 });
+  }
+
+  // 맞았을 때 (커널이 stun/넉백을 이미 줬음)
+  function onHit(p, hb) {
+    p.act = null; p.step = -1; p.link = 0;
+    for (const k of BUF_KEYS) p.buf[k] = 0;                   // 맞는 순간 눌러 둔 키는 버림 (엉뚱한 스킬 발동 방지)
+    if (!p.superArmor) p.stun = Math.max(p.stun, D.hurtMinStun);
+    p.state = 'hurt';
+    p.hurtT = 12; p.sq = 0.3;
+    p.hurtSign = (p.kx * p.face) > 0 ? 1 : -1;                // 뒤로 밀렸으면 몸이 뒤로 젖혀짐
+    SFX.play('hurt');
+  }
+
+  function onDeath(p) {
+    p.act = null; p.step = -1; p.link = 0;
+    p.state = 'down'; p.downT = 0;
+    if (p.z <= 0) p.vz = 5;                                   // 뿅 하고 한 번 튕겨 쓰러짐
+    FX.burst(p.x, p.y - p.z - 50, { kind: 'star', count: 8, speed: 4, life: 40, size: 13 });
+  }
+
+  function onLand(p) {
+    SFX.play('land');
+    FX.burst(p.x, p.y - 2, { kind: 'puff', count: 4, size: 15, life: 18, speed: 1.6 });
+    p.sq = Math.max(p.sq, 0.3);                               // 납작하게 착지
+    if (p.dead) return;
+    if (p.act && p.act.type === 'air') endAct(p, false);      // 점프 공격은 착지하면 끝
+    else if (p.state === 'jump') p.state = 'idle';
+  }
+
+  // ===== 4. 그리기 =====
+  const SKIN = '#ffe3c6', HAIR = '#6b4bc9', TUNIC = COLORS.sky, BELT = COLORS.yellow, BOOT = COLORS.purple, PANTS = '#4b3a8f';
+  const BAND = COLORS.red, GRIP = '#b4513b', BLADE_C = '#f4fbff';
+
+  // 칼 각도 (동작 t 프레임에서). 준비(뒤로 젖힘) → 휘두름 → 머물다가 → 원래 자세로
+  function swordAt(d, t) {
+    const sw = d.swing, s1 = swingStart(d), s2 = swingEnd(d), total = totalOf(d);
+    if (t < s1) return lerp(REST, sw.from, easeOut(clamp(t / Math.max(1, s1), 0, 1)));
+    if (t <= s2) return lerp(sw.from, sw.to, easeInOut(clamp((t - s1) / Math.max(1, s2 - s1), 0, 1)));
+    const hold = s2 + (total - s2) * 0.35;
+    if (t < hold) return sw.to;
+    return lerp(sw.to, REST, easeInOut(clamp((t - hold) / Math.max(1, total - hold), 0, 1)));
+  }
+
+  // 포즈: 상태와 시간으로부터 "지금 어떤 모습인지" 숫자로 정리 (그리기와 이펙트가 같이 씀)
+  function computePose(p) {
+    const t = p.animT, a = p.act, air = isAir(p);
+    const P = { sx: 1, sy: 1, lean: 0, bob: 0, jx: 0, flip: 1, fall: 0,
+      legs: [{ x: -2, lift: 0 }, { x: 3, lift: 0 }], armBack: 1.75, sword: REST, arm: ARM_REST, swordShow: true,
+      eyes: 'open', mouth: 'smile', band: 0.3 };
+
+    if (p.dead || p.state === 'down') {                       // 쓰러짐: 빙글빙글 눈, 별이 빙글빙글
+      P.fall = easeOut(clamp(p.downT / 16, 0, 1));
+      P.eyes = 'swirl'; P.mouth = 'wavy'; P.swordShow = false; P.armBack = 2.5;
+      P.legs = [{ x: -6, lift: 0 }, { x: 7, lift: 0 }];
+    } else if (p.state === 'hurt') {                          // 아야! 찡그린 눈, 뒤로 젖혀짐
+      P.lean = 0.32 * (p.hurtSign > 0 ? 1 : -1);
+      P.eyes = 'squint'; P.mouth = 'o'; P.sword = 1.15; P.arm = null; P.armBack = -1.0;
+      P.legs = [{ x: -9, lift: 0 }, { x: 8, lift: air ? 4 : 0 }];
+      P.jx = p.hurtT > 0 ? (p.hurtT % 2 ? 2 : -2) * (p.hurtT / 12) : 0;
+      P.band = 0.7;
+    } else if (a && (p.state === 'attack' || p.state === 'skill')) {
+      poseAct(p, a, P);
+    } else if (p.cheer) {                                     // 만세 (스테이지 클리어 때 stage 가 p.cheer = true)
+      const hop = Math.abs(Math.sin(t * 0.18));
+      P.bob = -hop * 8; P.sword = -1.4; P.arm = -0.9; P.armBack = -2.2; P.eyes = 'happy'; P.mouth = 'open'; P.band = 0.2;
+      P.legs = [{ x: -5, lift: hop * 4 }, { x: 6, lift: hop * 4 }];
+    } else if (air) {                                         // 점프: 올라갈 땐 길쭉, 내려올 땐 통통
+      const up = p.vz > 0.5;
+      P.sy = up ? 1.12 : 1.04; P.sx = up ? 0.9 : 0.97;
+      P.legs = up ? [{ x: -4, lift: 7 }, { x: 6, lift: 4 }] : [{ x: -8, lift: 3 }, { x: 9, lift: 5 }];
+      P.armBack = up ? -2.3 : -0.5; P.sword = up ? -1.45 : -0.9; P.arm = up ? -0.9 : 0.3;
+      P.mouth = 'o'; P.band = up ? 0.05 : 0.95; P.lean = up ? 0.05 : -0.04;
+    } else if (p.state === 'walk') {
+      const ph = t * 0.36, s = Math.sin(ph), c = Math.cos(ph);
+      P.legs = [{ x: s * 7, lift: Math.max(0, c) * 4.5 }, { x: -s * 7, lift: Math.max(0, -c) * 4.5 }];
+      P.bob = -Math.abs(c) * 2.4; P.lean = 0.08; P.armBack = 1.75 + s * 0.55; P.sword = REST + s * 0.07; P.arm = ARM_REST + s * 0.12; P.band = 0.6;
+    } else {                                                  // 서 있기: 숨쉬듯 통통
+      const br = Math.sin(t * 0.09);
+      P.bob = br * 0.9; P.sy = 1 + br * 0.02; P.sx = 1 - br * 0.012; P.sword = REST + br * 0.04; P.arm = ARM_REST + br * 0.03; P.armBack = 1.75 + br * 0.05;
+      if (t % 210 < 6) P.eyes = 'blink';
+    }
+    if (!p.dead && p.state !== 'skill') { P.sx *= 1 + p.sq * 0.9; P.sy *= 1 - p.sq * 0.9; }    // 착지·점프·피격 눌림/늘어남
+    return P;
+  }
+
+  function poseAct(p, a, P) {
+    const d = a.def, t = a.t;
+    P.arm = null;                                                // 공격 중에는 팔과 칼이 한 줄로 쭉
+    if (a.type === 'combo' || a.type === 'air') {
+      const s1 = swingStart(d), s2 = swingEnd(d), total = a.total;
+      P.sword = swordAt(d, t);
+      const u = clamp((t - s1) / Math.max(1, s2 - s1), 0, 1);
+      if (t < s1) P.lean = lerp(0, -0.14, clamp(t / Math.max(1, s1), 0, 1));                  // 준비: 몸을 살짝 뒤로
+      else if (t <= s2) P.lean = lerp(-0.14, d.lean, easeOut(u));                              // 휘두름: 앞으로 쏠림
+      else P.lean = lerp(d.lean, 0.04, clamp((t - s2) / Math.max(1, total - s2), 0, 1));       // 후딜: 원래대로
+      const swinging = t >= s1 && t <= s2 + 2;
+      P.sx = swinging ? 1.07 : 1; P.sy = swinging ? 0.95 : 1;
+      P.legs = a.type === 'air' ? [{ x: -5, lift: 7 }, { x: 7, lift: 5 }] : [{ x: -9, lift: 0 }, { x: 10, lift: 0 }];
+      P.armBack = a.type === 'air' ? -0.6 : 2.5;
+      P.eyes = 'determined'; P.mouth = swinging ? 'open' : 'flat'; P.band = 0.85;
+    } else if (a.type === 'spin') {
+      const ph = t * 0.62, c = Math.cos(ph);
+      P.flip = c >= 0 ? 1 : -1; P.sx = 0.55 + 0.45 * Math.abs(c);                              // 빙글 도는 느낌 (옆모습 ↔ 뒷모습)
+      P.swordShow = false; P.armBack = Math.PI; P.sword = 0;                                  // 팔을 쭉 펴고 (칼은 이펙트가 그려요)
+      P.bob = -3 - Math.sin(t * 0.5) * 2; P.legs = [{ x: -3, lift: 3 }, { x: 3, lift: 3 }];
+      P.eyes = 'determined'; P.mouth = 'open'; P.band = 1;
+    } else if (a.type === 'thrust') {
+      const dashEnd = d.startup + d.dash;
+      if (t < d.startup) {                                                                     // 웅크리고 칼을 뒤로 당김
+        const k = easeOut(clamp(t / d.startup, 0, 1));
+        P.sy = lerp(1, 0.84, k); P.sx = lerp(1, 1.1, k); P.lean = -0.25 * k; P.bob = 1 * k;
+        P.sword = lerp(REST, -2.85, k); P.armBack = 2.2;
+        P.legs = [{ x: -11, lift: 0 }, { x: 10, lift: 0 }]; P.eyes = 'determined'; P.mouth = 'flat'; P.band = 0.4;
+      } else if (t < dashEnd) {                                                                // 쭉 뻗어 돌진
+        P.lean = 0.5; P.sx = 1.15; P.sy = 0.9; P.sword = -0.04; P.armBack = 2.9;
+        P.legs = [{ x: -13, lift: 6 }, { x: -7, lift: 2 }]; P.eyes = 'determined'; P.mouth = 'open'; P.band = 1;
+      } else {                                                                                 // 멈추며 자세 풀기
+        const k = clamp((t - dashEnd) / Math.max(1, a.total - dashEnd), 0, 1);
+        P.lean = lerp(0.5, 0.04, easeOut(k)); P.sword = lerp(-0.04, REST, easeInOut(k)); P.sx = lerp(1.12, 1, k); P.sy = lerp(0.92, 1, k);
+        P.legs = [{ x: -10, lift: 0 }, { x: 8, lift: 0 }]; P.armBack = 2.5; P.eyes = 'determined'; P.mouth = 'flat'; P.band = 0.7;
+      }
+    } else if (a.type === 'nova') {
+      if (t < d.charge) {                                                                      // 번쩍이는 힘 모으기: 칼을 하늘로
+        const k = t / d.charge;
+        P.sword = -1.57; P.armBack = -2.0; P.sy = 1 + Math.sin(t * 0.6) * 0.03 + k * 0.06; P.sx = 1 - k * 0.04;
+        P.jx = Math.sin(t * 2.1) * k * 1.3; P.bob = -k * 3;
+        P.legs = [{ x: -8, lift: 0 }, { x: 8, lift: 0 }]; P.eyes = 'determined'; P.mouth = 'open'; P.band = 0.2;
+      } else {                                                                                 // 펑! 두 팔을 활짝
+        const k = clamp((t - d.charge) / Math.max(1, a.total - d.charge), 0, 1);
+        P.sword = lerp(-1.1, -0.6, k); P.armBack = lerp(-2.6, 1.6, k); P.bob = -8 * (1 - k); P.sy = lerp(1.1, 1, k); P.sx = lerp(0.95, 1, k);
+        P.legs = [{ x: -8, lift: 4 * (1 - k) }, { x: 8, lift: 4 * (1 - k) }]; P.eyes = k < 0.7 ? 'happy' : 'open'; P.mouth = 'open'; P.band = 0.3;
+      }
+    }
+  }
+
+  // ---- 작은 그리기 도구 ----
+  function limb(ctx, x0, y0, x1, y1, w, fill, line) {            // 굵은 선 두 번 = 윤곽선 있는 통통한 팔다리
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = line; ctx.lineWidth = w + 5.5;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    ctx.strokeStyle = fill; ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    ctx.strokeStyle = line;                                      // 이어서 그리는 도형이 윤곽선 색을 그대로 쓰도록 되돌려 둠
+  }
+  function starPath(ctx, x, y, ro, ri, rot, n) {
+    n = n || 5;
+    ctx.beginPath();
+    for (let i = 0; i < n * 2; i++) {
+      const r = i % 2 ? ri : ro, ang = (rot || 0) - Math.PI / 2 + i * Math.PI / n;
+      if (i === 0) ctx.moveTo(x + Math.cos(ang) * r, y + Math.sin(ang) * r); else ctx.lineTo(x + Math.cos(ang) * r, y + Math.sin(ang) * r);
+    }
+    ctx.closePath();
+  }
+  function spiral(ctx, cx, cy, r, turn) {
+    ctx.beginPath();
+    for (let i = 0; i <= 22; i++) {
+      const a = turn + i * 0.62, rr = r * i / 22;
+      if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+    }
+    ctx.stroke();
+  }
+  // 어깨 위치: 몸이 기울면(lean) 어깨도 같이 움직여요. side +1 앞쪽, -1 뒤쪽
+  function shoulderOf(P, side) {
+    const x = side > 0 ? SH.x : -9, y = SH.y + 20;                 // 엉덩이(0,-20) 기준
+    const c = Math.cos(P.lean), s = Math.sin(P.lean);
+    return { x: x * c - y * s, y: x * s + y * c - 20 + P.bob };
+  }
+
+  // 손 위치 (팔이 향하는 쪽으로 어깨에서 ARM 만큼). 칼날은 손에서 P.sword 방향으로 BLADE 만큼
+  function handOf(P) {
+    const sf = shoulderOf(P, 1), a = P.arm === null || P.arm === undefined ? P.sword : P.arm;
+    return { x: sf.x + Math.cos(a) * ARM, y: sf.y + Math.sin(a) * ARM };
+  }
+  function tipOf(P) {
+    const h = handOf(P);
+    return { x: h.x + Math.cos(P.sword) * BLADE, y: h.y + Math.sin(P.sword) * BLADE };
+  }
+
+  function drawSword(ctx, hx, hy, ang, F, L) {
+    ctx.save(); ctx.translate(hx, hy); ctx.rotate(ang);
+    ctx.lineWidth = 2.6; ctx.strokeStyle = L; ctx.lineJoin = 'round';
+    Draw.roundRect(ctx, -8, -2.8, 11, 5.6, 2.5); ctx.fillStyle = F(GRIP); ctx.fill(); ctx.stroke();            // 손잡이
+    Draw.roundRect(ctx, 2, -8.5, 5, 17, 2.5); ctx.fillStyle = F(BELT); ctx.fill(); ctx.stroke();               // 가드
+    ctx.beginPath(); ctx.moveTo(7, -4.5); ctx.lineTo(42, -4.2); ctx.quadraticCurveTo(51, -3, BLADE, 0);
+    ctx.quadraticCurveTo(51, 3, 42, 4.2); ctx.lineTo(7, 4.5); ctx.closePath();                                 // 칼날
+    ctx.fillStyle = F(BLADE_C); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = F(TUNIC); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(10, -0.4); ctx.lineTo(44, -0.4); ctx.stroke();   // 하늘색 줄무늬
+    ctx.restore();
+  }
+
+  function drawEyes(ctx, style, F, L) {
+    const ex = [2.5, 13.5], ey = -54;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (let i = 0; i < 2; i++) {
+      const x = ex[i];
+      if (style === 'blink') {
+        ctx.strokeStyle = L; ctx.lineWidth = 2.6;
+        ctx.beginPath(); ctx.moveTo(x - 5, ey); ctx.quadraticCurveTo(x, ey + 3, x + 5, ey); ctx.stroke();
+      } else if (style === 'squint') {                          // > <
+        ctx.strokeStyle = L; ctx.lineWidth = 2.8; ctx.beginPath();
+        if (i === 0) { ctx.moveTo(x - 4, ey - 4.5); ctx.lineTo(x + 3, ey); ctx.lineTo(x - 4, ey + 4.5); }
+        else { ctx.moveTo(x + 4, ey - 4.5); ctx.lineTo(x - 3, ey); ctx.lineTo(x + 4, ey + 4.5); }
+        ctx.stroke();
+      } else if (style === 'happy') {                           // ^ ^
+        ctx.strokeStyle = L; ctx.lineWidth = 2.8;
+        ctx.beginPath(); ctx.moveTo(x - 5, ey + 3); ctx.quadraticCurveTo(x, ey - 6, x + 5, ey + 3); ctx.stroke();
+      } else {                                                  // 동그란 눈: 흰자 + 눈동자 + 반짝이
+        ctx.lineWidth = 2.2; ctx.strokeStyle = L; ctx.fillStyle = F('#fff');
+        ctx.beginPath(); ctx.ellipse(x, ey, 5.6, 7.4, 0, 0, TAU); ctx.fill(); ctx.stroke();
+        if (style === 'swirl') {
+          ctx.lineWidth = 1.7; spiral(ctx, x, ey, 5.2, p0 + i * 2);
+        } else {
+          ctx.fillStyle = L; ctx.beginPath(); ctx.ellipse(x + 1.3, ey + 0.8, 3.5, 5, 0, 0, TAU); ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.beginPath(); ctx.arc(x + 0.3, ey - 2, 1.8, 0, TAU); ctx.fill();
+          ctx.beginPath(); ctx.arc(x + 2.6, ey + 2.6, 0.9, 0, TAU); ctx.fill();
+          if (style === 'determined') {                         // 윗눈꺼풀을 굵게 → 씩씩한 눈매
+            ctx.strokeStyle = L; ctx.lineWidth = 3.6;
+            ctx.beginPath(); ctx.ellipse(x, ey, 5.6, 7.4, 0, Math.PI * 1.08, Math.PI * 1.92); ctx.stroke();
+          }
+        }
+      }
+    }
+  }
+  let p0 = 0;                                                    // 빙글 눈 돌아가는 각도 (draw 마다 갱신)
+
+  function drawMouth(ctx, style, F, L) {
+    ctx.strokeStyle = L; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+    if (style === 'smile') { ctx.beginPath(); ctx.arc(8, -47, 4.2, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke(); }
+    else if (style === 'flat') { ctx.beginPath(); ctx.moveTo(5, -43.5); ctx.quadraticCurveTo(8.5, -42, 12, -44); ctx.stroke(); }
+    else if (style === 'open') {
+      ctx.fillStyle = L; ctx.beginPath(); ctx.ellipse(8.5, -43.5, 4.2, 4.8, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = F(COLORS.pink); ctx.beginPath(); ctx.ellipse(8.5, -41.6, 2.6, 1.8, 0, 0, TAU); ctx.fill();
+    } else if (style === 'o') { ctx.fillStyle = L; ctx.beginPath(); ctx.ellipse(8.5, -43, 2.8, 3.4, 0, 0, TAU); ctx.fill(); }
+    else if (style === 'wavy') {
+      ctx.beginPath(); ctx.moveTo(3, -43); ctx.lineTo(6, -45); ctx.lineTo(9, -42); ctx.lineTo(12, -44.5); ctx.lineTo(14.5, -43); ctx.stroke();
+    }
+  }
+
+  // 몸 전체 그리기. 발 위치(x, y - z)가 원점, 앞(+x) 방향으로 그린 뒤 face 로 좌우 뒤집음
+  //   o: { ghost: '색' (한 색 잔상), alpha, x, y, z, face }
+  function drawHero(ctx, p, P, o) {
+    o = o || {};
+    const ghost = o.ghost || null, white = !ghost && p.flash > 0;
+    const F = c => (ghost || (white ? '#ffffff' : c));
+    const L = ghost || INK;
+    const x = o.x !== undefined ? o.x : p.x, y = o.y !== undefined ? o.y : p.y, z = o.z !== undefined ? o.z : p.z;
+    const face = (o.face !== undefined ? o.face : p.face) * P.flip;
+    p0 = p.animT * 0.25;
+
+    ctx.save();
+    if (o.alpha !== undefined) ctx.globalAlpha *= o.alpha;
+    ctx.translate(x + P.jx, y - z);
+    ctx.scale(face, 1);
+    if (P.fall > 0) { ctx.translate(30 * P.fall, -20 * P.fall); ctx.rotate(-Math.PI / 2 * P.fall); }   // 뒤로 벌러덩
+    ctx.scale(P.sx, P.sy);                                                                            // 발바닥 기준 납작/길쭉
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = L;
+
+    const sb = shoulderOf(P, -1), sf = shoulderOf(P, 1);
+    // 뒤쪽 팔 (몸 뒤)
+    limb(ctx, sb.x, sb.y, sb.x + Math.cos(P.armBack) * ARM, sb.y + Math.sin(P.armBack) * ARM, 8, F(TUNIC), L);
+    ctx.fillStyle = F(SKIN); ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.arc(sb.x + Math.cos(P.armBack) * (ARM + 1), sb.y + Math.sin(P.armBack) * (ARM + 1), 4.6, 0, TAU); ctx.fill(); ctx.stroke();
+    // 다리 + 부츠
+    for (let i = 0; i < 2; i++) {
+      const hx = i === 0 ? -6 : 6, l = P.legs[i];
+      limb(ctx, hx, -20, hx + l.x, -10 - l.lift, 10, F(PANTS), L);
+      ctx.fillStyle = F(BOOT); ctx.lineWidth = 2.8;
+      ctx.beginPath(); ctx.ellipse(hx + l.x + 2.5, -6 - l.lift, 10, 6.4, 0, 0, TAU); ctx.fill(); ctx.stroke();
+      if (!ghost && !white) { ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.ellipse(hx + l.x + 5.5, -9 - l.lift, 3.2, 1.7, 0, 0, TAU); ctx.fill(); }
+    }
+    // 머리띠 꼬리 (머리 뒤쪽에서 휘날림)
+    const kx = -22, ky = -68 + P.bob;
+    const flow = P.band;
+    for (let i = 0; i < 2; i++) {
+      const len = 17 + i * 6, wv = Math.sin(p.animT * 0.22 + i * 1.7) * 3.2;
+      const ex2 = kx - len * (0.35 + 0.65 * flow), ey2 = ky + len * (0.85 - 0.8 * flow) + wv + i * 3;
+      limb(ctx, kx, ky, (kx + ex2) / 2, (ky + ey2) / 2 + wv * 0.4, 5.5, F(BAND), L);
+      limb(ctx, (kx + ex2) / 2, (ky + ey2) / 2 + wv * 0.4, ex2, ey2, 4.5, F(BAND), L);
+    }
+
+    // 윗몸 (몸통 + 머리) — 엉덩이를 축으로 기울고, 위아래로 통통
+    ctx.save();
+    ctx.translate(0, P.bob); ctx.translate(0, -20); ctx.rotate(P.lean); ctx.translate(0, 20);
+    // 몸통 (하늘색 튜닉 + 노란 허리띠)
+    Draw.roundRect(ctx, -13, -46, 26, 27, 11); ctx.fillStyle = F(TUNIC); ctx.fill(); ctx.lineWidth = 3; ctx.stroke();
+    Draw.roundRect(ctx, -13, -31, 26, 6, 3); ctx.fillStyle = F(BELT); ctx.fill(); ctx.lineWidth = 2.2; ctx.stroke();
+    ctx.fillStyle = F(COLORS.pink); ctx.beginPath(); ctx.arc(4, -28, 3.3, 0, TAU); ctx.fill(); ctx.stroke();
+    if (!ghost && !white) { ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.beginPath(); ctx.ellipse(-6, -39, 3, 5, 0.3, 0, TAU); ctx.fill(); }
+    // 머리
+    ctx.beginPath(); ctx.arc(0, -60, 22, 0, TAU); ctx.fillStyle = F(SKIN); ctx.fill();
+    ctx.save();
+    ctx.beginPath(); ctx.arc(0, -60, 22, 0, TAU); ctx.clip();
+    ctx.fillStyle = F(HAIR);                                                                         // 머리카락: 윗머리 + 뒤통수
+    ctx.beginPath();
+    ctx.moveTo(-24, -40); ctx.lineTo(-24, -86); ctx.lineTo(24, -86); ctx.lineTo(24, -64);
+    ctx.lineTo(-3, -64); ctx.quadraticCurveTo(-12, -60, -9, -47); ctx.lineTo(-11, -40); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = F(BAND); ctx.fillRect(-24, -72, 48, 8);                                          // 머리띠
+    ctx.strokeStyle = L; ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.moveTo(-24, -72); ctx.lineTo(24, -72); ctx.moveTo(-24, -64); ctx.lineTo(24, -64); ctx.stroke();
+    ctx.fillStyle = F(COLORS.yellow); ctx.lineWidth = 1.7; starPath(ctx, 9, -68, 5.2, 2.5, 0); ctx.fill(); ctx.stroke();   // 머리띠 별
+    if (!ghost && !white) { ctx.fillStyle = 'rgba(255,255,255,.3)'; ctx.beginPath(); ctx.ellipse(-5, -78, 7, 2.6, -0.2, 0, TAU); ctx.fill(); }
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(0, -60, 22, 0, TAU); ctx.lineWidth = 3; ctx.strokeStyle = L; ctx.stroke();   // 머리 윤곽선
+    ctx.beginPath(); ctx.moveTo(-1, -80); ctx.quadraticCurveTo(-13, -89, -4, -98);                  // 삐죽 머리카락 (살짝 휘어진 한 가닥)
+    ctx.strokeStyle = L; ctx.lineWidth = 7; ctx.stroke();
+    ctx.strokeStyle = F(HAIR); ctx.lineWidth = 3; ctx.stroke(); ctx.strokeStyle = L;
+    drawEyes(ctx, P.eyes, F, L);
+    drawMouth(ctx, P.mouth, F, L);
+    if (!ghost && !white && P.eyes !== 'squint') {                                                   // 볼터치
+      ctx.fillStyle = 'rgba(255,138,216,.55)'; ctx.beginPath(); ctx.ellipse(15, -46.5, 3.8, 2.3, 0, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+
+    // 앞쪽 팔 + 칼 (몸 앞)
+    const hd = handOf(P);
+    const hx = hd.x, hy = hd.y;
+    limb(ctx, sf.x, sf.y, hx, hy, 8, F(TUNIC), L);
+    if (P.swordShow) drawSword(ctx, hx, hy, P.sword, F, L);
+    ctx.fillStyle = F(SKIN); ctx.lineWidth = 2.4; ctx.strokeStyle = L;
+    ctx.beginPath(); ctx.arc(hx, hy, 4.8, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  // 쓰러졌을 때 머리 위를 도는 별 (빙글빙글 어지러움 표시)
+  function drawDizzyStars(ctx, p, P) {
+    const k = P.fall, th = Math.PI / 2 * k;
+    const hx = -60 * Math.sin(th) + 30 * k, hy = -60 * Math.cos(th) - 20 * k;     // 머리 중심 (face 방향 좌표)
+    ctx.save();
+    ctx.translate(p.x, p.y - p.z); ctx.scale(p.face, 1);
+    ctx.lineJoin = 'round'; ctx.strokeStyle = INK; ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      const a = p.animT * 0.1 + i * TAU / 3;
+      const sx = hx + Math.cos(a) * 24, sy = hy - 30 + Math.sin(a) * 7;
+      ctx.fillStyle = i === 1 ? COLORS.pink : COLORS.yellow;
+      starPath(ctx, sx, sy, 7.5, 3.6, a * 0.8); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---- 칼 궤적 (휙!) : 지나간 각도를 초승달 모양으로, 꼬리는 흐려지게 ----
+  function drawSlash(ctx, p, a) {
+    const d = a.def, sw = d.swing, s1 = swingStart(d), s2 = swingEnd(d);
+    const tH = clamp(a.t, s1, s2), tT = clamp(a.t - TRAIL, s1, s2);
+    if (a.t <= s1 || tH - tT < 0.5) return;
+    const aH = swordAt(d, tH), aT = swordAt(d, tT);
+    if (Math.abs(aH - aT) < 0.05) return;
+    const P = computePose(p), sh = shoulderOf(P, 1);
+    const R = sw.r, N = 10, thick = R * (sw.thick || 0.5);
+    ctx.save();
+    ctx.translate(p.x, p.y - p.z); ctx.scale(p.face, 1); ctx.translate(sh.x, sh.y);
+    // 초승달: 하늘색 몸통 위에 바깥쪽을 하얗게 덧칠하고, 바깥 가장자리에 옅은 윤곽선 (밝은 배경에서도 보이게)
+    const layers = [{ rgb: '122,215,240', al: 0.85, tk: 1 }, { rgb: '255,255,255', al: 0.97, tk: 0.42 }];
+    for (const ly of layers) {
+      for (let i = 0; i < N; i++) {
+        const f0 = i / N, f1 = (i + 1) / N;
+        const a0 = lerp(aT, aH, f0), a1 = lerp(aT, aH, Math.min(1, f1 + 0.03));
+        const ri0 = R - thick * ly.tk * Math.pow(f0, 0.85), ri1 = R - thick * ly.tk * Math.pow(f1, 0.85);
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a0) * R, Math.sin(a0) * R); ctx.lineTo(Math.cos(a1) * R, Math.sin(a1) * R);
+        ctx.lineTo(Math.cos(a1) * ri1, Math.sin(a1) * ri1); ctx.lineTo(Math.cos(a0) * ri0, Math.sin(a0) * ri0);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(${ly.rgb},${ly.al * (0.12 + 0.88 * f1)})`;
+        ctx.fill();
+      }
+    }
+    ctx.lineCap = 'round'; ctx.lineWidth = 2.2; ctx.strokeStyle = 'rgba(43,27,58,0.5)';
+    ctx.beginPath();
+    for (let i = 3; i <= N; i++) { const an = lerp(aT, aH, i / N); if (i === 3) ctx.moveTo(Math.cos(an) * (R + 1), Math.sin(an) * (R + 1)); else ctx.lineTo(Math.cos(an) * (R + 1), Math.sin(an) * (R + 1)); }
+    ctx.stroke();
+    // 칼끝의 반짝
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(43,27,58,.6)'; ctx.lineWidth = 1.5;
+    starPath(ctx, Math.cos(aH) * R, Math.sin(aH) * R, 9, 2.6, 0, 4); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---- 회오리: 겹겹이 도는 바람 고리 + 몸 둘레를 도는 칼 (half: 'back' 몸 뒤쪽 / 'front' 몸 앞쪽) ----
+  function drawSpin(ctx, p, a, half) {
+    const k = clamp(a.t / 6, 0, 1) * clamp((a.total - a.t) / 8, 0, 1);
+    if (k <= 0) return;
+    ctx.save();
+    ctx.translate(p.x, p.y - p.z);
+    for (let i = 0; i < 4; i++) {                                // 바람 고리 4겹 (위로 갈수록 넓게)
+      const cy = -6 - i * 19, rx = 30 + i * 14 + 3 * Math.sin(a.t * 0.3 + i), ry = rx * 0.27;
+      const ph = a.t * (0.38 + i * 0.05) * (i % 2 ? -1 : 1);
+      ctx.save();
+      ctx.beginPath();
+      if (half === 'back') ctx.rect(-300, cy - 120, 600, 120); else ctx.rect(-300, cy, 600, 120);
+      ctx.clip();
+      for (let s = 0; s < 3; s++) {
+        const a0 = ph + s * TAU / 3;
+        ctx.beginPath(); ctx.ellipse(0, cy, pos(rx), pos(ry), 0, a0, a0 + 1.6);
+        ctx.lineCap = 'round';
+        ctx.lineWidth = 7; ctx.strokeStyle = `rgba(43,27,58,${0.22 * k})`; ctx.stroke();
+        ctx.lineWidth = 4; ctx.strokeStyle = i % 2 ? `rgba(122,215,240,${0.95 * k})` : `rgba(255,255,255,${0.95 * k})`; ctx.stroke();
+      }
+      ctx.restore();
+    }
+    // 몸 둘레를 도는 칼: 타원 궤도 위의 칼끝 + 초승달 꼬리
+    const Ro = 78, oy = -38, sq = 0.3, ph = a.t * 0.62;
+    const tip = f => ({ x: Math.cos(f) * Ro, y: oy + Math.sin(f) * Ro * sq, front: Math.sin(f) >= 0 });
+    const NSEG = 12, span = 1.8;
+    for (let i = 0; i < NSEG; i++) {
+      const f0 = ph - span + span * i / NSEG, f1 = ph - span + span * (i + 1.4) / NSEG, fm = (f0 + f1) / 2;
+      if ((Math.sin(fm) >= 0) !== (half === 'front')) continue;
+      const fr = (i + 1) / NSEG, inner = Ro * (1 - 0.5 * fr);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(f0) * Ro, oy + Math.sin(f0) * Ro * sq); ctx.lineTo(Math.cos(f1) * Ro, oy + Math.sin(f1) * Ro * sq);
+      ctx.lineTo(Math.cos(f1) * inner, oy + Math.sin(f1) * inner * sq); ctx.lineTo(Math.cos(f0) * inner, oy + Math.sin(f0) * inner * sq);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(255,255,255,${0.85 * fr * k})`; ctx.fill();
+    }
+    const tp = tip(ph);
+    if ((tp.front ? 'front' : 'back') === half) {                // 칼날 (몸 중심 → 칼끝)
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = INK; ctx.lineWidth = 10; ctx.beginPath(); ctx.moveTo(Math.cos(ph) * 24, oy + Math.sin(ph) * 24 * sq); ctx.lineTo(tp.x, tp.y); ctx.stroke();
+      ctx.strokeStyle = BLADE_C; ctx.lineWidth = 5.5; ctx.beginPath(); ctx.moveTo(Math.cos(ph) * 24, oy + Math.sin(ph) * 24 * sq); ctx.lineTo(tp.x, tp.y); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(43,27,58,.6)'; ctx.lineWidth = 1.5;
+      starPath(ctx, tp.x, tp.y, 9, 2.6, a.t * 0.3, 4); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---- 돌진 찌르기: 몸 뒤의 속도선(뒤) / 칼끝의 반짝과 바람(앞) ----
+  function drawThrust(ctx, p, a, half) {
+    const d = a.def, t = a.t, dashEnd = d.startup + d.dash;
+    const P = computePose(p);
+    ctx.save();
+    ctx.translate(p.x, p.y - p.z); ctx.scale(p.face, 1);
+    if (half === 'back') {
+      if (t >= d.startup && t < dashEnd + 4) {
+        const k = t < dashEnd ? 1 : 1 - (t - dashEnd) / 4;
+        ctx.lineCap = 'round';
+        for (let i = 0; i < 6; i++) {
+          const yy = -72 + i * 12 + (i % 2) * 3, len = 34 + ((i * 29 + t * 7) % 26), x0 = -18 - (i % 3) * 6;
+          ctx.strokeStyle = `rgba(43,27,58,${0.18 * k})`; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(x0, yy); ctx.lineTo(x0 - len, yy); ctx.stroke();
+          ctx.strokeStyle = `rgba(255,255,255,${0.85 * k})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x0, yy); ctx.lineTo(x0 - len, yy); ctx.stroke();
+        }
+      }
+    } else {
+      const tip = tipOf(P), tx = tip.x, ty = tip.y;
+      if (t < d.startup) {                                       // 칼끝에 힘이 모이는 반짝
+        const k = t / d.startup;
+        ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(43,27,58,.6)'; ctx.lineWidth = 1.5;
+        const hd = handOf(P), bx = hd.x + Math.cos(P.sword) * BLADE * 0.9, by = hd.y + Math.sin(P.sword) * BLADE * 0.9;
+        starPath(ctx, bx, by, 4 + 8 * k, 1.8 + 2 * k, t * 0.4, 4); ctx.fill(); ctx.stroke();
+      } else if (t < dashEnd + 3) {                              // 찌르는 순간의 바람 + 반짝
+        const k = t < dashEnd ? 1 : 1 - (t - dashEnd) / 3;
+        ctx.fillStyle = `rgba(255,255,255,${0.6 * k})`; ctx.strokeStyle = `rgba(122,215,240,${0.9 * k})`; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.ellipse(tx + 6, ty, pos(26 * k), pos(9 * k), 0, 0, TAU); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(43,27,58,.6)'; ctx.lineWidth = 1.5;
+        starPath(ctx, tx + 8, ty, 13 * k + 3, 4, t * 0.5, 4); ctx.fill(); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // ---- 별빛 대폭발 ----
+  function drawNovaBack(ctx, p, a) {                             // 몸 뒤의 금빛 후광
+    const d = a.def;
+    const k = a.t < d.charge ? a.t / d.charge : 1 - (a.t - d.charge) / (a.total - d.charge) * 0.85;
+    const r = 36 + 26 * k + 4 * Math.sin(a.t * 0.5);
+    ctx.save();
+    ctx.translate(p.x, p.y - p.z - 40);
+    const g = ctx.createRadialGradient(0, 0, 4, 0, 0, pos(r));
+    g.addColorStop(0, 'rgba(255,246,200,0.95)'); g.addColorStop(0.55, 'rgba(255,217,61,0.5)'); g.addColorStop(1, 'rgba(255,217,61,0)');
+    ctx.globalAlpha = clamp(k, 0, 1);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, pos(r), 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  function drawNovaFront(ctx, p, a) {
+    const d = a.def, t = a.t, cols = [COLORS.yellow, COLORS.pink, COLORS.sky, COLORS.mint, COLORS.yellow, COLORS.pink];
+    ctx.save();
+    ctx.translate(p.x, p.y - p.z - 42);
+    ctx.lineJoin = 'round';
+    if (t < d.charge) {                                          // 별들이 몸으로 모여들어요
+      const k = t / d.charge;
+      for (let i = 0; i < 6; i++) {
+        const ang = t * 0.2 + i * TAU / 6, rr = lerp(100, 30, easeIn(k));
+        ctx.fillStyle = cols[i]; ctx.strokeStyle = INK; ctx.lineWidth = 2.2;
+        starPath(ctx, Math.cos(ang) * rr, Math.sin(ang) * rr * 0.75, 6 + 6 * k, 3 + 3 * k, ang); ctx.fill(); ctx.stroke();
+      }
+    } else {
+      const u = clamp((t - d.charge) / 26, 0, 1);
+      if (u < 1) {
+        const r1 = 20 + 880 * easeOut(u), al = Math.pow(1 - u, 0.7);
+        ctx.lineWidth = 6 + 22 * (1 - u); ctx.strokeStyle = `rgba(255,217,61,${0.85 * al})`;                 // 퍼져 나가는 큰 고리
+        ctx.beginPath(); ctx.arc(0, 0, pos(r1), 0, TAU); ctx.stroke();
+        ctx.lineWidth = 3 + 8 * (1 - u); ctx.strokeStyle = `rgba(255,255,255,${al})`;
+        ctx.beginPath(); ctx.arc(0, 0, pos(r1), 0, TAU); ctx.stroke();
+        const u2 = clamp(u - 0.14, 0, 1);
+        if (u2 > 0) {
+          ctx.lineWidth = 4 + 10 * (1 - u2); ctx.strokeStyle = `rgba(255,138,216,${0.7 * Math.pow(1 - u2, 0.7)})`;
+          ctx.beginPath(); ctx.arc(0, 0, pos(20 + 880 * easeOut(u2)), 0, TAU); ctx.stroke();
+        }
+        for (let i = 0; i < 10; i++) {                           // 사방으로 날아가는 큰 별
+          const ang = i * TAU / 10 + 0.3, rr = 30 + 540 * easeOut(u);
+          ctx.globalAlpha = Math.min(1, (1 - u) * 2);
+          ctx.fillStyle = cols[i % 6]; ctx.strokeStyle = INK; ctx.lineWidth = 2.6;
+          starPath(ctx, Math.cos(ang) * rr, Math.sin(ang) * rr * 0.8, 22 * (1 - u * 0.6), 10 * (1 - u * 0.6), t * 0.15 + i); ctx.fill(); ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+        if (u < 0.45) {                                          // 한가운데 큰 별
+          const s = 80 * (1 - u / 0.45) + 10;
+          ctx.fillStyle = COLORS.yellow; ctx.strokeStyle = INK; ctx.lineWidth = 4;
+          starPath(ctx, 0, 0, s, s * 0.5, t * 0.12); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.beginPath(); ctx.arc(-s * 0.2, -s * 0.2, s * 0.14, 0, TAU); ctx.fill();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawRevive(ctx, p) {                                  // 부활: 퍼지는 고리 + 올라가는 별
+    const u = 1 - p.reviveT / 50;
+    ctx.save();
+    ctx.translate(p.x, p.y - p.z);
+    ctx.strokeStyle = `rgba(255,217,61,${0.9 * (1 - u)})`; ctx.lineWidth = 5 * (1 - u) + 1.5;
+    ctx.beginPath(); ctx.ellipse(0, -4, pos(16 + 54 * easeOut(u)), pos(5 + 16 * easeOut(u)), 0, 0, TAU); ctx.stroke();
+    ctx.lineJoin = 'round'; ctx.strokeStyle = INK; ctx.lineWidth = 2;
+    for (let i = 0; i < 4; i++) {
+      const ang = i * TAU / 4 + u * 3, yy = -10 - 80 * u * (0.6 + 0.4 * ((i * 7) % 3) / 2);
+      ctx.globalAlpha = 1 - u * u;
+      ctx.fillStyle = i % 2 ? COLORS.pink : COLORS.yellow;
+      starPath(ctx, Math.cos(ang) * 26, yy, 8, 3.8, ang); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // 몸(엔티티) 그리기: 몸 뒤 이펙트 → 몸 (+ 잔상은 몸 아래)
+  function draw(ctx, p) {
+    const P = computePose(p), a = p.act;
+    for (const g of p.ghosts) {                                  // 돌진 잔상: 하늘색, 점점 투명하게
+      drawHero(ctx, p, g.pose, { ghost: COLORS.sky, alpha: 0.42 * (1 - g.age / 11), x: g.x, y: g.y, z: g.z, face: g.face });
+    }
+    if (a) {
+      if (a.type === 'spin') drawSpin(ctx, p, a, 'back');
+      else if (a.type === 'thrust') drawThrust(ctx, p, a, 'back');
+      else if (a.type === 'nova') drawNovaBack(ctx, p, a);
+    }
+    let alpha = 1;
+    if (p.invuln > 0 && !p.dead && !(a && a.type === 'nova')) alpha = 0.68 + 0.32 * Math.sin(p.animT * 0.55);   // 무적: 부드럽게 깜빡
+    drawHero(ctx, p, P, { alpha });
+    if (p.dead || p.state === 'down') drawDizzyStars(ctx, p, P);
+  }
+
+  // 이펙트 층: 모든 캐릭터 위에 그려져서(적에게 가려지지 않음) 칼 궤적과 스킬 이펙트가 또렷해요
+  function drawEffects(ctx, p) {
+    const a = p.act;
+    if (a && !p.dead) {
+      if (a.type === 'combo' || a.type === 'air') drawSlash(ctx, p, a);
+      else if (a.type === 'spin') drawSpin(ctx, p, a, 'front');
+      else if (a.type === 'thrust') drawThrust(ctx, p, a, 'front');
+      else if (a.type === 'nova') drawNovaFront(ctx, p, a);
+    }
+    if (p.reviveT > 0) drawRevive(ctx, p);
+  }
+
+  // ===== 5. 공개 API =====
+  function makeSkills() {
+    return D.skills.map(s => ({ id: s.id, key: s.key, label: s.label, icon: s.icon, cdMax: s.cdMax, cd: 0 }));
+  }
+
+  function resetActions(p) {
+    p.act = null; p.step = -1; p.link = 0; p.ghosts.length = 0;
+    for (const k of BUF_KEYS) p.buf[k] = 0;
+  }
+
+  const api = {
+    // 주인공 만들기: 엔티티 생성 + Entities.add + Game.player 설정
+    create(x, y) {
+      const p = Entities.make({
+        kind: 'player', team: 'player', persistent: true,
+        x: x === undefined ? 80 : x, y: y === undefined ? 420 : y,
+        w: D.w, h: D.h, hp: D.maxHp, maxHp: D.maxHp, atk: D.atk, face: 1,
+        state: 'idle', skills: makeSkills(),
+        act: null, step: -1, link: 0, buf: {},                  // 동작 / 마지막 콤보 타 / 콤보 이을 남은 시간 / 입력 기억
+        animT: 0, downT: 0, sq: 0, hurtT: 0, hurtSign: -1, reviveT: 0, ghosts: [], cheer: false,
+        tick, update, draw, onHit, onDeath, onLand,
+      });
+      for (const k of BUF_KEYS) p.buf[k] = 0;
+      Entities.add(p);
+      // 이펙트 층: y 를 아주 크게 해서 항상 맨 위에 그려지는 보이지 않는 엔티티 (적/그림자/충돌과 무관)
+      const layer = Entities.make({ kind: 'fx', team: 'neutral', persistent: true, untargetable: true, clampWorld: false, shadow: false,
+        x: 0, y: 5000, w: 0, h: 0 });
+      layer.draw = ctx => {
+        if (p._removed) { Entities.remove(layer); return; }      // 주인공이 사라지면 이 층도 같이 정리
+        drawEffects(ctx, p);
+      };
+      Entities.add(layer);
+      p.fxLayer = layer;
+      Game.player = p;
+      return p;
+    },
+
+    // 부활: 체력 가득, 서 있는 자세, 무적(깜빡임), 별이 반짝. 부활/게임오버 판단은 stage 의 몫
+    revive(p, opts) {
+      p = p || Game.player;
+      if (!p) return;
+      const inv = opts && opts.invuln !== undefined ? opts.invuln : D.reviveInvuln;
+      p.hp = p.maxHp; p.dead = false; p.state = 'idle';
+      p.stun = 0; p.flash = 0; p.kx = 0; p.vx = 0; p.vy = 0; p.invuln = inv;
+      p.sq = 0.2; p.hurtT = 0; p.downT = 0; p._juggle = 0; p.reviveT = 50;
+      if (p.z < 0) p.z = 0;
+      resetActions(p);
+      if (!p._in) Entities.add(p);
+      FX.burst(p.x, p.y - p.z - 40, { kind: 'star', count: 10, speed: 5, life: 44, size: 14 });
+      FX.burst(p.x, p.y - p.z - 4, { kind: 'ring', count: 1, size: 60, life: 22, colors: [COLORS.yellow] });
+      FX.popup(p.x, p.y - p.z - p.h - 14, '다시 힘내!', { color: COLORS.yellow, size: 28, life: 50 });
+      SFX.play('heal');
+      Events.emit('playerRevived', p);
+    },
+
+    // 체력 회복 (maxHp 를 넘지 않음). 실제로 회복된 양을 돌려줘요
+    heal(p, n) {
+      p = p || Game.player;
+      if (!p || p.dead) return 0;
+      const gain = Math.max(0, Math.min(p.maxHp - p.hp, Math.round(Number(n) || 0)));
+      if (gain > 0) {
+        p.hp += gain;
+        FX.popup(p.x, p.y - p.z - p.h - 10, '+' + gain, { color: COLORS.mint, size: 30, life: 44 });
+        FX.burst(p.x, p.y - p.z - 40, { kind: 'spark', count: 8, speed: 3, life: 28, colors: [COLORS.mint, COLORS.white, COLORS.yellow] });
+        SFX.play('heal');
+      } else {
+        FX.popup(p.x, p.y - p.z - p.h - 10, '가득!', { color: COLORS.mint, size: 22, life: 30 });
+      }
+      return gain;
+    },
+  };
+  return api;
+})();
 </script>

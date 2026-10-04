@@ -1,4 +1,1305 @@
 <script>
-/* enemies 모듈 — 소유 모듈이 구현하기 전까지의 빈 스텁 */
-const Enemies = {};
+'use strict';
+/* ==========================================================================
+   js_enemies.html — 젤리 던전 "적" 모듈 (enemies 모듈)
+   --------------------------------------------------------------------------
+   사탕 슬라임 · 장난감 병정 · 심술 구름 · 젤리 대왕(보스) 의 데이터, 행동(AI), 그림이 다 여기 있어요.
+   (계약서: docs/ARCHITECTURE.md 5-2)
+
+   ★ 어린이용 게임의 약속 (이 모듈이 가장 신경 쓰는 것) ★
+     1. 모든 공격은 "예고"가 먼저! 머리 위 "!" + 몸이 웅크리거나 부들부들 떨림.
+        예고 시간은 어떤 난이도에서도 24프레임(0.4초)보다 짧아질 수 없어요.
+     2. 번개·보스 내려찍기는 바닥에 빨간 "마커"를 45프레임(0.75초) 이상 먼저 보여 줘요.
+        마커는 따라다니다가 마지막 30프레임 동안은 멈춰서, 움직이면 피할 수 있어요.
+     3. 몸에 닿기만 해서는 피해가 없어요. 오직 "공격 판정(Combat.applyHitbox)"만 아파요.
+     4. 한꺼번에 덤비지 않아요 (난이도별 maxAttackers 명까지만 동시에 공격).
+     5. 보스는 패턴이 끝날 때마다 60프레임 이상 "어지러운 시간"이 있어서 반격할 수 있어요.
+
+   ※ 전역 이름은 ENEMY_TUNE · ENEMY_DEFS · Enemies 세 개뿐이에요. 나머지는 Enemies 함수 안에 숨겨 두었어요.
+   ※ 다른 모듈(Player, Stage …)은 부르지 않아요. Game.player 와 Events 로만 소통합니다.
+   ========================================================================== */
+
+// ===== 0. 숫자표 — 숫자만 바꿔도 느낌이 바뀌어요 =====
+const ENEMY_TUNE = {
+  minWindup: 24,          // 예고(windup)는 어떤 난이도에서도 이 프레임보다 짧을 수 없음 (0.4초)
+  minMarker: 45,          // 번개/내려찍기 바닥 마커가 보이는 최소 프레임 (0.75초)
+  markerLock: 30,         // 마커가 "멈추는" 마지막 프레임 수 (이때 움직이면 피할 수 있음)
+  markerSpeed: 3.2,       // 마커가 플레이어를 따라가는 속도 (플레이어 걷기 4px 보다 느림)
+  minBossRecover: 60,     // 보스 패턴 뒤 반격 시간 최소 (1초)
+  aggroRange: 900,        // 이 거리 안에 플레이어가 있으면 쫓아옴
+  dropHeight: 420,        // 위에서 떨어지며 등장할 때 시작 높이(z)
+  landFrames: 14,         // 착지 뒤 잠깐 멍한 시간
+  deathFrames: 22,        // 일반 적 "펑!" 연출 길이
+  bossDeathFrames: 72,    // 보스 "펑!" 연출 길이
+  minionCap: 4,           // 보스가 불러낸 슬라임이 동시에 이 수를 넘지 않게
+  hpBarFrames: 150,       // 맞은 뒤 체력바가 보이는 시간
+  hurtCooldown: 36,       // 맞고 난 뒤 다시 공격하기까지 쉬는 프레임 (때려서 끊는 보람!)
+  engageTimeout: 360,     // 공격 자리를 맡아 놓고 이 시간 동안 못 가면 포기
+  sep: { depth: 18, push: 1.6, flyGap: 40 },   // 적끼리 겹치지 않게 밀어내기 (깊이 두께 / 힘 / 공중-지상 구분 높이)
+  chain: { hits: 4, frames: 50, armor: 40 },   // 보스: 50프레임 안에 4번 맞으면 "흔들어 털기" (무한 경직 방지)
+};
+
+const ENEMY_DEFS = {
+  slime: {
+    name: '사탕 슬라임', hp: 20, atk: 5, speed: 1.2, windup: 30, score: 100,
+    w: 44, h: 40, top: 48,                  // top: 그림이 실제로 올라가는 높이 (체력바·! 표시 위치)
+    colors: ['#ff8ad8', '#7ad7f0', '#7bd88f', '#ffd93d'],   // 사탕 색 (태어날 때 하나 고름)
+    startDist: 70, alignY: 14,    // 이 거리 안(가로)·이 깊이 차 안이면 예고 시작
+    reach: 50, lunge: 6.5, attackFrames: 8, depth: 20,   // 박치기: 사거리 / 튀어나가는 속도 / 판정 프레임 / 판정 깊이
+    knock: 7, stun: 16,
+    recover: 48, cooldown: [40, 90], hover: 150,
+  },
+  soldier: {
+    name: '장난감 병정', hp: 35, atk: 8, speed: 1.6, windup: 36, score: 200,
+    w: 40, h: 78, top: 94,
+    startMin: 50, startMax: 104, spacing: 84, alignY: 14,   // 창 찌르기 시작 거리 범위 / 유지하는 간격
+    reach: 122, thrustFrames: 12, hitFrom: 2, hitTo: 6, depth: 18,   // 창: 사거리 / 동작 길이 / 판정 켜지는 구간
+    knock: 8, stun: 18,
+    recover: 54, cooldown: [50, 100], hover: 170,
+  },
+  cloud: {
+    name: '심술 구름', hp: 25, atk: 8, speed: 1.0, windup: 50, score: 200,
+    w: 62, h: 46, top: 52, flying: true,
+    floatZ: 92, lowZ: 50, hurtDrop: 20,     // 떠 있는 높이 / 번개를 모을 때 내려오는 높이 / 맞으면 내려오는 양
+    startDx: 150, alignY: 70, hover: 190,
+    markerRx: 74, markerRy: 30,              // 번개 마커(보이는 원) 크기 — 실제 판정은 이 안쪽
+    knock: 4, launch: 4, stun: 22, zMax: 36, // 번개: 낮게 뛰면 피할 수 있음
+    attackFrames: 10, recover: 70, cooldown: [60, 110],
+  },
+  jellyKing: {
+    name: '젤리 대왕', hp: 300, atk: 10, speed: 1.0, windup: 40, score: 3000,
+    w: 130, h: 130, top: 160, boss: true, heavy: true,
+    knockMul: 0.3,                           // 맞았을 때 밀리는 정도 (무거움)
+    gap: 48,                                 // 패턴 사이에 다가가는 시간
+    order: ['slam', 'summon', 'charge'],
+    patterns: {
+      slam:   { windup: 44, air: 36, peak: 150, recover: 84, damage: 1.5, rx: 120, ry: 44, zMax: 40, shockFrames: 4 },
+      summon: { windup: 40, recover: 72, count: 2, attackFrames: 16 },
+      charge: { windup: 50, recover: 130, speed: 9, damage: 1.2, reach: 96, depth: 34, zMax: 40, maxFrames: 170 },
+    },
+    // 체력 50% 이하(2페이즈): 더 빨라지지만 예고(24)·반격(60) 하한은 그대로
+    phase2: { at: 0.5, speedMul: 1.25, windupMul: 0.75, recoverMul: 0.8, gap: 30 },
+  },
+};
+
+const Enemies = (() => {
+  const T = ENEMY_TUNE;
+  const TAU = Math.PI * 2;
+  const INK = COLORS.ink;
+
+  // ===== 1. 작은 도우미들 =====
+  const isFoe = e => !!e && (e.kind === 'enemy' || e.kind === 'boss');
+  const isLive = e => isFoe(e) && !e.dead && !e._removed;
+  const sign = v => (v < 0 ? -1 : 1);
+  const clamp01 = u => clamp(u, 0, 1);
+  const ease = u => { u = clamp01(u); return u * u * (3 - 2 * u); };
+  const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
+  const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };   // 그림용 가짜 난수 (게임 난수는 안 건드림)
+
+  // 예고(windup) 프레임: 난이도 배율을 곱하되 24프레임 밑으로는 절대 내려가지 않음
+  function windupFrames(base, mul) {
+    return Math.max(T.minWindup, Math.round(base * Game.diff.windupMul * (mul || 1)));
+  }
+
+  // 플레이어 (죽었거나 없으면 null → 적들은 얌전히 배회)
+  function getTarget() {
+    const p = Game.player;
+    return p && !p.dead && !p._removed ? p : null;
+  }
+
+  // 색 섞기 ('#rrggbb' 또는 '#rgb' → '#rrggbb')
+  const rgb = c => {
+    let h = String(c || '#ffffff').replace('#', '');
+    if (h.length === 3) h = h.split('').map(x => x + x).join('');
+    return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0];
+  };
+  const mix = (a, b, t) => {
+    const x = rgb(a), y = rgb(b);
+    return '#' + [0, 1, 2].map(i => Math.round(x[i] + (y[i] - x[i]) * clamp01(t)).toString(16).padStart(2, '0')).join('');
+  };
+
+  // ===== 2. 상태 머신 뼈대 =====
+  //   상태: drop(떨어지는 중) → land(착지) → idle(배회) → chase(쫓기/맴돌기) → windup(예고) → attack(공격) → recover(쉬는 시간)
+  //   맞으면 hurt → chase.  죽으면 dead.
+  function enter(e, state, len) {
+    e.state = state; e.t = 0; e.len = len || 0;
+    e.engage = false;
+    if (state !== 'windup' && state !== 'attack') dropMarker(e);   // 예고/공격이 끝나면 바닥 마커도 같이 사라짐
+  }
+
+  // 공격 "자리표(토큰)": windup/attack 중이거나, 공격하려고 다가가는 중(engage)이면 자리를 차지한 것
+  const holdsSlot = o => o.state === 'windup' || o.state === 'attack' || (o.state === 'chase' && o.engage);
+
+  function slotsTaken(except) {
+    let n = 0;
+    for (const o of Entities.list) if (o !== except && isLive(o) && holdsSlot(o)) n++;
+    return n;
+  }
+
+  // 공격 자리를 얻을 수 있나? 자리가 남아 있어도 "플레이어와 가장 가까운 후보" 순서로 줘요
+  function canEngage(e, p) {
+    const free = Game.diff.maxAttackers - slotsTaken(e);
+    if (free <= 0) return false;
+    const dMe = dist(e, p);
+    let nearer = 0;
+    for (const o of Entities.list) {
+      if (o === e || !isLive(o) || o.boss || holdsSlot(o) || o.state !== 'chase' || o.cd > 0) continue;
+      const d = dist(o, p);
+      if (d < dMe || (d === dMe && o.id < e.id)) nearer++;
+    }
+    return nearer < free;
+  }
+
+  function wantsAttack(e, p) {
+    if (e.engage) return true;
+    if (e.cd > 0 || !canEngage(e, p)) return false;
+    e.engage = true; e.engageT = 0;
+    return true;
+  }
+
+  // 목표 지점으로 걸어가기 (도착하면 멈춤). 깊이(y) 이동은 조금 느리게
+  function moveToward(e, gx, gy, sp) {
+    const dx = gx - e.x, dy = gy - e.y, d = Math.hypot(dx, dy);
+    if (d < 0.5) return;
+    const s = Math.min(sp, d);
+    e.vx += dx / d * s;
+    e.vy += dy / d * s * 0.8;
+  }
+
+  const faceTo = (e, dx) => { if (Math.abs(dx) > 4) e.face = sign(dx); };
+
+  // 맞은 편에서 "맴돌며 대기": 있던 쪽에 머물면서 천천히 오르락내리락 (자리가 없을 때)
+  function hover(e, p, R, sp) {
+    if (!e.side || Math.abs(e.x - p.x) > 30) e.side = sign(e.x - p.x);
+    const ph = e.age * 0.022 + e.phase;
+    const gx = p.x + e.side * (R + Math.sin(ph * 0.7) * 25);
+    const gy = clamp(p.y + Math.sin(ph) * 55, FLOOR_TOP, FLOOR_BOTTOM);
+    moveToward(e, gx, gy, sp * 0.75);
+  }
+
+  // 플레이어가 없거나 쓰러져 있을 때: 제자리 근처를 느릿느릿 배회
+  function wander(e) {
+    const a = e.age * 0.03 + e.phase;
+    e.vx += Math.sin(a) * 0.45 * e.speed;
+    e.vy += Math.cos(a * 0.7) * 0.25 * e.speed;
+    if (Math.abs(Math.sin(a)) > 0.2) e.face = sign(Math.sin(a));
+  }
+
+  // 적끼리 겹치지 않게 약하게 밀어내기 (타원형: 가로는 몸 크기, 세로는 얇게)
+  function separate(e) {
+    const mine = e.boss ? 0.12 : 1;                // 보스는 작은 적에게 잘 안 밀림
+    for (const o of Entities.list) {
+      if (o === e || !isLive(o) || o.state === 'drop') continue;
+      if (Math.abs((o.z || 0) - (e.z || 0)) > T.sep.flyGap) continue;     // 공중의 구름과 지상은 서로 안 밀어냄
+      const rx = (e.w + o.w) * 0.4, ry = T.sep.depth;
+      const dx = e.x - o.x, dy = e.y - o.y;
+      const d = Math.hypot(dx / rx, dy / ry);
+      if (d >= 1) continue;
+      let ux, uy;
+      if (d < 0.01) { const a = e.phase * 3.7; ux = Math.cos(a); uy = Math.sin(a) * 0.6; }   // 완전히 겹쳤으면 저마다 다른 방향으로 (태어날 때 정한 값)
+      else { const L = Math.hypot(dx, dy); ux = dx / L; uy = dy / L; }
+      const push = (1 - d) * T.sep.push * mine * (o.boss ? 1.5 : 1);
+      e.vx += ux * push;
+      e.vy += uy * push * 0.7;
+    }
+  }
+
+  // 공격 판정을 내고, 맞힌 대상들을 돌려줌 (항상 Combat 을 통해서만 아프게 함)
+  const strike = hb => Combat.applyHitbox(hb);
+
+  // ===== 3. 바닥 마커 (번개 / 내려찍기 / 돌진 길) =====
+  //   예고 시간 내내 바닥에 떠 있다가, 공격이 들어가는 순간 사라져요.
+  function addMarker(owner, shape, o) {
+    dropMarker(owner);
+    const m = Entities.make({
+      kind: 'marker', team: 'neutral', layer: 'ground', shadow: false, clampWorld: false, untargetable: true,
+      x: o.x, y: o.y, w: 2, h: 2,
+    });
+    m.fromEnemies = true; m.owner = owner; m.shape = shape; m.style = o.style || 'bolt';
+    m.rx = o.rx || 60; m.ry = o.ry || 28;
+    m.total = o.total; m.lockAt = o.lockAt; m.locked = false; m.t = 0;
+    m.dir = o.dir || 1; m.limit = o.limit || 0;
+    m.tick = markerTick; m.draw = drawMarker;
+    owner.marker = m;
+    return Entities.add(m);
+  }
+  function dropMarker(owner) {
+    const m = owner && owner.marker;
+    if (m) { Entities.remove(m); owner.marker = null; }
+  }
+  function markerTick(m) {
+    m.t++;
+    if (!m.locked && m.t >= m.lockAt) m.locked = true;
+    const o = m.owner;
+    if (!o || o.dead || o._removed || o.marker !== m) Entities.remove(m);    // 주인이 없어지면 마커도 사라짐
+  }
+  // 마커가 따라다니는 동안: 플레이어 쪽으로 천천히 이동 (멈춘 뒤에는 그 자리 그대로)
+  function trackMarker(m, p, minX, maxX) {
+    if (!m || m.locked || !p) return;
+    m.x += clamp(p.x - m.x, -T.markerSpeed, T.markerSpeed);
+    m.y += clamp(p.y - m.y, -T.markerSpeed * 0.75, T.markerSpeed * 0.75);
+    m.x = clamp(m.x, minX, maxX);
+    m.y = clamp(m.y, FLOOR_TOP, FLOOR_BOTTOM);
+  }
+  // 마커(눈에 보이는 타원) 안쪽에 들어오는 실제 판정 크기: 마커 밖에서 맞는 일이 없게
+  function zoneOf(rx, ry) { return { half: Math.max(8, (rx - 20) * 0.85), depth: ry * 0.85 }; }
+
+  // 번개 이펙트 (짧게 살아 있다 사라지는 엔티티. 항상 맨 앞에 그려짐)
+  function addBolt(fromX, fromY, toX, toY) {
+    const b = Entities.make({ kind: 'marker', team: 'neutral', shadow: false, clampWorld: false, untargetable: true, x: toX, y: FLOOR_BOTTOM + 80, w: 2, h: 2 });
+    b.fromEnemies = true; b.fx = { fromX, fromY, toX, toY }; b.t = 0;
+    b.tick = bt => { if (++bt.t > 9) Entities.remove(bt); };
+    b.draw = drawBolt;
+    return Entities.add(b);
+  }
+
+  // ===== 4. 종류별 행동 =====
+  const AI = {};
+
+  // ---- 사탕 슬라임: 웅크렸다가 박치기 ----
+  AI.slime = {
+    chase(e, p, def) {
+      faceTo(e, p.x - e.x);
+      if (wantsAttack(e, p)) {
+        moveToward(e, p.x - e.face * (def.startDist - 12), p.y, e.speed);
+        if (Math.abs(p.x - e.x) <= def.startDist && Math.abs(p.y - e.y) <= def.alignY) startWindup(e, def.windup);
+      } else hover(e, p, def.hover, e.speed);
+    },
+    windup() { /* 제자리에서 웅크리며 부들부들 (그림이 처리) */ },
+    attack(e, p, def) {
+      e.vx = e.face * def.lunge;
+      strike(Combat.frontBox(e, def.reach, { damage: def.atk, knock: def.knock, stun: def.stun, freeze: 3, depth: def.depth, hitSet: e.hitSet }));
+    },
+    attackLen: def => def.attackFrames,
+    onAttack() { SFX.play('swing', { rate: 1.3, vol: 0.6 }); },
+  };
+
+  // ---- 장난감 병정: 간격을 유지하다가 창 찌르기 ----
+  AI.soldier = {
+    chase(e, p, def) {
+      const adx = Math.abs(p.x - e.x);
+      faceTo(e, p.x - e.x);
+      if (wantsAttack(e, p)) {
+        moveToward(e, p.x - e.face * def.spacing, p.y, e.speed);       // 너무 가까우면 뒤로 물러나 간격을 맞춤
+        if (adx >= def.startMin && adx <= def.startMax && Math.abs(p.y - e.y) <= def.alignY) startWindup(e, def.windup);
+      } else hover(e, p, def.hover, e.speed);
+    },
+    windup() { /* 창을 뒤로 당김 (그림이 처리) */ },
+    attack(e, p, def) {
+      if (e.t >= def.hitFrom && e.t <= def.hitTo) {
+        strike(Combat.frontBox(e, def.reach, { damage: def.atk, knock: def.knock, stun: def.stun, freeze: 3, depth: def.depth, hitSet: e.hitSet }));
+      }
+    },
+    attackLen: def => def.thrustFrames,
+    onAttack() { SFX.play('swing', { rate: 0.85, vol: 0.7 }); },
+  };
+
+  // ---- 심술 구름: 떠다니다가 → 바닥에 번개 마커 → 낙뢰 ----
+  AI.cloud = {
+    chase(e, p, def) {
+      faceTo(e, p.x - e.x);
+      if (wantsAttack(e, p)) {
+        moveToward(e, p.x - sign(p.x - e.x) * def.startDx * 0.6, p.y, e.speed);
+        if (Math.abs(p.x - e.x) <= def.startDx && Math.abs(p.y - e.y) <= def.alignY) startCloudWindup(e, p, def);
+      } else hover(e, p, def.hover, e.speed);
+    },
+    windup(e, p, def) {
+      const m = e.marker;
+      trackMarker(m, p, 20, Game.world.width - 20);
+      if (m) faceTo(e, m.x - e.x);
+    },
+    attack() { /* 낙뢰는 attack 시작 순간 한 번 (아래 beginAttack) */ },
+    attackLen: def => def.attackFrames,
+    onAttack(e, p, def) {
+      const m = e.marker;
+      const mx = m ? m.x : e.x, my = m ? m.y : e.y;
+      const zone = zoneOf(def.markerRx, def.markerRy);
+      addBolt(e.x, e.y - e.z - 8, mx, my);
+      dropMarker(e);
+      SFX.play('hitBig', { rate: 1.6, vol: 0.7 });
+      FX.burst(mx, my - 6, { kind: 'spark', count: 10, speed: 6, size: 14 });
+      FX.burst(mx, my - 4, { kind: 'ring', count: 1, size: def.markerRx * 0.9, colors: [COLORS.yellow] });
+      FX.shake(3, 8);
+      e.strikeAt = { x: mx, y: my };
+      strike({
+        owner: e, team: 'enemy', x1: mx - zone.half, x2: mx + zone.half, y: my, depth: zone.depth,
+        zMin: -10, zMax: def.zMax, damage: def.atk, knock: def.knock, launch: def.launch, stun: def.stun,
+        freeze: 4, shake: 5, sfx: 'hitBig', fx: 'spark', hitSet: e.hitSet,
+      });
+    },
+  };
+
+  function startCloudWindup(e, p, def) {
+    const W = Math.max(T.minMarker, windupFrames(def.windup));       // 번개 마커는 45프레임 이상 보여야 함
+    const lock = Math.min(T.markerLock, W - 8);
+    addMarker(e, 'ellipse', { style: 'bolt', x: p.x, y: p.y, rx: def.markerRx, ry: def.markerRy, total: W, lockAt: W - lock });
+    startWindup(e, def.windup, W);
+  }
+
+  // ---- 공통: 예고 시작 / 공격 시작 ----
+  function startWindup(e, base, forceLen) {
+    const len = forceLen || windupFrames(base);
+    enter(e, 'windup', len);
+    e.windupLen = len;
+    SFX.play('ui', { rate: 1.5, vol: 0.45 });                         // "삐릭!" 작은 예고음
+  }
+
+  function beginAttack(e, p) {
+    const A = AI[e.type], def = e.def;
+    enter(e, 'attack', A.attackLen(def));
+    e.hitSet = new Set();                                              // 한 번 휘두를 때 한 번만 맞게
+    A.onAttack && A.onAttack(e, p, def);
+    A.attack(e, p, def);
+  }
+
+  // ===== 5. 일반 적 update / tick =====
+  function update(e) {
+    if (e.boss) { bossUpdate(e); return; }
+    const def = e.def, A = AI[e.type], p = getTarget();
+    e.t++;
+    switch (e.state) {
+      case 'drop':                                                     // 떨어지는 중: 플레이어 쪽을 봄 (착지는 onLand / 구름은 tick)
+        if (p) faceTo(e, p.x - e.x);
+        if (e.def.flying && e.z <= def.floatZ + 4) landFromDrop(e);
+        break;
+      case 'land':
+        if (e.t >= T.landFrames) enter(e, p ? 'chase' : 'idle');
+        break;
+      case 'hurt':                                                     // 정신 차림 (잠깐 공격 안 함)
+        enter(e, 'chase');
+        e.cd = Math.max(e.cd, T.hurtCooldown);
+        break;
+      case 'idle':
+        if (p && e.t >= e.alert && dist(e, p) < T.aggroRange) enter(e, 'chase');
+        else { wander(e); separate(e); }
+        break;
+      case 'chase':
+        if (!p) { enter(e, 'idle'); e.alert = 20; break; }
+        A.chase(e, p, def);
+        if (e.state === 'chase') {
+          if (e.engage && ++e.engageT > T.engageTimeout) { e.engage = false; e.cd = 60; }   // 자리만 맡고 못 오면 포기
+          separate(e);
+        }
+        break;
+      case 'windup':
+        if (!p) { enter(e, 'idle'); e.alert = 20; e.cd = 40; break; }   // 플레이어가 쓰러졌으면 공격 취소
+        A.windup(e, p, def);
+        if (e.t >= e.len) beginAttack(e, p);
+        break;
+      case 'attack':
+        if (e.t >= e.len) { enter(e, 'recover', def.recover); break; }
+        A.attack(e, p, def);
+        break;
+      case 'recover':
+        if (e.t >= e.len) {
+          enter(e, p ? 'chase' : 'idle');
+          e.alert = 20;
+          e.cd = randInt(def.cooldown[0], def.cooldown[1]);
+        } else separate(e);
+        break;
+      default: break;
+    }
+  }
+
+  // 항상 불리는 tick: 타이머, 걸음 위상, 스쿼시 보간 (스턴/죽음 중에도 계속)
+  function tick(e) {
+    e.age++;
+    if (e.cd > 0) e.cd--;
+    if (e.hitT > 0) e.hitT--;
+    if (e.hpBarT > 0) e.hpBarT--;
+    if (e.landT > 0) e.landT--;
+    if (e.dead) {
+      e.deathT++;
+      if (e.boss && e.deathT < T.bossDeathFrames - 14 && e.deathT % 5 === 0) bossDeathFx(e);
+      if (e.deathT >= (e.boss ? T.bossDeathFrames : T.deathFrames)) e.shadow = false;     // 연출이 끝났는데 공중이라 아직 안 지워졌으면 그림자부터 감춤
+      return;
+    }
+    // 구름: 커널 물리는 noGravity 라 z 를 우리가 직접 정함. (공중에선 스턴이 안 줄어들므로 스스로 줄임)
+    if (e.def.flying) {
+      e.vz = 0;
+      if (e.stun > 0) e.stun--;
+      if (e.state !== 'drop') {
+        let zt = e.def.floatZ + Math.sin(e.age * 0.07) * 4;
+        if (e.state === 'windup' || e.state === 'attack' || e.state === 'recover' || e.state === 'hurt') zt = e.def.lowZ;
+        if (e.hitDrop > 0) { zt = Math.min(zt, e.def.lowZ - 6); e.hitDrop--; }
+        e.z += (zt - e.z) * 0.12;
+      } else {
+        e.z = Math.max(e.def.floatZ, e.z - 9);                         // 위에서 스르륵 내려옴
+      }
+    }
+    if (e.boss) {
+      if (e.chainT > 0 && --e.chainT === 0) e.chain = 0;
+      if (e.armorT > 0 && --e.armorT === 0 && e.state !== 'windup' && e.state !== 'attack') e.superArmor = false;
+      e.rage += ((e.phase2 ? 1 : 0) - e.rage) * 0.06;
+    }
+    // 걸음 위상: 움직인 거리에 비례
+    const mv = Math.hypot(e.x - e.px, e.y - e.py);
+    e.px = e.x; e.py = e.y;
+    if (mv > 0.2 && e.state !== 'hurt') e.walk += Math.min(mv, 3) * 0.2;
+    // 스쿼시 & 스트레치 목표 → 부드럽게 따라감
+    const tg = poseTarget(e);
+    e.sx += (tg[0] - e.sx) * 0.35;
+    e.sy += (tg[1] - e.sy) * 0.35;
+  }
+
+  // 상태별 찌그러짐 목표 [가로배율, 세로배율]
+  function poseTarget(e) {
+    let sx = 1, sy = 1;
+    const k = e.state === 'windup' ? clamp01(e.t / Math.max(1, e.len)) : 0;
+    const wob = Math.sin(e.age * 0.3);
+    switch (e.type) {
+      case 'slime':
+        if (e.state === 'windup') { sx = 1 + 0.3 * k; sy = 1 - 0.4 * k; }              // 꾹 웅크림
+        else if (e.state === 'attack') { sx = 1.38; sy = 0.78; }                       // 쭉 튀어나감
+        else if (e.state === 'recover') { sx = 1 + 0.08 * wob; sy = 1 - 0.08 * wob; }
+        else if (e.walk > 0) sy = 1 + 0.05 * Math.sin(e.walk * 2);
+        break;
+      case 'soldier':
+        if (e.state === 'windup') { sx = 1 - 0.04 * k; sy = 1 + 0.03 * k; }
+        else if (e.state === 'recover') { sx = 1 + 0.03 * wob; sy = 1 - 0.03 * wob; }
+        break;
+      case 'cloud':
+        if (e.state === 'windup') { sx = 1 + 0.12 * k; sy = 1 - 0.1 * k; }
+        else if (e.state === 'attack') { sx = 0.9; sy = 1.1; }
+        else if (e.state === 'recover') { sx = 1 + 0.05 * wob; sy = 1 - 0.05 * wob; }
+        else sy = 1 + 0.03 * Math.sin(e.age * 0.12);
+        break;
+      case 'jellyKing': {
+        const pat = e.pattern;
+        if (e.state === 'windup') {
+          if (pat === 'slam') { sx = 1 + 0.22 * k; sy = 1 - 0.38 * k; }               // 꾸욱 웅크림
+          else if (pat === 'summon') { sx = 1 + 0.16 * k; sy = 1 + 0.16 * k; }          // 숨 들이마셔 부풀음
+          else { sx = 1 + 0.1 * k; sy = 1 - 0.1 * k; }
+        } else if (e.state === 'attack') {
+          if (pat === 'slam') {
+            if (e.t < e.slamA) { sx = 0.82; sy = 1.22; }                               // 날아오를 때 길쭉
+            else { sx = 1.3; sy = 0.7; }                                               // 쿵! 납작
+          } else if (pat === 'summon') { sx = 1.1; sy = 0.95; }
+          else { sx = 1.15; sy = 0.9; }
+        } else if (e.state === 'recover') { sx = 1 + 0.05 * wob; sy = 1 - 0.05 * wob; }
+        else sy = 1 + 0.025 * Math.sin(e.age * 0.1);
+        break;
+      }
+      default: break;
+    }
+    if (e.hitT > 0) { const h = e.hitT / 10; sx += 0.26 * h; sy -= 0.22 * h; }          // 맞으면 찌그러짐
+    if (e.landT > 0) { const h = e.landT / 10; sx += 0.3 * h; sy -= 0.28 * h; }         // 착지하면 납작
+    return [sx, sy];
+  }
+
+  // ===== 6. 맞았을 때 / 죽었을 때 / 착지했을 때 =====
+  function onHit(e, hb, dmg) {
+    e.hpBarT = T.hpBarFrames;
+    e.hitT = 10;
+    if (e.hp <= 0) return;                                            // 마지막 한 방은 onDeath 가 처리
+    if (e.boss) { bossOnHit(e); return; }
+    if (e.def.flying) { e.hitDrop = 24; e.vz = 0; }                   // 구름: 맞으면 살짝 내려옴
+    if (!e.superArmor) {
+      dropMarker(e);                                                  // 때려서 예고를 끊음! (번개 마커도 사라짐)
+      enter(e, 'hurt');
+      e.cd = Math.max(e.cd, T.hurtCooldown);
+    }
+  }
+
+  function onDeath(e) {
+    dropMarker(e);
+    enter(e, 'dead');
+    e.deathT = 0;
+    e.noGravity = false;                                              // 구름도 땅으로 내려와야 커널이 치워 줌
+    if (e.z > 0) e.vz = Math.min(e.vz, 0);
+    const cy = e.y - e.z - e.h * 0.5;
+    if (e.boss) {
+      e.removeT = T.bossDeathFrames;
+      e.superArmor = false;
+      SFX.play('bossDie');
+      FX.shake(10, 40);
+      FX.burst(e.x, cy, { kind: 'star', count: 24, speed: 9, size: 20 });
+      FX.burst(e.x, cy, { kind: 'candy', count: 18, speed: 8, size: 18 });
+      FX.burst(e.x, e.y - 6, { kind: 'ring', count: 3, size: 150 });
+    } else {
+      e.removeT = T.deathFrames;
+      SFX.play('enemyDie');
+      FX.burst(e.x, cy, { kind: 'star', count: 9, speed: 6 });
+      FX.burst(e.x, cy, { kind: 'candy', count: 7, speed: 5 });
+      FX.burst(e.x, cy, { kind: 'ring', count: 1, size: e.w + 26 });
+    }
+  }
+
+  function bossDeathFx(e) {
+    const rx = RNG.fx(), ry = RNG.fx();
+    const x = e.x + (rx - 0.5) * e.w * 0.9, y = e.y - e.h * (0.15 + ry * 0.7);
+    FX.burst(x, y, { kind: ry > 0.5 ? 'star' : 'candy', count: 6, speed: 6, size: 16 });
+    if (e.deathT % 10 === 0) FX.shake(5, 8);
+  }
+
+  function onLand(e) {
+    if (e.dead) return;
+    if (e.state === 'drop') landFromDrop(e);
+    else e.landT = 8;                                                  // 날아갔다 착지: 납작
+  }
+
+  // 위에서 떨어져 땅에 닿음 → 이제부터 맞을 수 있음
+  function landFromDrop(e) {
+    e.untargetable = false;
+    enter(e, 'land');
+    e.landT = 10;
+    e.alert = 8;
+    const floorZ = e.def.flying ? e.z : 0;
+    FX.burst(e.x, e.y - floorZ - 4, { kind: 'puff', count: 6, speed: 3, size: 20 });
+    if (!e.def.flying) { SFX.play('land', { vol: 0.8 }); FX.shake(e.boss ? 8 : 2, 8); }
+  }
+
+  // ===== 7. 젤리 대왕 (보스) =====
+  const bossPhase = e => (e.phase2 ? e.def.phase2 : { speedMul: 1, windupMul: 1, recoverMul: 1, gap: e.def.gap });
+  const minionCount = () => { let n = 0; for (const o of Entities.list) if (o.minion && isLive(o)) n++; return n; };
+
+  function bossUpdate(e) {
+    const def = e.def, ph = bossPhase(e), p = getTarget();
+    e.t++;
+    switch (e.state) {
+      case 'drop':
+        if (p) faceTo(e, p.x - e.x);
+        break;
+      case 'land':
+        if (e.t >= T.landFrames) enter(e, 'idle');
+        break;
+      case 'idle':                                                     // 등장 직후 으스대는 시간 / 플레이어가 없을 때
+        if (p && e.cd <= 0) enter(e, 'chase');
+        else { e.vx += Math.sin(e.age * 0.03) * 0.2; }
+        break;
+      case 'chase': {
+        if (!p) { enter(e, 'idle'); e.cd = 30; break; }
+        faceTo(e, p.x - e.x);
+        const dx = p.x - e.x;
+        if (Math.abs(dx) > 160) moveToward(e, p.x - sign(dx) * 150, p.y, e.speed * ph.speedMul);
+        else e.vy += clamp(p.y - e.y, -1, 1) * 0.8;
+        if (e.cd <= 0 && Game.diff.maxAttackers - slotsTaken(e) > 0) startPattern(e, p);
+        break;
+      }
+      case 'windup':
+        if (!p) { cancelPattern(e); break; }
+        bossWindup(e, p);
+        if (e.state === 'windup' && e.t >= e.len) beginBossAttack(e, p);
+        break;
+      case 'attack':
+        bossAttack(e, p);
+        break;
+      case 'recover':
+        if (e.t >= e.len) endPattern(e);
+        break;
+      default: break;
+    }
+    if (e.state === 'chase' || e.state === 'idle') separate(e);
+  }
+
+  function cancelPattern(e) {
+    e.superArmor = e.armorT > 0;
+    e.noGravity = false; e.z = 0;
+    enter(e, 'idle');
+    e.cd = 30;
+  }
+
+  // 다음 패턴 고르기 (슬라임 소환은 이미 많으면 건너뜀)
+  function startPattern(e, p) {
+    const def = e.def, n = def.order.length;
+    let name = def.order[e.patIdx % n];
+    if (name === 'summon' && T.minionCap - minionCount() <= 0) { e.patIdx++; name = def.order[e.patIdx % n]; }
+    const P = def.patterns[name], ph = bossPhase(e);
+    const W = windupFrames(P.windup, ph.windupMul);
+    e.pattern = name;
+    e.windupLen = W;
+    e.superArmor = true;                                               // 패턴 중에는 밀리거나 경직되지 않음
+    e.hitSet = new Set();
+    const w2 = e.w / 2, minX = w2, maxX = Game.world.width - w2;
+    if (name === 'slam') {
+      const A = Math.max(P.air, T.minMarker - W + 2);                  // 마커가 W + A 프레임(>=45) 동안 보임
+      const lock = Math.min(T.markerLock, A - 2);
+      e.slamA = A;
+      addMarker(e, 'ellipse', { style: 'slam', x: clamp(p.x, minX, maxX), y: clamp(p.y, FLOOR_TOP, FLOOR_BOTTOM), rx: P.rx, ry: P.ry, total: W + A, lockAt: W + A - lock });
+    } else if (name === 'charge') {
+      e.face = sign(p.x - e.x);
+      e.limitX = e.face > 0 ? maxX : minX;
+      const lock = Math.min(T.markerLock - 8, W - 6);
+      addMarker(e, 'lane', { style: 'charge', x: e.x, y: e.y, rx: 0, ry: P.depth, total: W, lockAt: W - lock, dir: e.face, limit: e.limitX });
+    }
+    enter(e, 'windup', W);
+    SFX.play(name === 'summon' ? 'bossHit' : 'warn', { rate: name === 'summon' ? 0.55 : 0.7, vol: 0.7 });
+  }
+
+  function bossWindup(e, p) {
+    const m = e.marker;
+    if (e.pattern === 'slam') {
+      faceTo(e, p.x - e.x);
+      trackMarker(m, p, e.w / 2, Game.world.width - e.w / 2);
+    } else if (e.pattern === 'charge') {
+      if (m && !m.locked) e.vy += clamp(p.y - e.y, -2.4, 2.4);        // 달리는 길을 플레이어 깊이에 맞춤 (마지막엔 고정)
+      if (m) m.y = e.y;
+    }
+  }
+
+  function beginBossAttack(e, p) {
+    const def = e.def, P = def.patterns[e.pattern];
+    e.hitSet = new Set();
+    if (e.pattern === 'slam') {
+      enter(e, 'attack', e.slamA + P.shockFrames);
+      e.x0 = e.x; e.y0 = e.y; e.impacted = false;
+      e.noGravity = true;
+      SFX.play('jump', { rate: 0.55, vol: 0.9 });
+      FX.burst(e.x, e.y - 4, { kind: 'puff', count: 8, speed: 3, size: 26 });
+    } else if (e.pattern === 'charge') {
+      enter(e, 'attack', P.maxFrames);
+      e.sub = 'run';
+      SFX.play('skill2', { rate: 0.5, vol: 0.8 });
+    } else {
+      enter(e, 'attack', P.attackFrames);
+      SFX.play('bossHit', { rate: 0.5, vol: 0.9 });
+      FX.shake(5, 12);
+      FX.burst(e.x, e.y - e.h * 0.5, { kind: 'ring', count: 2, size: 120 });
+      summonMinions(e, p, P);
+    }
+  }
+
+  // 슬라임 소환: 플레이어 양옆에 위에서 떨어뜨림. 이미 minionCap 이면 건너뜀(남은 자리만큼만)
+  function summonMinions(e, p, P) {
+    const room = T.minionCap - minionCount();
+    const n = Math.min(P.count, room);
+    for (let i = 0; i < n; i++) {
+      const side = (i % 2 === 0) ? -1 : 1;
+      const x = clamp((p ? p.x : e.x) + side * randInt(110, 200), 60, Game.world.width - 60);
+      const y = randInt(FLOOR_TOP + 20, FLOOR_BOTTOM - 10);
+      spawn('slime', x, y, { drop: true, minion: true });
+    }
+    return n;
+  }
+
+  function bossAttack(e, p) {
+    const def = e.def, P = def.patterns[e.pattern], ph = bossPhase(e);
+    if (e.pattern === 'slam') {
+      const A = e.slamA, m = e.marker;
+      if (e.t < A) {                                                   // 날아올랐다가 마커 위로 내려옴
+        const u = e.t / A;
+        if (m) { e.x = lerp(e.x0, m.x, ease(u)); e.y = lerp(e.y0, m.y, ease(u)); }
+        e.z = 4 * P.peak * u * (1 - u);
+        return;
+      }
+      if (!e.impacted) {                                               // 쿵! 충격파
+        e.impacted = true;
+        const mx = m ? m.x : e.x, my = m ? m.y : e.y;
+        e.x = mx; e.y = my; e.z = 0; e.vz = 0; e.noGravity = false;
+        e.impactAt = { x: mx, y: my };
+        dropMarker(e);
+        SFX.play('hitBig', { rate: 0.6, vol: 1 });
+        FX.shake(8, 14);
+        FX.burst(mx, my - 4, { kind: 'ring', count: 2, size: P.rx * 1.1, colors: [COLORS.white, COLORS.yellow] });
+        FX.burst(mx, my - 6, { kind: 'puff', count: 12, speed: 5, size: 30 });
+        FX.burst(mx, my - 20, { kind: 'star', count: 6, speed: 6 });
+      }
+      const zone = zoneOf(P.rx, P.ry), at = e.impactAt;
+      strike({
+        owner: e, team: 'enemy', x1: at.x - zone.half, x2: at.x + zone.half, y: at.y, depth: zone.depth,
+        zMin: -10, zMax: P.zMax, damage: Math.round(def.atk * P.damage), knock: 10, stun: 26, freeze: 6, shake: 10,
+        sfx: 'hitBig', fx: 'star', hitSet: e.hitSet,
+      });
+      if (e.t >= e.len) enterBossRecover(e, P.recover);
+    } else if (e.pattern === 'charge') {
+      const sp = Math.min(P.speed * ph.speedMul, 2.5 + e.t * 1.0);     // 점점 빨라짐
+      e.vx = e.face * sp;
+      strike(Combat.frontBox(e, P.reach, {
+        damage: Math.round(def.atk * P.damage), knock: 11, stun: 26, freeze: 5, shake: 6, depth: P.depth,
+        zMin: -10, zMax: P.zMax, sfx: 'hitBig', fx: 'star', hitSet: e.hitSet,
+      }));
+      if (e.t % 4 === 0) FX.burst(e.x - e.face * 50, e.y - 4, { kind: 'puff', count: 2, speed: 2, size: 20 });
+      const atWall = e.face > 0 ? e.x >= e.limitX - 1 : e.x <= e.limitX + 1;
+      if (atWall || e.t >= e.len) {                                   // 벽에 쿵! → 어지러운 시간 (가장 큰 반격 기회)
+        SFX.play('hitBig', { rate: 0.5, vol: 1 });
+        FX.shake(9, 16);
+        FX.burst(e.x + e.face * 60, e.y - 50, { kind: 'star', count: 10, speed: 7 });
+        FX.burst(e.x + e.face * 60, e.y - 20, { kind: 'puff', count: 8, speed: 4, size: 28 });
+        enterBossRecover(e, P.recover);
+      }
+    } else {                                                           // 소환: 포효하는 자세를 잠깐 유지
+      if (e.t >= e.len) enterBossRecover(e, P.recover);
+    }
+  }
+
+  // 패턴이 끝나면 어지러운 반격 시간 (60프레임 이상 보장)
+  function enterBossRecover(e, base) {
+    const ph = bossPhase(e);
+    enter(e, 'recover', Math.max(T.minBossRecover, Math.round(base * ph.recoverMul)));
+    e.superArmor = e.armorT > 0;
+    e.noGravity = false;
+    if (e.z > 0) e.z = 0;
+  }
+
+  function endPattern(e) {
+    const ph = bossPhase(e);
+    e.patIdx++;
+    enter(e, getTarget() ? 'chase' : 'idle');
+    e.cd = ph.gap;
+  }
+
+  function bossOnHit(e) {
+    SFX.play('bossHit', { vol: 0.6 });
+    if (!e.superArmor) {
+      e.kx *= e.def.knockMul;                                          // 무거워서 조금만 밀림
+      e.chain = (e.chainT > 0 ? e.chain : 0) + 1;
+      e.chainT = T.chain.frames;
+      if (e.chain >= T.chain.hits) {                                   // 계속 맞으면 "부르르!" 털어내고 잠깐 단단해짐
+        e.chain = 0; e.chainT = 0;
+        e.stun = 0; e.superArmor = true; e.armorT = T.chain.armor;
+        FX.burst(e.x, e.y - e.h * 0.6, { kind: 'puff', count: 8, speed: 4, size: 28 });
+        FX.popup(e.x, e.y - e.h - 8, '부르르!', { color: COLORS.cream, size: 26, life: 36 });
+      }
+    }
+    if (!e.phase2 && e.hp <= e.maxHp * e.def.phase2.at) enterPhase2(e);
+  }
+
+  function enterPhase2(e) {
+    e.phase2 = true;
+    SFX.play('warn');
+    FX.popup(e.x, e.y - e.h - 30, '화났다!', { color: COLORS.red, size: 42, life: 80, vy: -0.5 });
+    FX.shake(6, 18);
+    FX.burst(e.x, e.y - e.h * 0.5, { kind: 'puff', count: 12, speed: 4, size: 32 });
+  }
+
+  // 보스가 쓰러지면 (커널의 bossKilled 이벤트): Game.boss 해제, 남은 소환수도 같이 "펑!"
+  function onBossKilled(boss) {
+    if (Game.boss === boss || !Game.boss) Game.boss = null;
+    for (const o of Entities.list.slice()) {
+      if (o.minion && isLive(o)) { o.hp = 0; o.dead = true; onDeath(o); }
+      else if (o.fromEnemies && o.owner && (o.owner === boss || o.owner.minion)) Entities.remove(o);   // 보스·소환수의 마커만 정리
+    }
+  }
+
+  // ===== 8. 공개 API =====
+  function spawn(type, x, y, opts) {
+    const def = ENEMY_DEFS[type];
+    if (!def) { Debug.logOnce('Enemies.spawn', '알 수 없는 적 종류: ' + type); return null; }
+    opts = opts || {};
+    const drop = !!opts.drop;
+    const maxHp = Math.max(1, Math.round(def.hp * Game.diff.enemyHp * num(opts.hpMul, 1)));
+    const e = Entities.make({
+      kind: def.boss ? 'boss' : 'enemy', team: 'enemy', type,
+      boss: def.boss ? true : undefined,
+      x: clamp(num(x, W / 2), def.w / 2, Game.world.width - def.w / 2),
+      y: clamp(num(y, 420), FLOOR_TOP, FLOOR_BOTTOM),
+      z: drop ? T.dropHeight : Math.max(0, num(opts.z, def.flying ? def.floatZ : 0)),
+      w: def.w, h: def.h, face: -1,
+      hp: maxHp, maxHp, score: def.score,
+      heavy: !!def.heavy, noGravity: !!def.flying,
+      untargetable: drop,
+      tick, update, onHit, onDeath, onLand, draw: drawEnemy,
+    });
+    e.def = def;
+    e.speed = def.speed * Game.diff.enemySpeed;                        // 난이도 반영한 이동 속도 (px/프레임)
+    e.minion = !!opts.minion;
+    e.state = drop ? 'drop' : 'idle'; e.t = 0; e.len = 0; e.age = 0;
+    e.cd = def.boss ? 80 : randInt(10, 40);                            // 처음엔 잠깐 있다가 공격
+    e.alert = def.boss ? 0 : randInt(4, 24);
+    e.engage = false; e.engageT = 0; e.side = 0;
+    e.phase = rand() * TAU;                                            // 저마다 다른 맴도는 박자 (게임 난수로 정함 → 시드가 같으면 똑같이 재현)
+    e.marker = null; e.hitSet = null;
+    e.px = e.x; e.py = e.y; e.walk = 0; e.sx = 1; e.sy = 1;
+    e.hitT = 0; e.hpBarT = 0; e.landT = 0; e.deathT = 0;
+    e.color = def.colors ? def.colors[Math.floor(RNG.fx() * def.colors.length)] : null;   // 모양 고르기는 연출 난수 (게임 난수열 안 건드림)
+    if (def.boss) { e.patIdx = 0; e.pattern = null; e.phase2 = false; e.rage = 0; e.chain = 0; e.chainT = 0; e.armorT = 0; }
+    if (def.flying) { e.hitDrop = 0; e.vz = 0; }
+    Entities.add(e);
+    if (def.boss) { Game.boss = e; Events.emit('bossSpawned', e); }
+    return e;
+  }
+
+  function aliveCount() {
+    let n = 0;
+    for (const e of Entities.list) if (isLive(e)) n++;
+    return n;
+  }
+
+  function clear() {
+    for (const e of Entities.list.slice()) if (isFoe(e) || e.fromEnemies) Entities.remove(e);
+    Game.boss = null;
+  }
+
+  // 리스너는 파일 로드 때 딱 한 번만 등록
+  Events.on('bossKilled', onBossKilled);
+
+  // ===== 9. 그림 =====
+  const DRAW = {};
+
+  // ---- 공통 그리기 도구 ----
+  function inkStroke(ctx, w) { ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = w === undefined ? 3 : w; ctx.strokeStyle = INK; }
+
+  // 위는 둥글고 바닥은 납작한 젤리 모양 (발 중심이 (0,0), 위쪽이 -y)
+  function jellyPath(ctx, rx, h, t, wob) {
+    const n = 40;
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const a = i / n * TAU, c = Math.cos(a), s = Math.sin(a);
+      const px = Math.sign(c) * Math.pow(Math.abs(c), 0.84), py = Math.sign(s) * Math.pow(Math.abs(s), 0.84);
+      const w = 1 + wob * Math.sin(a * 3 + t * 0.2);
+      const x = px * rx * w;
+      const y = -h * 0.16 + (py < 0 ? py * h * 0.84 : py * h * 0.16) * w;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  function starPath(ctx, x, y, r) {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const rr = i % 2 === 0 ? r : r * 0.48, a = -Math.PI / 2 + i * Math.PI / 5;
+      if (i === 0) ctx.moveTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); else ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+  }
+
+  // 눈: mood = 'normal' | 'angry' | 'squint'(아야) | 'dizzy'(어지러움).  side: -1 왼쪽 눈, +1 오른쪽 눈
+  function drawEye(ctx, x, y, r, lx, ly, mood, side, age) {
+    ctx.save();
+    inkStroke(ctx, 2.4);
+    if (mood === 'squint') {                                           // > <
+      ctx.beginPath();
+      ctx.moveTo(x - side * r * 1.0, y - r * 0.75); ctx.lineTo(x + side * r * 0.7, y); ctx.lineTo(x - side * r * 1.0, y + r * 0.75);
+      ctx.stroke();
+    } else if (mood === 'dizzy') {                                     // 빙글빙글 눈
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.lineWidth = 1.8; ctx.beginPath();
+      for (let i = 0; i <= 22; i++) {
+        const a = i * 0.62 + age * 0.25 * side, rr = r * 0.12 + i / 22 * r * 0.75;
+        if (i === 0) ctx.moveTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); else ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+      }
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); ctx.stroke();
+      const px = x + lx * r * 0.32, py = y + ly * r * 0.28;
+      ctx.fillStyle = INK; ctx.beginPath(); ctx.arc(px, py, r * 0.52, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(px - r * 0.17, py - r * 0.2, r * 0.19, 0, TAU); ctx.fill();
+      if (mood === 'angry') {                                          // 화난 눈썹 (바깥이 높고 안쪽이 낮음)
+        ctx.lineWidth = 3.4; ctx.beginPath();
+        ctx.moveTo(x + side * r * 1.25, y - r * 1.55); ctx.lineTo(x - side * r * 0.95, y - r * 0.62); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // 머리 위 "!" 말풍선: 공격이 곧 온다는 신호 (예고가 시작되면 통통 튀며 나타남)
+  function drawBang(ctx, x, y, age, big) {
+    const pop = ease(age / 8);
+    const s = (big ? 1.45 : 1) * (0.15 + 0.85 * pop) * (1 + 0.07 * Math.sin(age * 0.5));
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(s, s);
+    inkStroke(ctx, 3);
+    ctx.fillStyle = COLORS.red;
+    ctx.beginPath(); ctx.arc(0, -13, 14, 0, TAU); ctx.fill(); ctx.stroke();                       // 빨간 동그라미
+    ctx.beginPath(); ctx.moveTo(-5, -1); ctx.lineTo(0, 7); ctx.lineTo(5, -1); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, -13, 11.4, 0, TAU); ctx.fill();                                   // 꼬리 이음새 지우기
+    ctx.fillStyle = '#fff';
+    Draw.roundRect(ctx, -2.8, -23, 5.6, 12, 2.8); ctx.fill();                                     // 느낌표 막대
+    ctx.beginPath(); ctx.arc(0, -5.2, 3.1, 0, TAU); ctx.fill();                                   // 느낌표 점
+    ctx.restore();
+  }
+
+  // 어지러움 별 (머리 위를 빙글빙글): "지금이 반격 기회!" 신호
+  function drawDizzy(ctx, x, y, age, r) {
+    ctx.save();
+    for (let i = 0; i < 3; i++) {
+      const a = age * 0.11 + i * TAU / 3;
+      const sx = x + Math.cos(a) * r, sy = y + Math.sin(a) * r * 0.32;
+      inkStroke(ctx, 2); ctx.fillStyle = COLORS.yellow;
+      starPath(ctx, sx, sy, 6.5); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---- 그리기 입구: 죽음 연출 + 좌우 반전 + 겹쳐 그리는 표시(체력바, !, 별) ----
+  function deathProgress(e) {
+    const total = e.boss ? T.bossDeathFrames : T.deathFrames;
+    return clamp01(Math.max(e.deathT, total - e.removeT) / total);
+  }
+
+  function drawEnemy(ctx, e) {
+    const fn = DRAW[e.type];
+    if (!fn) return;
+    let death = null;
+    if (e.dead) {
+      const p = deathProgress(e);
+      if (p >= 1) return;
+      death = p;
+    }
+    const white = e.flash > 0 || (death !== null && death < 0.45);
+    ctx.save();
+    ctx.translate(e.x, e.y - e.z);
+    if (death !== null) {                                              // 펑! : 부풀었다가 → 작아지며 사라짐
+      const grow = death < 0.22 ? 1 + 0.35 * (death / 0.22) : 1.35 * (1 - ease((death - 0.22) / 0.78));
+      ctx.globalAlpha *= 1 - Math.max(0, (death - 0.6) / 0.4);
+      ctx.translate(0, -e.h * 0.5); ctx.rotate(death * 1.6 * e.face); ctx.scale(Math.max(0.01, grow), Math.max(0.01, grow)); ctx.translate(0, e.h * 0.5);
+    }
+    ctx.scale(e.face, 1);
+    fn(ctx, e, white, death !== null);
+    ctx.restore();
+    if (death !== null) return;
+    // 표시들 (좌우 반전 없이)
+    const top = e.y - e.z - (e.def.top || e.h) * Math.max(0.9, e.sy);
+    if (!e.boss && e.hpBarT > 0 && e.hp < e.maxHp) {
+      const r = e.hp / e.maxHp;
+      Draw.bar(ctx, e.x - 22, top - 16, 44, 8, r, { fg: r > 0.5 ? COLORS.mint : (r > 0.25 ? COLORS.yellow : COLORS.red) });
+    }
+    if (e.state === 'windup' || e.state === 'attack') drawBang(ctx, e.x, top - (e.boss ? 18 : (e.hpBarT > 0 ? 24 : 8)), e.state === 'windup' ? e.t : 12, !!e.boss);
+    if (e.state === 'recover') {
+      drawDizzy(ctx, e.x, top - 4, e.age, e.boss ? 40 : 18);
+    }
+  }
+
+  // 바라보는 방향 안에서 플레이어를 쳐다보는 눈동자 방향
+  function lookOf(e) {
+    const p = Game.player;
+    if (!p) return [1, 0];
+    return [clamp((p.x - e.x) / 100, -1, 1) * e.face, clamp((p.y - e.y) / 60, -1, 1)];
+  }
+
+  // ---- 사탕 슬라임 ----
+  DRAW.slime = (ctx, e, white) => {
+    const def = e.def, age = e.age;
+    const k = e.state === 'windup' ? clamp01(e.t / Math.max(1, e.len)) : 0;
+    const dizzy = e.state === 'recover', hurt = e.hitT > 0 || e.state === 'hurt';
+    const hop = (e.walk > 0 && (e.state === 'chase' || e.state === 'idle')) ? Math.abs(Math.sin(e.walk * 2)) * 5 : 0;
+    const shake = e.state === 'windup' ? Math.sin(age * 2.4) * (0.8 + 2.4 * k) : 0;
+    ctx.translate(shake, -hop);
+    ctx.scale(e.sx, e.sy);
+    inkStroke(ctx, 3 / Math.max(0.8, (e.sx + e.sy) / 2));
+    const pulse = k * (0.35 + 0.15 * Math.sin(age * 0.5));
+    const base = mix(e.color, '#ff5d73', k * 0.5);
+    const rx = 25, h = def.h;
+    jellyPath(ctx, rx, h, age, 0.025);
+    if (white) ctx.fillStyle = '#fff';
+    else {
+      const g = ctx.createLinearGradient(0, -h, 0, 0);
+      g.addColorStop(0, mix(base, '#ffffff', 0.4 + pulse)); g.addColorStop(0.55, base); g.addColorStop(1, mix(base, INK, 0.2));
+      ctx.fillStyle = g;
+    }
+    ctx.fill(); ctx.stroke();
+    if (!white) {
+      ctx.fillStyle = 'rgba(255,255,255,.8)';                           // 반짝 하이라이트
+      ctx.beginPath(); ctx.ellipse(-11, -h * 0.74, 7, 3.6, -0.6, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(-2.5, -h * 0.86, 1.9, 0, TAU); ctx.fill();
+      const sp = ['#ffd93d', '#7ad7f0', '#ffffff', '#7bd88f'].filter(c => c !== e.color);            // 사탕 가루
+      [[8, -h * 0.92, 0.7], [-3, -h * 0.97, -0.5], [14, -h * 0.8, 1.2]].forEach(([sx, sy, r], i) => {
+        ctx.save(); ctx.translate(sx, sy); ctx.rotate(r); inkStroke(ctx, 1.4);
+        ctx.fillStyle = sp[i % sp.length]; Draw.roundRect(ctx, -4, -1.6, 8, 3.2, 1.6); ctx.fill(); ctx.stroke(); ctx.restore();
+      });
+    }
+    // 얼굴
+    const [lx, ly] = lookOf(e);
+    const mood = dizzy ? 'dizzy' : (hurt ? 'squint' : (k > 0 || e.state === 'attack' ? 'angry' : 'normal'));
+    const fx = 3 + lx * 2, fy = -h * 0.52 + ly * 1.5;
+    drawEye(ctx, fx - 8, fy, 6.2, lx, ly, mood, -1, age);
+    drawEye(ctx, fx + 8, fy, 6.2, lx, ly, mood, 1, age);
+    if (!white) {
+      ctx.fillStyle = 'rgba(255,90,140,.38)';                           // 볼터치
+      ctx.beginPath(); ctx.ellipse(fx - 15, fy + 8, 4.2, 2.8, 0, 0, TAU); ctx.ellipse(fx + 15, fy + 8, 4.2, 2.8, 0, 0, TAU); ctx.fill();
+    }
+    inkStroke(ctx, 2.2);
+    ctx.beginPath();
+    if (e.state === 'attack') { ctx.fillStyle = '#7a1f3d'; ctx.ellipse(fx, fy + 12, 5, 4.4, 0, 0, TAU); ctx.fill(); ctx.stroke(); }
+    else if (k > 0.05) { ctx.moveTo(fx - 6, fy + 13); ctx.quadraticCurveTo(fx - 3, fy + 9, fx, fy + 13); ctx.quadraticCurveTo(fx + 3, fy + 17, fx + 6, fy + 13); ctx.stroke(); }
+    else if (dizzy) { ctx.moveTo(fx - 5, fy + 12); ctx.quadraticCurveTo(fx, fy + 16, fx + 5, fy + 12); ctx.stroke(); }
+    else { ctx.moveTo(fx - 4.5, fy + 11); ctx.quadraticCurveTo(fx, fy + 15.5, fx + 4.5, fy + 11); ctx.stroke(); }
+  };
+
+  // ---- 장난감 병정 ----
+  DRAW.soldier = (ctx, e, white) => {
+    const age = e.age, k = e.state === 'windup' ? clamp01(e.t / Math.max(1, e.len)) : 0;
+    const dizzy = e.state === 'recover', hurt = e.hitT > 0 || e.state === 'hurt';
+    const marching = (e.state === 'chase' || e.state === 'idle') && e.walk > 0;
+    const ph = e.walk * 1.6;
+    const bob = marching ? Math.abs(Math.sin(ph)) * 2.5 : 0;
+    const lean = e.state === 'windup' ? -0.09 * k : (e.state === 'attack' ? 0.1 : (dizzy ? Math.sin(age * 0.25) * 0.08 : 0));
+    const shake = e.state === 'windup' ? Math.sin(age * 2.6) * 1.2 * k : 0;
+    const col = (c) => (white ? '#ffffff' : c);
+    ctx.scale(e.sx, e.sy);
+    ctx.translate(shake, -bob);
+    inkStroke(ctx, 3);
+    // 받침대 (장난감 병정은 둥근 받침 위에 서 있어요)
+    ctx.fillStyle = col('#6fcf8f');
+    ctx.beginPath(); ctx.ellipse(0, -3, 23, 6.5, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.save();
+    ctx.translate(0, -3); ctx.rotate(lean); ctx.translate(0, 3);
+    // 다리 (뻣뻣하게 번갈아)
+    [-1, 1].forEach(s => {
+      const sw = marching ? Math.sin(ph + (s > 0 ? Math.PI : 0)) * 0.55 : 0;
+      ctx.save(); ctx.translate(s * 7, -22); ctx.rotate(sw);
+      ctx.fillStyle = col('#5b7cfa'); Draw.roundRect(ctx, -4.5, 0, 9, 19, 3); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = col('#3a2b4d'); Draw.roundRect(ctx, -5.2, 15, 11, 5, 2); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    });
+    // 뒤쪽 팔
+    ctx.fillStyle = col('#ff6b6b'); ctx.beginPath(); ctx.ellipse(-14, -38, 4.5, 8, 0.2, 0, TAU); ctx.fill(); ctx.stroke();
+    // 몸통 (빨간 코트)
+    ctx.fillStyle = col('#ff6b6b'); Draw.roundRect(ctx, -15, -50, 30, 29, 8); ctx.fill(); ctx.stroke();
+    if (!white) {
+      ctx.fillStyle = '#ffd93d';                                         // 금단추
+      [-44, -37, -30].forEach(y => { ctx.beginPath(); ctx.arc(0, y, 2.5, 0, TAU); ctx.fill(); inkStroke(ctx, 1.4); ctx.stroke(); });
+      ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 3; ctx.lineCap = 'round';                // 하얀 가슴띠
+      ctx.beginPath(); ctx.moveTo(-12, -47); ctx.lineTo(12, -25); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.ellipse(-8, -44, 3, 6, 0.2, 0, TAU); ctx.fill();
+    }
+    // 머리
+    inkStroke(ctx, 3);
+    ctx.fillStyle = col('#ffd9b8'); ctx.beginPath(); ctx.arc(0, -58, 12.5, 0, TAU); ctx.fill(); ctx.stroke();
+    const [lx, ly] = lookOf(e);
+    const mood = dizzy ? 'dizzy' : (hurt ? 'squint' : (k > 0 || e.state === 'attack' ? 'angry' : 'normal'));
+    drawEye(ctx, 4 + lx * 1.2, -59, 4.2, lx, ly, mood, -1, age);
+    drawEye(ctx, 12 + lx * 1.2, -59, 4.2, lx, ly, mood, 1, age);
+    if (!white) { ctx.fillStyle = 'rgba(255,90,140,.4)'; ctx.beginPath(); ctx.ellipse(2, -52.5, 3.2, 2.2, 0, 0, TAU); ctx.ellipse(14, -52.5, 3.2, 2.2, 0, 0, TAU); ctx.fill(); }
+    inkStroke(ctx, 2);
+    ctx.beginPath();
+    if (e.state === 'attack') { ctx.fillStyle = '#7a1f3d'; ctx.ellipse(8, -51.5, 3.4, 3, 0, 0, TAU); ctx.fill(); ctx.stroke(); }
+    else { ctx.moveTo(5, -52); ctx.quadraticCurveTo(8, -49.5, 11, -52); ctx.stroke(); }
+    // 모자 (높은 검은 군모 + 금띠 + 방울)
+    ctx.fillStyle = col('#3a2b4d'); inkStroke(ctx, 3);
+    ctx.beginPath(); ctx.moveTo(-11, -66); ctx.lineTo(-9, -83); ctx.lineTo(9, -83); ctx.lineTo(11, -66); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = col('#ffd93d'); Draw.roundRect(ctx, -11.5, -72, 23, 5, 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = col('#ff6b6b'); ctx.beginPath(); ctx.arc(0, -86, 4.3, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    // 창: 어깨 높이의 손 위치(16,-38)에서 뻗어 나감. 예고 때는 뒤로 당기며 수평으로, 찌를 때는 쭉 앞으로
+    const hx = 16, hy = -38 + (lean * -8);
+    let ang = -1.2, off = 0;
+    if (e.state === 'windup') { ang = lerp(-1.2, -0.04, ease(k * 1.4)); off = -24 * ease(k * 1.4); }
+    else if (e.state === 'attack') { ang = -0.04; off = lerp(-24, 30, ease(e.t / 3)); if (e.t > 8) off = lerp(30, 0, (e.t - 8) / 4); }
+    else if (e.state === 'recover') { ang = 0.5 + Math.sin(age * 0.25) * 0.05; off = -6; }
+    else if (hurt) { ang = -0.6; off = -4; }
+    else if (marching) ang += Math.sin(ph) * 0.04;
+    ctx.save();
+    ctx.translate(hx, hy); ctx.rotate(ang); ctx.translate(off + (e.state === 'windup' ? Math.sin(age * 2.6) * 1.2 * k : 0), 0);
+    inkStroke(ctx, 3);
+    ctx.fillStyle = col('#c58b4a'); Draw.roundRect(ctx, -26, -2.6, 84, 5.2, 2.6); ctx.fill(); ctx.stroke();            // 자루
+    ctx.fillStyle = col('#ffd93d'); ctx.beginPath(); ctx.moveTo(58, -6.5); ctx.lineTo(77, 0); ctx.lineTo(58, 6.5); ctx.closePath(); ctx.fill(); ctx.stroke();   // 창날
+    if (!white) { ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.beginPath(); ctx.moveTo(60, -3.5); ctx.lineTo(70, 0); ctx.lineTo(60, -0.5); ctx.closePath(); ctx.fill(); }
+    ctx.fillStyle = col('#ff6b6b'); ctx.beginPath(); ctx.arc(52, 0, 3.4, 0, TAU); ctx.fill(); ctx.stroke();                 // 빨간 리본 매듭
+    ctx.restore();
+    // 앞쪽 손
+    ctx.fillStyle = col('#ffd9b8'); inkStroke(ctx, 2.4); ctx.beginPath(); ctx.arc(hx, hy, 4.6, 0, TAU); ctx.fill(); ctx.stroke();
+  };
+
+  // ---- 심술 구름 ----
+  const CLOUD_PUFFS = [[-27, -15, 16], [-12, -29, 20], [11, -30, 19], [27, -17, 15], [0, -17, 21], [-35, -10, 10], [35, -10, 10]];
+  DRAW.cloud = (ctx, e, white) => {
+    const age = e.age, def = e.def;
+    const k = e.state === 'windup' ? clamp01(e.t / Math.max(1, e.len)) : (e.state === 'attack' ? 1 : 0);
+    const dizzy = e.state === 'recover', hurt = e.hitT > 0 || e.state === 'hurt';
+    const shake = e.state === 'windup' ? Math.sin(age * 2.2) * (0.8 + 2.2 * k) : 0;
+    ctx.translate(shake, 0);
+    ctx.scale(e.sx, e.sy);
+    const base = white ? '#ffffff' : mix(mix('#c4c9ee', '#8a8fc2', 0.35), '#4c4f86', k * 0.75);
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = INK; ctx.lineWidth = 6.5;                        // 먼저 굵은 윤곽선을 모두 그리고
+    CLOUD_PUFFS.forEach(([x, y, r]) => { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke(); });
+    ctx.fillStyle = base;                                              // 그 위에 색을 채우면 하나로 합쳐진 윤곽선이 돼요
+    CLOUD_PUFFS.forEach(([x, y, r]) => { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); });
+    if (!white) {
+      ctx.fillStyle = mix(base, '#ffffff', 0.45);                       // 윗면 하이라이트
+      ctx.beginPath(); ctx.ellipse(-12, -39, 9, 4, -0.4, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(14, -41, 6, 2.8, -0.2, 0, TAU); ctx.fill();
+      ctx.fillStyle = mix(base, INK, 0.2);                              // 아랫면 그늘
+      ctx.beginPath(); ctx.ellipse(0, -4, 26, 4, 0, 0, TAU); ctx.fill();
+    }
+    // 번개 찌릿: 몸 가장자리에서 깜빡이는 작은 번개 (예고가 클수록 많고 밝아짐)
+    if (!white) {
+      const n = 2 + Math.round(k * 4);
+      for (let i = 0; i < n; i++) {
+        const seed = Math.floor(age / 5) * 7 + i * 13;
+        const a = hash(seed) * TAU, r0 = 28 + hash(seed + 1) * 12;
+        const x0 = Math.cos(a) * r0, y0 = -20 + Math.sin(a) * r0 * 0.7;
+        ctx.strokeStyle = COLORS.yellow; ctx.lineWidth = 2.4; ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        for (let j = 1; j <= 3; j++) ctx.lineTo(x0 + Math.cos(a) * j * 5 + (hash(seed + j * 3) - 0.5) * 8, y0 + Math.sin(a) * j * 4 + (hash(seed + j * 5) - 0.5) * 8);
+        ctx.stroke();
+      }
+    }
+    // 배 위의 번개 표시 (모을수록 환하게)
+    if (!white) {
+      ctx.save(); ctx.translate(0, -8);
+      ctx.fillStyle = mix('#8a8fc2', COLORS.yellow, 0.25 + 0.75 * k); inkStroke(ctx, 1.6);
+      ctx.beginPath(); ctx.moveTo(3, -6); ctx.lineTo(-4, 1); ctx.lineTo(0, 1); ctx.lineTo(-3, 8); ctx.lineTo(5, -1); ctx.lineTo(1, -1); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+    // 얼굴: 심술 눈썹 + 뾰로통 입
+    const [lx, ly] = lookOf(e);
+    const mood = dizzy ? 'dizzy' : (hurt ? 'squint' : 'angry');
+    drawEye(ctx, -12, -24, 7.2, lx, ly, mood, -1, age);
+    drawEye(ctx, 12, -24, 7.2, lx, ly, mood, 1, age);
+    if (!white) { ctx.fillStyle = 'rgba(255,110,160,.42)'; ctx.beginPath(); ctx.ellipse(-21, -15, 5, 3, 0, 0, TAU); ctx.ellipse(21, -15, 5, 3, 0, 0, TAU); ctx.fill(); }
+    inkStroke(ctx, 2.6);
+    ctx.beginPath();
+    if (e.state === 'attack') { ctx.fillStyle = '#5a1b3d'; ctx.ellipse(0, -11, 6, 5, 0, 0, TAU); ctx.fill(); ctx.stroke(); }
+    else if (dizzy) { ctx.moveTo(-6, -12); ctx.quadraticCurveTo(0, -8, 6, -12); ctx.stroke(); }
+    else { ctx.moveTo(-8, -9); ctx.quadraticCurveTo(0, -17, 8, -9); ctx.stroke(); }                 // 뾰로통 ︵
+    // 빗방울 (가끔 똑똑)
+    if (!white && (e.state === 'chase' || e.state === 'idle')) {
+      for (let i = 0; i < 3; i++) {
+        const t = ((age * 1.8 + i * 21) % 46), a = 1 - t / 46;
+        ctx.fillStyle = 'rgba(122,215,240,' + (0.9 * a).toFixed(2) + ')';
+        ctx.beginPath(); ctx.ellipse(-16 + i * 16, 4 + t, 2, 3.2, 0, 0, TAU); ctx.fill();
+      }
+    }
+  };
+
+  // ---- 젤리 대왕 ----
+  DRAW.jellyKing = (ctx, e, white) => {
+    const age = e.age, def = e.def, rage = e.rage || 0;
+    const k = e.state === 'windup' ? clamp01(e.t / Math.max(1, e.len)) : 0;
+    const dizzy = e.state === 'recover';
+    const roar = (e.state === 'windup' && e.pattern === 'summon') || (e.state === 'attack' && e.pattern === 'summon');
+    const hurt = e.hitT > 0;
+    const charging = (e.state === 'windup' && e.pattern === 'charge') ? k : 0;
+    const shake = e.state === 'windup' ? Math.sin(age * 2.4) * (1 + 3 * k) : (e.phase2 ? Math.sin(age * 1.7) * 0.8 : 0);
+    ctx.translate(shake - charging * 18, 0);                          // 돌진 예고: 뒤로 몸을 당김
+    ctx.rotate(-charging * 0.12);
+    ctx.scale(e.sx, e.sy);
+    inkStroke(ctx, 3.6 / Math.max(0.8, (e.sx + e.sy) / 2));
+    const calm = '#b98cff', angry = '#ff5c8a';
+    const body = mix(calm, angry, rage);
+    const pulse = k * (0.28 + 0.12 * Math.sin(age * 0.5));
+    // 작은 팔 (뒤)
+    const wave = Math.sin(age * 0.12);
+    ctx.fillStyle = white ? '#fff' : mix(body, INK, 0.12);
+    [-1, 1].forEach(s => { ctx.beginPath(); ctx.ellipse(s * 70, -46 + wave * s * 4, 13, 10, s * 0.4, 0, TAU); ctx.fill(); ctx.stroke(); });
+    // 몸통
+    jellyPath(ctx, 72, def.h - 8, age, 0.03 + 0.012 * rage);
+    if (white) ctx.fillStyle = '#fff';
+    else {
+      const g = ctx.createLinearGradient(0, -def.h, 0, 0);
+      g.addColorStop(0, mix(body, '#ffffff', 0.38 + pulse)); g.addColorStop(0.5, body); g.addColorStop(1, mix(body, INK, 0.22));
+      ctx.fillStyle = g;
+    }
+    ctx.fill(); ctx.stroke();
+    if (!white) {
+      ctx.fillStyle = 'rgba(255,255,255,.28)';                          // 젤리 속 방울
+      [[-30, -40, 9], [34, -34, 7], [18, -60, 5], [-44, -66, 6]].forEach(([x, y, r]) => { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); });
+      ctx.fillStyle = 'rgba(255,255,255,.7)';
+      ctx.beginPath(); ctx.ellipse(-34, -100, 17, 8, -0.55, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(-14, -112, 4, 0, TAU); ctx.fill();
+    }
+    // 얼굴
+    const [lx, ly] = lookOf(e);
+    const mood = dizzy ? 'dizzy' : (hurt ? 'squint' : (rage > 0.5 || k > 0 || e.state === 'attack' ? 'angry' : 'normal'));
+    drawEye(ctx, -24, -74, 13, lx, ly, mood, -1, age);
+    drawEye(ctx, 24, -74, 13, lx, ly, mood, 1, age);
+    if (!white) { ctx.fillStyle = 'rgba(255,90,140,.4)'; ctx.beginPath(); ctx.ellipse(-44, -56, 9, 5.5, 0, 0, TAU); ctx.ellipse(44, -56, 9, 5.5, 0, 0, TAU); ctx.fill(); }
+    inkStroke(ctx, 3);
+    ctx.beginPath();
+    if (roar) {                                                          // 포효: 입 크게
+      ctx.fillStyle = '#5a1b3d'; ctx.ellipse(0, -44, 17, 15 + 3 * Math.sin(age * 0.6), 0, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#ff8aa0'; ctx.beginPath(); ctx.ellipse(0, -38, 10, 6, 0, 0, TAU); ctx.fill();
+    } else if (dizzy) { ctx.moveTo(-12, -46); ctx.quadraticCurveTo(0, -38, 12, -46); ctx.stroke(); }
+    else if (rage > 0.5 || k > 0) { ctx.moveTo(-18, -42); ctx.lineTo(-9, -48); ctx.lineTo(0, -42); ctx.lineTo(9, -48); ctx.lineTo(18, -42); ctx.stroke(); }
+    else { ctx.moveTo(-16, -48); ctx.quadraticCurveTo(0, -34, 16, -48); ctx.stroke(); }
+    // 왕관
+    ctx.save();
+    ctx.translate(0, -def.h + 12 + (e.state === 'windup' ? 0 : wave * 1.5)); ctx.rotate(Math.sin(age * 0.09) * 0.07 + (dizzy ? Math.sin(age * 0.3) * 0.15 : 0));
+    inkStroke(ctx, 3);
+    ctx.fillStyle = white ? '#fff' : '#ffd93d';
+    ctx.beginPath(); ctx.moveTo(-30, 0); ctx.lineTo(-34, -28); ctx.lineTo(-17, -14); ctx.lineTo(0, -34); ctx.lineTo(17, -14); ctx.lineTo(34, -28); ctx.lineTo(30, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+    if (!white) {
+      [[-34, -30, COLORS.red], [0, -36, COLORS.sky], [34, -30, COLORS.mint]].forEach(([x, y, c]) => { ctx.fillStyle = c; inkStroke(ctx, 2); ctx.beginPath(); ctx.arc(x, y, 5, 0, TAU); ctx.fill(); ctx.stroke(); });
+      ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.beginPath(); ctx.ellipse(-16, -8, 8, 2.4, -0.1, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+    // 2페이즈: 화난 김과 💢
+    if (rage > 0.4 && !white) {
+      for (let i = 0; i < 3; i++) {
+        const t = ((age * 1.1 + i * 26) % 60) / 60;
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.8 * (1 - t)).toFixed(2) + ')';
+        const s = i % 2 ? 1 : -1;
+        ctx.beginPath(); ctx.arc(s * (74 + t * 10), -78 - t * 34, 6 + t * 10, 0, TAU); ctx.fill();
+      }
+      ctx.strokeStyle = COLORS.red; ctx.lineWidth = 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(34, -112); ctx.lineTo(42, -108); ctx.moveTo(34, -104); ctx.lineTo(42, -108); ctx.moveTo(48, -118); ctx.lineTo(48, -108); ctx.moveTo(40, -122); ctx.lineTo(50, -122); ctx.stroke();
+    }
+  };
+
+  // ---- 바닥 마커 ----
+  function drawMarker(ctx, m) {
+    const t = m.t, tot = Math.max(1, m.total);
+    const prog = clamp01(t / tot), appear = ease(t / 8);
+    const pulse = 0.5 + 0.5 * Math.sin(t * 0.3);
+    const late = m.locked;                                              // 멈춘 뒤: 더 붉고 또렷하게
+    if (m.shape === 'lane') {                                           // 돌진 길: 보스 앞에서 벽까지
+      const o = m.owner, x0 = o ? o.x : m.x, x1 = m.limit, lo = Math.min(x0, x1), len = Math.abs(x1 - x0);
+      ctx.save();
+      ctx.globalAlpha = appear;
+      ctx.fillStyle = late ? 'rgba(255,60,80,.34)' : 'rgba(255,170,60,.22)';
+      ctx.fillRect(lo, m.y - m.ry, len, m.ry * 2);
+      ctx.strokeStyle = late ? 'rgba(255,60,80,.9)' : 'rgba(255,170,60,.9)'; ctx.lineWidth = 3; ctx.setLineDash([14, 10]); ctx.lineDashOffset = -t * 2 * m.dir;
+      ctx.strokeRect(lo, m.y - m.ry, len, m.ry * 2);
+      ctx.setLineDash([]);
+      ctx.fillStyle = late ? 'rgba(255,255,255,.75)' : 'rgba(255,255,255,.55)';        // 지나갈 방향을 가리키는 화살표
+      const step = 56, off = (t * 2.2) % step;
+      for (let x = (m.dir > 0 ? lo : lo + len); m.dir > 0 ? x < lo + len : x > lo; x += step * m.dir) {
+        const cx = x + off * m.dir;
+        if (cx < lo + 4 || cx > lo + len - 4) continue;
+        ctx.beginPath(); ctx.moveTo(cx - 9 * m.dir, m.y - 14); ctx.lineTo(cx + 9 * m.dir, m.y); ctx.lineTo(cx - 9 * m.dir, m.y + 14); ctx.lineTo(cx - 3 * m.dir, m.y); ctx.closePath(); ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+    const rx = m.rx * appear, ry = m.ry * appear;
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    ctx.fillStyle = late ? 'rgba(255,60,80,.26)' : 'rgba(255,120,80,.16)';
+    ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(255,50,80,' + (0.22 + 0.2 * prog).toFixed(2) + ')';     // 시간이 갈수록 차오름 → 가득 차면 공격!
+    ctx.beginPath(); ctx.ellipse(0, 0, rx * prog, ry * prog, 0, 0, TAU); ctx.fill();
+    ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(43,27,58,.55)';          // 어두운 테두리 (밝은 배경에서도 보이게)
+    ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, TAU); ctx.stroke();
+    ctx.lineWidth = 3.4; ctx.strokeStyle = late ? (Math.floor(t / 10) % 2 ? '#ff3d5a' : '#ffd93d') : '#ffd93d';
+    ctx.setLineDash(late ? [] : [16, 10]); ctx.lineDashOffset = -t * 0.8;
+    ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, TAU); ctx.stroke();
+    ctx.setLineDash([]);
+    if (appear > 0.6) {                                                 // 가운데 그림: 번개 / 느낌표
+      ctx.globalAlpha = 0.9;
+      inkStroke(ctx, 2);
+      if (m.style === 'bolt') {
+        ctx.fillStyle = COLORS.yellow; const s = 0.9 + 0.12 * pulse;
+        ctx.beginPath(); ctx.moveTo(6 * s, -ry * 0.9); ctx.lineTo(-7 * s, 1); ctx.lineTo(-1 * s, 1); ctx.lineTo(-6 * s, ry * 0.9); ctx.lineTo(8 * s, -3); ctx.lineTo(2 * s, -3); ctx.closePath(); ctx.fill(); ctx.stroke();
+      } else {
+        ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(43,27,58,.8)';
+        Draw.roundRect(ctx, -6, -ry * 0.62, 12, ry * 0.8, 5); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.ellipse(0, ry * 0.5, 6.5, 4.2, 0, 0, TAU); ctx.fill(); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // ---- 번개 줄기 ----
+  function drawBolt(ctx, b) {
+    const f = b.fx, k = 1 - b.t / 10;
+    const dx = f.toX - f.fromX, dy = f.toY - f.fromY, n = 8;
+    const pts = [];
+    for (let i = 0; i <= n; i++) {
+      const u = i / n, jig = (i === 0 || i === n) ? 0 : (hash(f.toX * 0.1 + i * 3.1 + Math.floor(b.t / 2)) - 0.5) * 34;
+      pts.push([f.fromX + dx * u + jig, f.fromY + dy * u]);
+    }
+    ctx.save();
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    const trace = () => { ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke(); };
+    ctx.globalAlpha = Math.min(1, k * 1.6);
+    ctx.strokeStyle = INK; ctx.lineWidth = 14 * k + 4; trace();
+    ctx.strokeStyle = COLORS.yellow; ctx.lineWidth = 9 * k + 2; trace();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 3.5 * k + 1; trace();
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.5 * k).toFixed(2) + ')';                 // 땅에 닿는 번쩍
+    ctx.beginPath(); ctx.ellipse(f.toX, f.toY, 60 * (1.2 - k * 0.4), 24 * (1.2 - k * 0.4), 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+
+  // ===== 공개 =====
+  return {
+    spawn, aliveCount, clear,
+    // 덤 (테스트·다른 모듈이 참고할 수 있는 읽기용 도우미)
+    windupFrames,                                   // 이 난이도에서 base 프레임짜리 예고가 실제로 몇 프레임이 되는지
+    attackerCount: () => slotsTaken(null),          // 지금 windup/attack/접근 중인 적 수
+    minionCount,                                    // 살아 있는 보스 소환수 수
+  };
+})();
 </script>

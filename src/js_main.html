@@ -1,3 +1,16 @@
 <script>
-/* core 모듈이 작성 */
+/* ==========================================================================
+   js_main.html — 부팅 (core 모듈). 모든 모듈이 로드된 뒤 마지막에 실행됩니다. (계약서 5-6)
+   ========================================================================== */
+
+// 전역 오류는 기록만 남기고 게임은 멈추지 않아요 (아이가 하던 판이 오류 하나로 끝나면 안 되니까)
+window.onerror = function (message, source, line, col, error) {
+  console.error('[window.onerror]', message, `${source}:${line}:${col}`, error && error.stack ? error.stack : '');
+};
+window.onunhandledrejection = function (ev) {
+  console.error('[unhandledrejection]', ev && ev.reason);
+};
+
+Loop.start();
+Game.setScene(Scenes.title ? 'title' : (Scenes.play ? 'play' : 'boot'));   // 'boot' 씬(로딩 문구)은 core 가 기본 제공
 </script>
