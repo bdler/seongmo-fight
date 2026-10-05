@@ -658,16 +658,16 @@ await section('HUD: 값이 정확히 그려짐 (HP·목숨·스킬·보스·위�
   check('터치 기기(Game.touch)에서는 캔버스 스킬 칸을 그리지 않음 (DOM 터치 버튼이 대신함)', await g.ev(() => { Game.touch = true; const n = PX.run([{ x: 18, y: 106, w: 62, h: 62, pred: 'solid' }])[0]; Game.touch = false; return n === 0; }));
 
   // 보스 체력바
-  const bossPx = () => g.ev(() => PX.run([{ x: 250, y: 124, w: 460, h: 26, pred: 'solid' }])[0]);
+  const bossPx = () => g.ev(() => PX.run([{ x: 250, y: 140, w: 460, h: 26, pred: 'solid' }])[0]);
   check('보스가 없으면 보스 체력바 영역이 비어 있음', (await bossPx()) === 0);
   await g.ev(() => { Game.boss = { name: '젤리 대왕', hp: 300, maxHp: 300, boss: true }; FX.reduceMotion = true; });
-  const b100 = await g.ev(() => PX.run([{ x: 252, y: 126, w: 456, h: 18, pred: 'solid' }])[0]);
+  const b100 = await g.ev(() => PX.run([{ x: 252, y: 142, w: 456, h: 18, pred: 'solid' }])[0]);
   check('보스가 나오면 체력바가 그려짐', b100 > 5000, `${b100}`);
   // 보스 채움 폭 측정: 채움 색은 분홍 #ff8ad8 또는 빨강 #ff6b6b (r 이 높고 g 가 낮음)
   const fillW = hp => g.ev(hp => {
     Game.boss.hp = hp; Game.boss.maxHp = 300;
     for (let i = 0; i < 400; i++) PX.draw();                                  // 따라 내려오는 노란 바가 끝까지 내려오게
-    const ctx = PX.draw(), d = ctx.getImageData(254 * Loop.dpr, 140 * Loop.dpr, 452 * Loop.dpr, 1).data; let n = 0;
+    const ctx = PX.draw(), d = ctx.getImageData(254 * Loop.dpr, 156 * Loop.dpr, 452 * Loop.dpr, 1).data; let n = 0;
     for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200 && d[i] > 230 && d[i + 1] < 160 && d[i + 2] > 80) n++;
     return n;
   }, hp);
@@ -696,8 +696,12 @@ await section('HUD: 값이 정확히 그려짐 (HP·목숨·스킬·보스·위�
   });
   check('HUD(스킬 칸·보스 체력바·콤보·점수·체력판)가 바닥 띠(y 330~500)에 불투명 픽셀을 하나도 그리지 않음', Object.values(floorCover.states).every(n => n === 0), JSON.stringify(floorCover.states));
   await g.ev(() => { Game.boss = { name: '젤리 대왕', hp: 300, maxHp: 300, boss: true }; for (let i = 0; i < 400; i++) PX.draw(); });
-  check('(측정 확인) 보스가 있을 때 위쪽 체력바 자리에는 불투명 픽셀이 있음', (await g.ev(() => PX.run([{ x: 240, y: 84, w: 480, h: 70, pred: 'solid' }])[0])) > 5000);
+  check('(측정 확인) 보스가 있을 때 위쪽 체력바 자리에는 불투명 픽셀이 있음', (await g.ev(() => PX.run([{ x: 240, y: 100, w: 480, h: 70, pred: 'solid' }])[0])) > 5000);
   await g.ev(() => { Game.boss = null; });
+  // HUD 판끼리도 겹치지 않음: 체력판은 y 8~94 (x 10~314). 보스 체력바 카드는 그 아래(bossBarY-40 ≥ 94), 스킬 칸은 키 배지(위로 9px)까지 그 아래
+  const lay = await g.ev(() => ({ bossTop: UI_TUNE.hud.bossBarY - 40, skillTop: UI_TUNE.hud.skillTop }));
+  check('보스 체력바 카드가 체력판(y~94) 아래에서 시작하고 바닥 띠(330) 위에서 끝남', lay.bossTop >= 94 && lay.bossTop + 76 <= 330, JSON.stringify(lay));
+  check('스킬 칸(키 배지 포함)이 체력판 아래에서 시작하고 바닥 띠(330) 위에서 끝남', lay.skillTop - 9 >= 94 && lay.skillTop + 62 <= 330, JSON.stringify(lay));
 
   // 점수판이 오른쪽 위 DOM 버튼과 겹치지 않음
   const inset = await g.ev(() => {
@@ -1217,7 +1221,7 @@ await section('진짜 모듈: 시작 → 플레이 → 일시정지 → 게임 �
   await g.ev(() => Loop.draw()); await wait(600);                                        // 체력바가 위에서 미끄러져 내려오는 연출(0.4초)이 끝나길 (이 연출은 실제 시간 기준)
   const bossBar = await g.ev(() => {
     Loop.draw(); const c = Loop.canvas, ctx = c.getContext('2d'), d = Loop.dpr;
-    const im = ctx.getImageData(Math.round(250 * d), Math.round(118 * d), Math.round(460 * d), Math.round(30 * d)).data; let pink = 0;
+    const im = ctx.getImageData(Math.round(250 * d), Math.round(134 * d), Math.round(460 * d), Math.round(30 * d)).data; let pink = 0;
     for (let i = 0; i < im.length; i += 4) if (im[i] > 220 && im[i + 1] < 200 && im[i + 2] > 170 && im[i + 3] > 200) pink++;
     return { pink, boss: !!Game.boss, name: Game.boss && Game.boss.name };
   });

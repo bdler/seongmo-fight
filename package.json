@@ -5,7 +5,8 @@
   "description": "어린이용 벨트스크롤 액션 게임 (HTML5 Canvas + Google Apps Script)",
   "scripts": {
     "build": "node tools/build-local.mjs",
-    "test": "node tools/build-local.mjs && node tools/test-all.mjs"
+    "test": "node tools/build-local.mjs && node tools/test-all.mjs",
+    "test:quick": "node tools/build-local.mjs && node tools/test-all.mjs --quick"
   },
   "devDependencies": { "playwright": "^1.56.1" }
 }

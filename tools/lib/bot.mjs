@@ -59,10 +59,11 @@ function botMain(cfg) {
   const prev = window.__bot;
   if (prev) { const i = Loop.hooks.indexOf(prev.hook); if (i >= 0) Loop.hooks.splice(i, 1); }
 
-  // 실력 프로필: expert = 반응 즉시·연타 빠름 / kid = 사람(초등학생) 속도 (생각하는 간격·반응 지연·느린 연타·가끔 멍때림)
+  // 실력 프로필: expert = 반응 즉시·연타 빠름 / kid = 사람(초등학생) 속도 (생각하는 간격·반응 지연·느린 연타·가끔 멍때림) / novice = 처음 해 보는 아이
   const PROFILES = {
     expert: { think: 1, mashEvery: 4, dodgeLag: 0, hesitate: 0, look: 0, interruptRate: 0.5 },
     kid:    { think: 9, mashEvery: 7, dodgeLag: 15, hesitate: 0.06, look: 30, interruptRate: 0.15 },
+    novice: { think: 22, mashEvery: 11, dodgeLag: 34, hesitate: 0.3, look: 70, interruptRate: 0 },     // 처음 해 보는 아이: 느린 반응·느린 연타·자주 멈칫
   };
   const P = PROFILES[cfg.skill] || PROFILES.expert;
 

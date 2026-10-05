@@ -12,11 +12,12 @@
 //   d. 처음부터 끝까지 console.error / pageerror 없음
 //   e. 결과 화면의 「다시 하기」 → 깨끗한 새 판 (점수 0, 방 1, 남은 엔티티 없음)
 //   f. 어려움(god 없음)에서 가만히 있으면 게임 오버 → cleared=false + 격려 문구
-import { openGame, step } from '../lib/browser.mjs';
+import { openGame, step, launch, gameUrl } from '../lib/browser.mjs';
 import { check, finish } from '../lib/check.mjs';
 import { startThroughUI, installBot, botStats, runUntil } from '../lib/bot.mjs';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const CAP_FRAMES = 14 * 60 * 60;          // 하드 캡: 게임 시간 14분 (50400 프레임)
 const MIN_SECONDS = 60;                   // 이보다 짧으면 방을 건너뛰었거나 보스가 순식간에 죽은 것 (설계 목표 5~8분과는 따로 아래에서 알려줌)
@@ -31,6 +32,7 @@ const stat = (name, r) => console.log(`  [${name}] ${r}`);
 async function playRun({ name, difficulty, god = false, skill = 'kid', mode = 'play', seed = 1, nickname = '봇용사', keep = false }) {
   const g = await openGame({ file: process.env.GAME_HTML });
   const { page, errors } = g;
+  await page.evaluate(s => RNG.seed(s), 1000 + seed);                                   // 게임 난수도 시드 (거의 같은 판이 되지만, 화면을 그린 횟수에 따라 코인이 미끄러지는 거리가 조금 달라 완전히 같지는 않아요)
   const title0 = await page.evaluate(() => ({ scene: Game.scene, shown: !document.getElementById('ui-title').hidden }));
   // 기록용 훅 (관찰만 함) — 첫 방의 roomStarted 도 놓치지 않게 시작 버튼을 누르기 전에 설치
   await page.evaluate(() => {
@@ -159,6 +161,9 @@ const A = await playRun({ name: 'easy', difficulty: 'easy', skill: 'kid', keep: 
   await page.waitForFunction(() => Game.scene === 'play', null, { timeout: 5000 });
   const again = await page.evaluate(() => ({ room: Stage.roomIndex, score: Game.score, state: Stage.state }));
   check('타이틀에서 다시 시작해도 깨끗한 새 판', again.room === 0 && again.score === 0 && again.state === 'intro', JSON.stringify(again));
+  // 세 번 시작(처음 + 다시 하기 + 처음으로→시작)한 뒤에도 이벤트 리스너가 겹치지 않음: 가짜 enemyKilled 한 번에 점수가 정확히 한 번만 오름
+  const leak = await page.evaluate(() => { Game.combo.count = 0; const s0 = Game.score; Events.emit('enemyKilled', { score: 100, x: 300, y: 420, team: 'enemy', kind: 'enemy', boss: false }); return Game.score - s0; });
+  check('세 번 시작한 뒤에도 리스너가 겹치지 않음 (enemyKilled 한 번 → 점수 정확히 +100)', leak === 100, `+${leak}`);
   await step(page, 600);
   check('(d) 쉬움 전체 플레이(타이틀→결과→다시하기→처음으로→재시작) 동안 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
   await A.g.close();
@@ -190,6 +195,15 @@ for (const difficulty of ['normal', 'hard']) {
   check(`${difficulty} (god 없음): 결과 화면에 도착 (클리어 또는 게임 오버)`, R.r.scene === 'result' && !R.r.capped && !!R.res);
   check(`${difficulty} (god 없음): 결과가 일관됨 (클리어면 별≥1, 게임 오버면 별 0)`, R.res && (R.res.cleared ? R.res.stars >= 1 : R.res.stars === 0), `cleared=${R.res?.cleared} stars=${R.res?.stars}`);
   check(`(d) ${difficulty} (god 없음): 오류 없음`, R.errors.length === 0, R.errors.slice(0, 3).join(' | '));
+}
+
+// 처음 해 보는 아이처럼 느리고 어설픈 봇 (반응 지연·느린 연타·자주 멈칫): 더 오래 걸리고 가끔 맞지만 끝까지 갈 수 있어야 함
+console.log('\n== 처음 해 보는 아이 속도 (novice 봇, 쉬움) ==');
+{
+  const R = await playRun({ name: 'easy(novice)', difficulty: 'easy', god: false, skill: 'novice', seed: 3 });
+  check('쉬움 + novice 봇: 결과 화면에 도착하고 클리어 (게임 오버가 없는 난이도)', R.r.scene === 'result' && !R.r.capped && R.res?.cleared === true, JSON.stringify(R.res));
+  check(`쉬움 + novice 봇: ${MIN_SECONDS}초~14분 (실제 ${R.res ? fmtT(R.res.timeFrames) : '-'})`, R.res && R.res.timeFrames / 60 >= MIN_SECONDS && R.res.timeFrames / 60 <= 14 * 60);
+  check('(d) 쉬움 + novice 봇: 오류 없음', R.errors.length === 0, R.errors.slice(0, 3).join(' | '));
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +239,107 @@ console.log('\n== f. 어려움 + 가만히 있기 → 게임 오버 ==');
   await step(page, 300);
   check('(d) 어려움 가만히 있기(게임 오버→다시 하기): 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
   await F.g.close();
+}
+
+// ---------------------------------------------------------------------------
+// 쓰러짐 · 부활 흐름: 쉬움(무한 목숨, 부활 때 점수 10% 감소) / 보통(목숨 3개 → 3번째 쓰러짐에서 게임 오버)
+// ---------------------------------------------------------------------------
+console.log('\n== 쓰러짐과 부활 ==');
+{
+  // 쉬움: 점수를 번 뒤 가만히 서서 맞아 쓰러짐 → 90프레임 뒤 제자리 부활 → 이어서 클리어 (별은 2개)
+  const g = await openGame({ file: process.env.GAME_HTML });
+  const { page, errors } = g;
+  await page.evaluate(() => RNG.seed(2024));
+  await startThroughUI(page, { nickname: '부활봇', difficulty: 'easy' });
+  await page.evaluate(() => { window.__ev = []; Events.on('playerDied', () => window.__ev.push('died')); Events.on('playerRevived', () => window.__ev.push('revived')); Events.on('gameOver', () => window.__ev.push('gameOver')); });
+  await installBot(page, { mode: 'play', seed: 5, skill: 'kid' });
+  await runUntil(page, () => Game.score >= 400, { capFrames: 4000, chunk: 60 });
+  await page.evaluate(() => { window.__bot.cfg.mode = 'idle'; });
+  const d = await runUntil(page, () => Stage.state === 'dead', { capFrames: 9000, chunk: 30 });
+  const atDeath = await page.evaluate(() => ({ score: Game.score, deaths: Game.deaths, lives: Game.lives, dead: Game.player.dead, state: Game.player.state, room: Stage.roomIndex }));
+  check('쉬움: 가만히 있으면 쓰러지고(Stage.state=dead) 쓰러진 횟수가 1', !d.capped && atDeath.deaths === 1 && atDeath.dead && atDeath.state === 'down', JSON.stringify(atDeath));
+  check('쉬움: 목숨은 줄지 않음 (Infinity)', atDeath.lives === Infinity);
+  await runUntil(page, () => Stage.state !== 'dead', { capFrames: 300, chunk: 5 });
+  const afterRev = await page.evaluate(() => ({ score: Game.score, hp: Game.player.hp, maxHp: Game.player.maxHp, dead: Game.player.dead, invuln: Game.player.invuln, state: Stage.state, scene: Game.scene, ev: window.__ev.slice() }));
+  const lost = Math.round(atDeath.score * 0.1);
+  check('쉬움: 90프레임 뒤 제자리 부활 — 체력 가득, 무적, 싸우던 상태로 복귀', !afterRev.dead && afterRev.hp === afterRev.maxHp && afterRev.invuln > 0 && afterRev.state === 'fight' && afterRev.scene === 'play', JSON.stringify(afterRev));
+  check(`쉬움: 부활할 때 점수가 정확히 10% 줄어듦 (${atDeath.score} → ${atDeath.score - lost})`, afterRev.score === atDeath.score - lost, `실제 ${afterRev.score}`);
+  check('이벤트 순서: playerDied → playerRevived (gameOver 없음)', JSON.stringify(afterRev.ev) === '["died","revived"]', JSON.stringify(afterRev.ev));
+  await page.evaluate(() => { window.__bot.cfg.mode = 'play'; });
+  const r = await runUntil(page, () => Game.scene === 'result', { capFrames: 40000, chunk: 600 });
+  const res = await page.evaluate(() => Game.result);
+  check('쉬움: 한 번 쓰러졌어도 이어서 클리어 — cleared=true, 쓰러짐 1, 별 2개', !r.capped && res?.cleared === true && res?.deaths === 1 && res?.stars === 2, JSON.stringify(res));
+  check('(d) 쉬움 쓰러짐·부활·클리어 흐름 동안 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
+  await g.close();
+}
+{
+  // 보통: 목숨 3개 — 가만히 있으면 3번 쓰러지고 게임 오버 (사이사이 2번 부활)
+  const N = await playRun({ name: 'normal+idle', difficulty: 'normal', mode: 'idle', keep: true });
+  const { page, res, r, errors } = N;
+  check('보통 + 가만히: 결과 씬 도착, 게임 오버(cleared=false), 별 0', !r.capped && res?.cleared === false && res?.stars === 0, JSON.stringify(res));
+  check('보통: 목숨 3개 → 쓰러짐 정확히 3번, 남은 목숨 0', res?.deaths === 3 && N.end.lives === 0, `deaths=${res?.deaths} lives=${N.end.lives}`);
+  check('(d) 보통 가만히 있기: 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
+  await N.g.close();
+}
+
+// ---------------------------------------------------------------------------
+// Apps Script 와 같은 환경: 게임을 "origin 이 없는 샌드박스 iframe" 안에서 돌림 (localStorage 접근이 막힘)
+//   → Store 의 메모리 폴백, 닉네임 기억, 랭킹(내 기기) 이 오류 없이 동작해야 함
+// ---------------------------------------------------------------------------
+console.log('\n== 샌드박스 iframe (Apps Script 환경 흉내, localStorage 막힘) ==');
+{
+  const dir = mkdtempSync(join(tmpdir(), 'jd-host-'));
+  const hostFile = join(dir, 'host.html');
+  writeFileSync(hostFile, `<!doctype html><html><body style="margin:0"><iframe id="f" src="${gameUrl(process.env.GAME_HTML)}" sandbox="allow-scripts" style="width:1280px;height:720px;border:0"></iframe></body></html>`);
+  const browser = await launch();
+  try {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+    page.on('console', m => { if (m.type() === 'error') errors.push('console.error: ' + m.text()); });
+    await page.route(/^https?:/, r => r.fulfill({ status: 200, contentType: 'text/css', body: '' }));
+    await page.goto('file://' + hostFile);
+    await page.waitForFunction(() => document.getElementById('f') !== null);
+    let frame = null;
+    for (let i = 0; i < 40 && !frame; i++) { frame = page.frames().find(f => f !== page.mainFrame()); if (!frame) await page.waitForTimeout(100); }
+    await frame.waitForFunction(() => typeof Loop !== 'undefined' && Loop.started === true, null, { timeout: 8000 });
+    await frame.evaluate(() => { Loop.manual = true; });
+    const ls = await frame.evaluate(() => { try { window.localStorage.getItem('x'); return 'accessible'; } catch (e) { return 'blocked'; } });
+    check('샌드박스 iframe 에서는 localStorage 가 실제로 막혀 있음 (테스트 환경 확인)', ls === 'blocked', ls);
+    await startThroughUI(frame, { nickname: '샌드박스', difficulty: 'easy' });
+    await installBot(frame, { mode: 'play', seed: 1, skill: 'kid' });
+    const r = await runUntil(frame, () => Game.scene === 'result', { capFrames: CAP_FRAMES, chunk: 600 });
+    await frame.evaluate(() => Loop.step(150));
+    await frame.waitForFunction(() => document.querySelector('#ui-result .save').dataset.state !== 'saving', null, { timeout: 15000 });
+    await frame.waitForSelector('#ui-result .rank-row', { timeout: 8000 });
+    const o = await frame.evaluate(() => ({ res: Game.result, save: document.querySelector('#ui-result .save').dataset.state, mine: document.querySelectorAll('#ui-result .rank-row[data-me="1"]').length, nick: Game.nickname }));
+    check('샌드박스 iframe: 처음부터 끝까지 클리어 (결과 씬 도착)', !r.capped && o.res?.cleared === true, JSON.stringify(o.res));
+    check('샌드박스 iframe: 저장소가 막혀도 기록이 내 기기(메모리)에 저장되고 랭킹에 내 줄이 보임', o.save === 'local' && o.mine === 1, `${o.save} mine=${o.mine}`);
+    check('(d) 샌드박스 iframe 플레이 동안 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
+  } finally {
+    await browser.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 실시간 루프 (Loop.manual 끄기): 진짜 requestAnimationFrame 으로 몇 초 돌려도 정상 속도·오류 없음
+// ---------------------------------------------------------------------------
+console.log('\n== 실시간 루프 (manual 끔) ==');
+{
+  const g = await openGame({ file: process.env.GAME_HTML, manual: false });
+  const { page, errors } = g;
+  await startThroughUI(page, { nickname: '실시간', difficulty: 'easy' });
+  await installBot(page, { mode: 'play', seed: 1, skill: 'kid' });
+  const a = await page.evaluate(() => ({ t: Loop.tickCount, g: Game.frame, now: performance.now(), manual: Loop.manual }));
+  await page.waitForTimeout(4000);
+  const b = await page.evaluate(() => ({ t: Loop.tickCount, g: Game.frame, now: performance.now(), kills: Game.kills, score: Game.score, scene: Game.scene }));
+  const sec = (b.now - a.now) / 1000, tps = (b.t - a.t) / sec;
+  check('실시간 루프: 초당 약 60틱 (25~75 사이)', !a.manual && tps > 25 && tps < 75, `${tps.toFixed(1)} 틱/초`);
+  check('실시간 루프: 봇이 실제로 싸우고 있음 (처치 또는 점수가 쌓임)', b.scene === 'play' && (b.kills > 0 || b.score > 0 || b.g > 150), JSON.stringify(b));
+  check('(d) 실시간 루프 4초 동안 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
+  await g.close();
 }
 
 finish('playthrough');

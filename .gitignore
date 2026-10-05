@@ -1,3 +1,4 @@
 node_modules/
 dist/_*.html
 *.log
+.clasp.json

@@ -1049,7 +1049,7 @@ const Stage = (() => {
   function drawTutorial(ctx) {
     const tut = S.tut;
     if (!S.active || !tut || !S.room || !S.room.tutorial || tut.fade >= 1) return;
-    if (api.state === 'transition' || api.state === 'victory' || api.state === 'over') return;
+    if (api.state === 'transition' || api.state === 'victory' || api.state === 'over' || api.state === 'dead') return;   // 쓰러졌을 땐 "앗! 쓰러졌어요" 글자와 겹치지 않게 숨김
     const touch = !!Game.touch;
     const cards = [
       { x: 190, done: tut.moved, text: '걸어가요', kind: 'move' },
@@ -1129,7 +1129,7 @@ const Stage = (() => {
     const left = b.life - b.t, pop = 1 + (1 - clamp01(b.t / 9)) * 0.45;
     ctx.save();
     ctx.globalAlpha = clamp01(left / 14) * clamp01(b.t / 4 + 0.2);
-    ctx.translate(W / 2, 214); ctx.scale(pop, pop);                           // 214: 보스 체력바(y~158)보다 아래, 바닥 띠(330)보다 위
+    ctx.translate(W / 2, 228); ctx.scale(pop, pop);                           // 228: 보스 체력바(y~176)보다 아래, 바닥 띠(330)보다 위
     Draw.text(ctx, b.text, 0, 0, { size: 56, color: b.color, lw: 7 });
     if (b.sub) Draw.text(ctx, b.sub, 0, 36, { size: 26, color: COLORS.cream, lw: 5 });
     ctx.restore();

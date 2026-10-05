@@ -323,6 +323,10 @@ html[data-portrait="1"] .rotate { display: flex; }
   transition: transform .06s ease;
 }
 .tc-btn:active, .tc-btn.down { transform: translateY(calc(var(--sh) - 1px)) scale(.97); box-shadow: 0 1px 0 rgba(43,27,58,.7); }
+/* 버튼 뒤로 캐릭터가 비쳐 보이게 살짝 투명하게 (눌렀을 때는 또렷하게). 터치 버튼은 화면 가운데 싸움터를 일부 가리기 때문이에요 */
+.tc-btn { opacity: .84; }
+.tc-btn:active, .tc-btn.down { opacity: 1; }
+.tc-stick .tc-base { opacity: .9; }
 .tc-ico { font-size: 1em; }
 .tc-txt { font-size: .5em; }
 .tc-atk { right: 0; bottom: 0; width: max(96px, calc(142 * var(--u))); height: max(96px, calc(142 * var(--u))); font-size: max(34px, calc(50 * var(--u))); background: radial-gradient(circle at 38% 30%, #fff, #ffd1f0 55%, #ff8ad8); }
