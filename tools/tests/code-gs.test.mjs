@@ -682,6 +682,14 @@ function plainProblem(v, path = 'root') {
     'fuck', 'FUCK', 'f u c k', 'fuuck', 'fuuuck', 'fck', 'fvck', 'phuck', 'fuk', 'fuc', 'shit', 'S H I T', 'sh1t', 'shiit', 'bitch', 'b1tch', 'asshole', 'assshole', 'ass', 'a55', 'dick', 'dickhead', 'cock', 'tits', 'boobs',
     'p0rn', 'p 0 r n', 'porn', 'sex', 'sexy', 'sex123', 'nazi', 'Nazi99', 'kkk', 'rape', 'gay', 'wtf', 'kys', 'suicide', 'killme', 'Hitler', 'hit1er', 'h1tler', 'nigga', 'cunt', 'pussy', 'slut', 'whore', 'jackass',
     'tlqkf', 'qudtls', 'sibal', 'ssibal', 'shibal',
+    // 첫 글자만 자음으로 쓴 것 (ㅅ발 ㅂ신 ㅈ같 ㅁ친): 홀로 쓴 자음일 때만
+    'ㅅ발', 'ㅆ발', 'ㅂ신', 'ㅁ친', 'ㅁ친놈', 'ㅈ같', 'ㅈ같네', 'ㅈ나', 'ㅈ랄', 'ㅇㅅ발', 'ㅋㅅ발', '아이ㅅ발', '옷ㅅ발', 'ㅅ 발', 'ㅅ1발',
+    // 엉뚱한 낱자모·영어를 끼워 낱말을 갈라 숨기기 (한글이 들어 있으면 낱자모를, 섞어 썼으면 영어·숫자도 빼고 봐요)
+    'ㅂㅎㅅ', 'ㅈㅋㄹ', 'ㅅㅎㅂ', '시ㅇ발', '시ㅇㅇ발', '병ㅁ신', '지ㅇ랄', '시a발', '시q발', '시ㅇa발', '시1ㅇ발', 'fㅇuck', 'fㅁㅁuck', 'sh1ㅇt', '시ㅇ바알', '3학년Ass',
+    // QA(KIDS-01)가 빠졌다고 적은 것 / 아이들이 흔히 쓰는 말
+    '애미', '애비', '니애비', '딸딸이', '좆만이', '좆도', '좃만', '죽어라', '죽여라', '뒈져라', '뒤져라', '디져라', '느그매', '야설', '성관계', '젖꼭지', '고환', '발기', '정액', '유두', '후장', '항문', '학살', '조건만남', '몸캠',
+    '왕따', '멍청이', '찌질이', '쓰레기', '꼴통', '등신', '머저리', '대가리', '아가리', '개독', '빨갱이', '노알라', '한녀', '테러', '운지', '마리화나', '엑스터시', '아편',
+    'fcuk', 'fuq', 'piss', 'boner', 'weed', 'meth', 'heroin', 'condom', 'idiot', 'stupid', 'dumb', 'loser', 'ugly', 'jerk', 'thot', 'sperm', 'nipple', 'massacre', 'cocaine', 'xvideos', 'tranny', 'hooker', 'incest', 'semen', 'gook',
   ];
   const slipped = mustBlock.filter(n => verdict(n).error !== BAD);
   check(`[필터] 걸려야 하는 이름 ${mustBlock.length}개가 전부 "쓸 수 없어요" 로 거절됨`, slipped.length === 0, slipped.slice(0, 12).join(' / '));
@@ -699,6 +707,10 @@ function plainProblem(v, path = 'root') {
     'Jelly', 'Candy', 'Sunny', 'Mia', 'Tom', 'Cucumber', 'Scrape', 'Nazia', 'Dickens', 'Essen', 'grape', 'class', 'pass', 'Anna', 'Bobby', 'Aaron', 'Hannah', 'Jessica', 'Hancock', 'Peacock', 'Cocktail', 'Cockatoo', 'Dickie', 'Dickson',
     'Grassy', 'Assist', 'Bass', 'Cumin', 'Analysis', 'Canal', 'Gayle', 'Gaylord', 'Homer', 'Homework', 'Fukuoka', 'Fuki', 'Drape', 'Scrap', 'Banana', 'Japan', 'Raccoon', 'Pakistan', 'Niger', 'Diego', 'Shoe', 'Titan', 'Little', 'Kitty',
     'Spicy', 'Cocoon', 'Moronic', 'Soldier', 'Swank', 'Prickly', 'Shiba', 'Max', 'Alex', 'Texas',
+    // 새로 넣은 낱말 때문에 괜히 막히면 안 되는 이름 (받침이 이어 붙어 보이는 것, 낱말 속에 들어 있는 것, 닮은 낱말)
+    '옷발', '밥신', '좇아', '고환율', '성교육', '가발기', '정액권', '화학살충제', '유두리', '왕따봉', '쓰레기통', '에어로빅', '에로스', '골리앗', '죽어가는', '뒤져보자',
+    '말랑jelly', '민준Kim', 'Mia하늘', '별빛Star', '젤리Bee', 'Sky구름', 'Max왕', '푸딩ㅋㅋ', '아ㅇ발', 's하i하t',
+    '2018년생', '18년생', '열여덟', 'Heroine', 'Tweed', 'Methane', 'Idiotic', 'Uglydoll', 'Weeds', 'Stupidly', 'Jerky', 'Piston', 'Condor', 'Massa', 'Marina', 'Nippy',
   ];
   const wrong = innocent.filter(n => !verdict(n).ok);
   check(`[필터] 괜히 막으면 안 되는 이름 ${innocent.length}개가 전부 통과 (오탐 없음)`, wrong.length === 0, wrong.slice(0, 12).map(n => n + ' → ' + verdict(n).error).join(' / '));
@@ -715,7 +727,8 @@ function plainProblem(v, path = 'root') {
   check('[필터] 자음만 쓴 줄임말은 자음 낱글자로 쓴 것만: ㅅㅂ 걸림 / 옷방 · 밥사 · 없는 · 값진 통과 (받침 ㅅ+ㅂ, ㅂ+ㅅ 오탐 없음)', verdict('ㅅㅂ').error === BAD && verdict('아ㅂㅅ').error === BAD && ['옷방', '밥사', '없는', '값진', '법사', '입사'].every(n => verdict(n).ok));
   check('[필터] 된소리: 예사소리로 적은 낱말은 된소리도 걸림(시발=씨발), 된소리로 적은 낱말은 된소리만(찐따 걸림 / 진달래 · 진단 통과, 쌍년 걸림 / 상놈 통과)', verdict('씨발').error === BAD && verdict('찐따').error === BAD && verdict('진단').ok && verdict('쌍년').error === BAD && verdict('상놈').ok);
   check('[필터] 영어: 같은 글자를 늘여 써도 걸림(fuuuck) 하지만 글자가 모자라거나 다른 낱말은 통과(Niger != nigger, Bob != boob, As != ass, Anna, Bobby)', verdict('fuuuck').error === BAD && verdict('nigger').error === BAD && verdict('Niger').ok && verdict('Bob').ok && verdict('boob').error === BAD && verdict('As').ok && verdict('ass').error === BAD && verdict('Anna').ok && verdict('Bobby').ok);
-  check('[필터] 알려진 오탐은 일부러 막아 둠 (아이들 안전이 먼저): 시발점 · 병신년 · 꺼져라용 · Essex · Sussex · pussycat · Shiitake — 바꾸려면 이 줄을 같이 고쳐요', ['시발점', '병신년', '꺼져라용', 'Essex', 'Sussex', 'pussycat', 'Shiitake'].every(n => verdict(n).error === BAD));
+  check('[필터] 알려진 오탐은 일부러 막아 둠 (아이들 안전이 먼저): 시발점 · 병신년 · 꺼져라용 · 쫒아(쫓아의 틀린 맞춤법) · Essex · Sussex · Peniston · pussycat · Shiitake — 바꾸려면 이 줄을 같이 고쳐요', ['시발점', '병신년', '꺼져라용', '쫒아', 'Essex', 'Sussex', 'Peniston', 'pussycat', 'Shiitake'].every(n => verdict(n).error === BAD));
+  check('[필터] 첫 글자만 자음으로 쓴 낱말(ㅅ발 ㅂ신)은 홀로 쓴 자음일 때만: ㅅ발 · ㅇㅅ발 · 아이ㅅ발 · 옷ㅅ발 걸림 / 옷발 · 밥신 · 밥발 통과 (앞 글자의 받침 ㅅ ㅂ 이 이어 붙어 보이는 오탐 없음)', ['ㅅ발', 'ㅇㅅ발', '아이ㅅ발', '옷ㅅ발', 'ㅂ신', '밥ㅂ신'].every(n => verdict(n).error === BAD) && ['옷발', '밥신', '밥발', '옷팔', '앞신', '집신'].every(n => verdict(n).ok));
 
   // ---- (e) 금칙어 목록 자체: 모든 단어가 (따로 입력해도) 걸리고, 흔한 모양으로 바꿔도 걸림 / 새 단어를 넣으면 바로 적용
   const strong = env.const('BLOCKLIST_'), whole = env.const('BLOCKLIST_WHOLE_');

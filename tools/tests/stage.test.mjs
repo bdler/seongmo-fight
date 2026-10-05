@@ -94,7 +94,8 @@ await ev(() => {
   T.clearRoom = () => T.run(() => Stage.state === 'clear');
   T.exitRoom = () => { Game.player.x = Game.world.width - 20; return T.run(() => Stage.state === 'intro', 200, false); };
   T.toRoom = i => { while (Stage.roomIndex < i && Game.scene === 'play') { if (T.clearRoom() < 0) return false; if (T.exitRoom() < 0) return false; } return Stage.roomIndex === i; };
-  T.toBossFight = () => { if (!T.toRoom(4)) return false; return T.run(() => Stage.state === 'fight' && !!Game.boss && !Game.boss.untargetable, 600, false) >= 0; };
+  T.last = () => STAGES[0].rooms.length - 1;                // 보스방(마지막 방) 번호 — 방 수를 하드코딩하지 않음
+  T.toBossFight = () => { if (!T.toRoom(T.last())) return false; return T.run(() => Stage.state === 'fight' && !!Game.boss && !Game.boss.untargetable, 600, false) >= 0; };
   T.die = () => { const p = Game.player; p.invuln = 0; const g = Debug.god; Debug.god = false; const r = Combat.damage(p, 99999, { team: 'enemy', sfx: null, freeze: 0 }); Debug.god = g; return r; };
   T.fresh = (diff = 'normal', seed = 1, extra = {}) => {
     T.events.length = 0; T.sfx.length = 0; T.txt.length = 0; T.spawns.length = 0; T.pickups.length = 0;
@@ -125,20 +126,26 @@ await section('데이터', async () => {
   const d = await ev(() => JSON.parse(JSON.stringify(STAGES)));
   check('STAGES[0] 은 사탕 숲 (id stage1, theme candy)', d.length >= 1 && d[0].id === 'stage1' && d[0].name === '사탕 숲' && d[0].theme === 'candy');
   const rooms = d[0].rooms;
-  check('방이 5개', rooms.length === 5);
-  check('방 이름이 계약서 표와 같음', eq(rooms.map(r => r.name), ['숲 입구', '달콤한 오솔길', '초콜릿 시냇가', '젤리 동굴 입구', '젤리 대왕의 방']));
-  check('방 너비 960/1920/1920/1920/960', eq(rooms.map(r => r.width), [960, 1920, 1920, 1920, 960]));
+  check('방이 7개 (평범한 방 6 + 보스방)', rooms.length === 7);
+  check('방 이름이 표와 같음', eq(rooms.map(r => r.name), ['숲 입구', '달콤한 오솔길', '초콜릿 시냇가', '솜사탕 언덕', '젤리 동굴 입구', '반짝 수정 동굴', '젤리 대왕의 방']));
+  check('방 너비 960/1920×5/960', eq(rooms.map(r => r.width), [960, 1920, 1920, 1920, 1920, 1920, 960]));
   const w = r => r.waves.map(wv => wv.map(g => `${g.type}x${g.count}`).join('+'));
-  check('방1 웨이브: 슬라임2 → 슬라임3', eq(w(rooms[0]), ['slimex2', 'slimex3']));
-  check('방2 웨이브: 슬라임3 → 슬라임2+병정1', eq(w(rooms[1]), ['slimex3', 'slimex2+soldierx1']));
-  check('방3 웨이브: 병정2+슬라임2 → 구름2+슬라임2', eq(w(rooms[2]), ['soldierx2+slimex2', 'cloudx2+slimex2']));
-  check('방4 웨이브: 구름1+병정2 → 슬라임3+병정2+구름1', eq(w(rooms[3]), ['cloudx1+soldierx2', 'slimex3+soldierx2+cloudx1']));
-  check('보상: 방2·방4 는 사탕, 나머지는 없음', eq(rooms.map(r => r.reward || null), [null, 'candy', null, 'candy', null]));
-  check('보스방만 boss:true, 웨이브 없음', eq(rooms.map(r => !!r.boss), [false, false, false, false, true]) && rooms[4].waves.length === 0);
-  check('방 1 에만 튜토리얼', eq(rooms.map(r => !!r.tutorial), [true, false, false, false, false]));
+  check('방1 웨이브: 슬라임3 → 슬라임4', eq(w(rooms[0]), ['slimex3', 'slimex4']));
+  check('방2 웨이브: 슬라임4 → 슬라임3+병정1 → 슬라임2+병정2', eq(w(rooms[1]), ['slimex4', 'slimex3+soldierx1', 'slimex2+soldierx2']));
+  check('방3 웨이브: 병정2+슬라임3 → 구름2+슬라임3 → 병정2+구름1+슬라임2', eq(w(rooms[2]), ['soldierx2+slimex3', 'cloudx2+slimex3', 'soldierx2+cloudx1+slimex2']));
+  check('방4 웨이브: 슬라임4+구름1 → 병정3+슬라임2 → 구름2+병정2+슬라임2', eq(w(rooms[3]), ['slimex4+cloudx1', 'soldierx3+slimex2', 'cloudx2+soldierx2+slimex2']));
+  check('방5 웨이브: 구름1+병정2+슬라임2 → 슬라임3+병정2+구름1 → 병정3+구름2+슬라임2', eq(w(rooms[4]), ['cloudx1+soldierx2+slimex2', 'slimex3+soldierx2+cloudx1', 'soldierx3+cloudx2+slimex2']));
+  check('방6 웨이브: 병정2+구름2+슬라임3 → 슬라임4+병정3+구름2 → 병정3+구름2+슬라임3', eq(w(rooms[5]), ['soldierx2+cloudx2+slimex3', 'slimex4+soldierx3+cloudx2', 'soldierx3+cloudx2+slimex3']));
+  const total = rooms.reduce((n, r) => n + r.waves.reduce((m, wv) => m + wv.reduce((k, g) => k + g.count, 0), 0), 0);
+  check('방에 나오는 적은 모두 92마리 (보스·소환수 제외)', total === 92, String(total));
+  check('보상: 보스방을 뺀 모든 방이 사탕 (6번)', eq(rooms.map(r => r.reward || null), ['candy', 'candy', 'candy', 'candy', 'candy', 'candy', null]));
+  check('보스방만 boss:true, 웨이브 없음', eq(rooms.map(r => !!r.boss), [false, false, false, false, false, false, true]) && rooms[6].waves.length === 0);
+  check('방 1 에만 튜토리얼', eq(rooms.map(r => !!r.tutorial), [true, false, false, false, false, false, false]));
+  check('큰 방(1920) 은 웨이브가 3개씩, 방 1 은 2개', rooms.slice(1, 6).every(r => r.waves.length === 3) && rooms[0].waves.length === 2);
   const looks = await ev(() => Object.keys(STAGE_TUNE.looks));
   check('모든 방의 look 이 STAGE_TUNE.looks 에 있음', rooms.every(r => looks.includes(r.look)), rooms.map(r => r.look).join(','));
-  check('한 번에 6마리 상한 / 드롭 12%·35% / 코인 +50 / 사탕 +20', await ev(() => STAGE_TUNE.maxOnScreen === 6 && STAGE_TUNE.drop.candy === 0.12 && STAGE_TUNE.drop.coin === 0.35 && STAGE_TUNE.pickup.coinScore === 50 && STAGE_TUNE.pickup.candyHeal === 20));
+  check('룩: 솜사탕 언덕은 숲, 젤리 동굴 입구는 동굴, 반짝 수정 동굴은 수정 룩', rooms[3].look === 'forest' && rooms[4].look === 'cave' && rooms[5].look === 'crystal' && rooms[6].look === 'boss', rooms.map(r => r.look).join(','));
+  check('한 번에 6마리 상한 / 드롭 15%·35% / 코인 +50 / 사탕 +40', await ev(() => STAGE_TUNE.maxOnScreen === 6 && STAGE_TUNE.drop.candy === 0.15 && STAGE_TUNE.drop.coin === 0.35 && STAGE_TUNE.pickup.coinScore === 50 && STAGE_TUNE.pickup.candyHeal === 40));
 });
 
 // ===========================================================================
@@ -171,7 +178,7 @@ await section('시작과 intro', async () => {
   check('start 직후: play 씬 / intro / 방 0 / 웨이브 -1', s.scene === 'play' && s.state === 'intro' && s.ri === 0 && s.wi === -1);
   check('난이도·닉네임이 Game 에 반영 (hard → 목숨 1)', s.diff === 'hard' && s.nick === '용사' && s.lives === 1);
   check('주인공이 만들어져 Game.player 로 등록, 왼쪽에서 시작', s.isPlayer && s.kind === 'player' && s.px === 60 && s.py === 420, `x=${s.px} y=${s.py}`);
-  check('방 너비 960, Game.stage 가 HUD 용으로 채워짐', s.w === 960 && eq(s.stage, { id: 'stage1', name: '사탕 숲', roomIndex: 0, roomCount: 5, roomName: '숲 입구' }), JSON.stringify(s.stage));
+  check('방 너비 960, Game.stage 가 HUD 용으로 채워짐', s.w === 960 && eq(s.stage, { id: 'stage1', name: '사탕 숲', roomIndex: 0, roomCount: 7, roomName: '숲 입구' }), JSON.stringify(s.stage));
   check('보스 없음, 결과 null, 적 없음', s.boss === null && s.result === null && s.foes === 0);
   const ev0 = await ev(() => T.events.filter(e => e.n === 'roomStarted').map(e => e.index));
   check("'roomStarted' 가 방 0 으로 한 번", eq(ev0, [0]), JSON.stringify(ev0));
@@ -182,7 +189,7 @@ await section('시작과 intro', async () => {
   check('intro 89프레임째까지는 intro 이고 적이 없음', q.state === 'intro' && q.foes === 0 && q.waveIndex === -1, JSON.stringify(q));
   await step(page, 1);
   q = await snapOf();
-  check('intro 90프레임째에 fight 로 넘어가고 웨이브 0 시작', q.state === 'fight' && q.waveIndex === 0 && q.queue === 2, JSON.stringify(q));
+  check('intro 90프레임째에 fight 로 넘어가고 웨이브 0 시작 (슬라임 3마리 대기열)', q.state === 'fight' && q.waveIndex === 0 && q.queue === 3, JSON.stringify(q));
   const intro = await ev(() => STAGE_TUNE.introFrames);
   check('intro 길이 = 숫자표(90프레임, 1.5초)', intro === 90);
 
@@ -190,7 +197,7 @@ await section('시작과 intro', async () => {
   await NEWGAME('normal', 3);
   await step(page, 30);
   const t1 = await ev(() => T.overlayTexts());
-  check('intro 중 오버레이에 방 이름과 "1 / 5" 가 그려짐', t1.includes('숲 입구') && t1.some(s => s.includes('1 / 5')) && t1.some(s => s.includes('사탕 숲')), JSON.stringify(t1));
+  check('intro 중 오버레이에 방 이름과 "1 / 7" 이 그려짐 (방 수는 데이터에서)', t1.includes('숲 입구') && t1.some(s => s.includes('1 / 7')) && t1.some(s => s.includes('사탕 숲')), JSON.stringify(t1));
   await step(page, 70);
   const t2 = await ev(() => T.overlayTexts());
   check('fight 에서는 방 이름 배너가 사라짐 (부정)', !t2.includes('숲 입구'), JSON.stringify(t2));
@@ -211,19 +218,20 @@ await section('웨이브', async () => {
   await step(page, 90 + 200);                             // 싸움 시작 + 아무도 안 잡고 한참 기다림
   let q = await snapOf();
   const spawned1 = await ev(() => T.spawns.length);
-  check('웨이브 1 을 안 잡으면 웨이브 2 는 안 나옴 (슬라임 2마리뿐)', q.waveIndex === 0 && spawned1 === 2 && q.foes === 2 && q.queue === 0, JSON.stringify(q) + ' spawned=' + spawned1);
+  check('웨이브 1 을 안 잡으면 웨이브 2 는 안 나옴 (슬라임 3마리뿐)', q.waveIndex === 0 && spawned1 === 3 && q.foes === 3 && q.queue === 0, JSON.stringify(q) + ' spawned=' + spawned1);
   const types1 = await ev(() => T.spawns.map(s => s.type));
-  check('웨이브 1 은 슬라임 2마리', eq(types1, ['slime', 'slime']));
+  check('웨이브 1 은 슬라임 3마리', eq(types1, ['slime', 'slime', 'slime']));
   const drop = await ev(() => T.spawns.every(s => s.opts && s.opts.drop === true));
   check('좁은 방(960)은 위에서 떨어지며 등장 (drop:true)', drop);
+  check('웨이브 적은 모두 hunt:true (거리와 상관없이 처음부터 플레이어를 쫓음)', await ev(() => T.spawns.every(s => s.opts && s.opts.hunt === true)));
   const xs = await ev(() => T.spawns.map(s => s.x));
   check('떨어지는 위치는 화면 안 (110~850)', xs.every(x => x >= 110 && x <= 850), JSON.stringify(xs));
 
   // 한 마리만 잡고 한참 기다려도 (한 마리가 남아 있으니) 다음 웨이브는 안 나옴 (부정)
-  await ev(() => { T.run(() => T.foes().length === 2 && T.foes().every(e => !e.untargetable), 200, false); T.hit(T.foes()[0]); Game.player.invuln = 99999; });
+  await ev(() => { T.run(() => T.foes().length === 3 && T.foes().every(e => !e.untargetable), 200, false); T.hit(T.foes()[0]); Game.player.invuln = 99999; });
   await step(page, 150);
   q = await snapOf();
-  check('2마리 중 1마리만 잡고 150프레임이 지나도 웨이브 2 가 안 나옴 (부정)', q.waveIndex === 0 && q.foes === 1 && (await ev(() => T.spawns.length)) === 2, JSON.stringify(q));
+  check('3마리 중 1마리만 잡고 150프레임이 지나도 웨이브 2 가 안 나옴 (부정)', q.waveIndex === 0 && q.foes === 2 && (await ev(() => T.spawns.length)) === 3, JSON.stringify(q));
 
   // 웨이브 1 처치 → waveGap 동안은 아무것도 안 나옴 → 웨이브 2
   await ev(() => { T.run(() => T.foes().every(e => !e.untargetable), 200, false); T.killAll(); });
@@ -232,21 +240,21 @@ await section('웨이브', async () => {
   const gap = await ev(() => STAGE_TUNE.waveGap);
   await step(page, gap - 2);
   q = await snapOf();
-  check(`숨 돌리는 ${gap - 1}프레임 동안엔 다음 웨이브가 안 나옴 (부정)`, q.waveIndex === 0 && (await ev(() => T.spawns.length)) === 2, JSON.stringify(q));
+  check(`숨 돌리는 ${gap - 1}프레임 동안엔 다음 웨이브가 안 나옴 (부정)`, q.waveIndex === 0 && (await ev(() => T.spawns.length)) === 3, JSON.stringify(q));
   await step(page, 3);
   q = await snapOf();
-  check('웨이브 갭 뒤에 웨이브 2 가 시작됨 (waveIndex 1, 슬라임 3마리 대기열)', q.waveIndex === 1 && q.queue >= 2 && q.state === 'fight', JSON.stringify(q));
+  check('웨이브 갭 뒤에 웨이브 2 가 시작됨 (waveIndex 1, 슬라임 4마리 대기열)', q.waveIndex === 1 && q.queue >= 3 && q.state === 'fight', JSON.stringify(q));
   check("'다음 물결!' 안내가 뜸", (await snapOf()).banner === '다음 물결!');
   await step(page, 200);
   const types2 = await ev(() => T.spawns.map(s => s.type));
-  check('웨이브 2 까지 슬라임 5마리 (2 + 3)', eq(types2, ['slime', 'slime', 'slime', 'slime', 'slime']), JSON.stringify(types2));
+  check('웨이브 2 까지 슬라임 7마리 (3 + 4)', eq(types2, ['slime', 'slime', 'slime', 'slime', 'slime', 'slime', 'slime']), JSON.stringify(types2));
   await shot('r1_fight_wave2');
 
   // 방 2 의 두 번째 웨이브에는 병정이 섞임 (슬라임·병정 번갈아)
   await ev(() => { T.toRoom(1); T.spawns.length = 0; });
-  await ev(() => { T.run(() => Stage.state === 'fight' && Stage.waveIndex === 1 && T.spawns.length >= 6, 1500); });
+  await ev(() => { T.run(() => Stage.state === 'fight' && Stage.waveIndex === 1 && T.spawns.length >= 8, 1500); });
   const t3 = await ev(() => T.spawns.map(s => s.type));
-  check('방 2: 웨이브1 슬라임3 → 웨이브2 슬라임2+병정1', eq(t3, ['slime', 'slime', 'slime', 'slime', 'soldier', 'slime']) || eq(t3.slice(-3).sort(), ['slime', 'slime', 'soldier']) , JSON.stringify(t3));
+  check('방 2: 웨이브1 슬라임4 → 웨이브2 슬라임3+병정1 (종류를 번갈아 내보냄)', eq(t3.slice(0, 4), ['slime', 'slime', 'slime', 'slime']) && eq(t3.slice(4, 8), ['slime', 'soldier', 'slime', 'slime']), JSON.stringify(t3));
 });
 
 // ===========================================================================
@@ -259,6 +267,7 @@ await section('소환과 상한', async () => {
   await ev(() => { T.run(() => T.spawns.length >= 3, 600, false); });
   const sp = await ev(() => T.spawns.slice());
   check('넓은 방은 drop 없이 화면 오른쪽 바깥(Cam.x+W+40 이상)에서 들어옴', sp.length >= 3 && sp.every(s => !(s.opts && s.opts.drop) && s.x >= s.camX + 960 + 40 - 0.01), JSON.stringify(sp.map(s => [Math.round(s.x), Math.round(s.camX)])));
+  check('넓은 방의 웨이브 적도 hunt:true (GP-3: aggroRange 밖에서 멍하니 서 있지 않음)', sp.every(s => s.opts && s.opts.hunt === true));
   check('소환 y 는 바닥 띠 안', sp.every(s => s.y >= 330 && s.y <= 500));
 
   // 6마리 상한: 12마리 웨이브를 가진 시험용 방을 잠깐 끼워 넣음
@@ -408,20 +417,21 @@ await section('클리어와 전환', async () => {
 // ===========================================================================
 await section('방 순회', async () => {
   await NEWGAME('normal', 8);
+  const n = await ev(() => STAGES[0].rooms.length);
   const seen = [];
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < n; i++) {
     const ok = await ev(i => T.toRoom(i), i);
     seen.push(await ev(() => ({ i: Stage.roomIndex, w: Game.world.width, gs: Object.assign({}, Game.stage), state: Stage.state })));
     if (!ok) break;
   }
-  check('방 0~4 에 차례로 도착', seen.length === 5 && seen.every((s, i) => s.i === i), JSON.stringify(seen.map(s => s.i)));
-  check('도착할 때마다 Game.world.width = 방 너비 (960/1920/1920/1920/960)', eq(seen.map(s => s.w), [960, 1920, 1920, 1920, 960]));
-  check('Game.stage.roomIndex/roomName 이 항상 최신', seen.every((s, i) => s.gs.roomIndex === i && s.gs.roomCount === 5 && s.gs.id === 'stage1') &&
-    eq(seen.map(s => s.gs.roomName), ['숲 입구', '달콤한 오솔길', '초콜릿 시냇가', '젤리 동굴 입구', '젤리 대왕의 방']));
+  check(`방 0~${n - 1} 에 차례로 도착 (방 수 ${n})`, n === 7 && seen.length === n && seen.every((s, i) => s.i === i), JSON.stringify(seen.map(s => s.i)));
+  check('도착할 때마다 Game.world.width = 방 너비 (960/1920×5/960)', eq(seen.map(s => s.w), [960, 1920, 1920, 1920, 1920, 1920, 960]));
+  check('Game.stage.roomIndex/roomCount/roomName 이 항상 최신 (roomCount = 방 수)', seen.every((s, i) => s.gs.roomIndex === i && s.gs.roomCount === n && s.gs.id === 'stage1') &&
+    eq(seen.map(s => s.gs.roomName), ['숲 입구', '달콤한 오솔길', '초콜릿 시냇가', '솜사탕 언덕', '젤리 동굴 입구', '반짝 수정 동굴', '젤리 대왕의 방']));
   const cl = await ev(() => T.events.filter(e => e.n === 'roomCleared').map(e => e.index));
-  check("방 0~3 을 깨면서 'roomCleared' 가 0,1,2,3 순서로 (보스방은 아직)", eq(cl, [0, 1, 2, 3]), JSON.stringify(cl));
+  check("보스방 앞까지 'roomCleared' 가 0..n-2 순서로 (보스방은 아직)", eq(cl, [0, 1, 2, 3, 4, 5]), JSON.stringify(cl));
   const rs = await ev(() => T.events.filter(e => e.n === 'roomStarted').map(e => e.index));
-  check("'roomStarted' 0~4", eq(rs, [0, 1, 2, 3, 4]));
+  check("'roomStarted' 0~n-1", eq(rs, [0, 1, 2, 3, 4, 5, 6]));
   check('스테이지가 끝나기 전엔 결과가 없음', (await ev(() => Game.result)) === null);
 });
 
@@ -430,9 +440,9 @@ await section('방 순회', async () => {
 // ===========================================================================
 await section('보스와 승리', async () => {
   await NEWGAME('normal', 9);
-  await ev(() => { T.toRoom(3); T.clearRoom(); T.sfx.length = 0; T.exitRoom(); T.spawns.length = 0; });
+  await ev(() => { T.toRoom(T.last() - 1); T.clearRoom(); T.sfx.length = 0; T.exitRoom(); T.spawns.length = 0; });
   let q = await snapOf();
-  check('보스방 intro 에서 시작 (방 4)', q.state === 'intro' && q.roomIndex === 4 && !q.bossSpawned, JSON.stringify(q));
+  check('보스방 intro 에서 시작 (마지막 방)', q.state === 'intro' && q.roomIndex === 6 && !q.bossSpawned, JSON.stringify(q));
   check('보스방 입장 때 경고음 warn', await ev(() => T.sfx.includes('warn')));
   check('보스 음악으로 바뀜', (await ev(() => Music.current)) === 'boss');
   await step(page, 10);
@@ -457,7 +467,7 @@ await section('보스와 승리', async () => {
   await ev(() => T.run(() => !!Game.boss && !Game.boss.untargetable, 200, false));
   await shot('r5_boss_fight');
   const noClear = await snapOf();
-  check('보스가 살아 있는 동안은 clear/승리가 아님', noClear.state === 'fight' && noClear.roomsCleared === 4);
+  check('보스가 살아 있는 동안은 clear/승리가 아님', noClear.state === 'fight' && noClear.roomsCleared === 6);
   const candy0 = await ev(() => T.pk().length);
   // 체력 절반 이하 → 사탕 한 개 (한 번만)
   await ev(() => { const b = Game.boss; T.hit(b, b.hp * 0.45); });
@@ -475,7 +485,7 @@ await section('보스와 승리', async () => {
   // 쓰러뜨리기 → victory
   await ev(() => { Game.combo.count = 0; Game.score = 0; T.hit(Game.boss); });
   q = await snapOf();
-  check('보스를 쓰러뜨린 순간 victory 상태', q.state === 'victory' && q.roomsCleared === 5, JSON.stringify(q));
+  check('보스를 쓰러뜨린 순간 victory 상태', q.state === 'victory' && q.roomsCleared === 7, JSON.stringify(q));
   check('플레이어가 만세 포즈 (cheer)', await ev(() => Game.player.cheer === true));
   check('흰 번쩍임 연출', (await ev(() => FX.flashAlpha)) > 0);
   check('보스 음악이 멈춤', (await ev(() => Music.current)) === null);
@@ -514,8 +524,8 @@ await section('보스와 승리', async () => {
   const keys = Object.keys(r.res || {}).sort();
   check('Game.result 모양: 계약서의 키 11개 그대로', eq(keys, ['cleared', 'deaths', 'difficulty', 'kills', 'maxCombo', 'rooms', 'score', 'stageId', 'stageName', 'stars', 'timeFrames']), keys.join(','));
   const x = r.res;
-  check('결과 값: cleared / 별 3 / 사망 0 / 방 5 / 난이도·스테이지 / 점수·처치·콤보가 Game 과 같음',
-    x.cleared === true && x.stars === 3 && x.deaths === 0 && x.rooms === 5 && x.difficulty === 'normal' && x.stageId === 'stage1' && x.stageName === '사탕 숲' &&
+  check('결과 값: cleared / 별 3 / 사망 0 / 방 7 / 난이도·스테이지 / 점수·처치·콤보가 Game 과 같음',
+    x.cleared === true && x.stars === 3 && x.deaths === 0 && x.rooms === 7 && x.difficulty === 'normal' && x.stageId === 'stage1' && x.stageName === '사탕 숲' &&
     x.score === r.score && x.kills === r.kills && x.maxCombo === r.combo && x.kills >= 12, JSON.stringify(x));
   check('timeFrames 는 양수이고 진행 프레임과 비슷', x.timeFrames > 600 && x.timeFrames <= r.frame, `timeFrames=${x.timeFrames} Game.frame=${r.frame}`);
   check('결과 값은 모두 숫자/문자/불리언 (서버로 보낼 수 있음)', Object.values(x).every(v => ['number', 'string', 'boolean'].includes(typeof v)));
@@ -552,9 +562,9 @@ await section('점수', async () => {
 
   // 방 클리어 +300 (다음 프레임에), 보스 처치 후 보너스
   await NEWGAME('normal', 10);
-  await ev(() => { T.run(() => Stage.state === 'fight' && Stage.waveIndex === 1 && T.spawns.length === 5, 1500, true); });
+  await ev(() => { T.run(() => Stage.state === 'fight' && Stage.waveIndex === 1 && T.spawns.length === 7, 1500, true); });
   const sc = await ev(() => {
-    T.run(() => Stage.state === 'fight' && T.spawns.length === 5 && T.foes().length > 0, 600, false);
+    T.run(() => Stage.state === 'fight' && T.spawns.length === 7 && T.foes().length > 0, 600, false);
     T.run(() => T.foes().every(e => !e.untargetable), 200, false);
     Game.combo.count = 0;
     const foes = T.foes(); let pre = Game.score; for (const e of foes) T.hit(e);
@@ -604,7 +614,7 @@ await section('드롭', async () => {
   check('같은 시드면 드롭이 똑같음 (재현 가능)', eq(a, b), `${a.length}개`);
   check('시드가 다르면 드롭이 달라짐', !eq(a, c));
   check('코인 확률 ≈ 35% (±6%p)', Math.abs(rate(a, 'coin') - 0.35) < 0.06, (rate(a, 'coin') * 100).toFixed(1) + '%');
-  check('사탕 확률 ≈ 12% (±5%p)', Math.abs(rate(a, 'candy') - 0.12) < 0.05, (rate(a, 'candy') * 100).toFixed(1) + '%');
+  check('사탕 확률 ≈ 15% (±5%p)', Math.abs(rate(a, 'candy') - 0.15) < 0.05, (rate(a, 'candy') * 100).toFixed(1) + '%');
   check('한 마리에서 두 개가 나오지 않음 (전체 드롭 ≤ 처치 수)', a.length <= 600 && a.length > 150, `드롭 ${a.length}/600`);
   // 드롭은 연출용 난수(RNG.fx)가 아니라 게임 난수만 씀: 연출이 달라도 드롭은 같음
   const d1 = await ev(() => { T.fresh('normal', 21); FX.burst(100, 100, { kind: 'star', count: 50 }); RNG.fx(); RNG.fx(); const o = []; for (let i = 0; i < 80; i++) { const e = Enemies.spawn('slime', 400, 420); const n0 = T.pickups.length; T.hit(e); o.push(T.pickups.length - n0); } return o; });
@@ -625,7 +635,7 @@ await section('픽업', async () => {
   check('픽업이 둥실둥실 떠다님 (z 가 변하고 땅에 안 박힘)', bob.max - bob.min > 4 && bob.min > 10, JSON.stringify(bob));
   await ev(() => { for (const p of T.pk()) Entities.remove(p); });
 
-  // 사탕: HP +20, 상한 100
+  // 사탕: HP +40, 상한 100
   const heal = await ev(() => {
     const p = Game.player; p.hp = 50; T.events.length = 0; p.x = 400; p.y = 420;
     const e = Stage.dropPickup(p.x + 10, p.y + 5, 'candy'); Loop.step(14);
@@ -633,7 +643,7 @@ await section('픽업', async () => {
     p.hp = 95; const e2 = Stage.dropPickup(p.x, p.y, 'candy'); Loop.step(14);
     return { r1, hp2: p.hp, gone2: !Entities.list.includes(e2), max: p.maxHp };
   });
-  check('사탕을 주우면 HP +20 (50 → 70), 사라지고 pickup 이벤트', heal.r1.hp === 70 && heal.r1.gone && eq(heal.r1.evs, ['candy']), JSON.stringify(heal.r1));
+  check('사탕을 주우면 HP +40 (50 → 90), 사라지고 pickup 이벤트', heal.r1.hp === 90 && heal.r1.gone && eq(heal.r1.evs, ['candy']), JSON.stringify(heal.r1));
   check('HP 95 에서 사탕을 주워도 maxHp(100) 를 넘지 않음', heal.hp2 === heal.max && heal.gone2, 'hp=' + heal.hp2);
   // 코인: 점수 +50
   const coin = await ev(() => { const p = Game.player; p.x = 400; p.y = 420; const s0 = Game.score; const e = Stage.dropPickup(p.x - 12, p.y, 'coin'); Loop.step(14); return { d: Game.score - s0, gone: !Entities.list.includes(e), popup: FX.popups.some(q => q.text === '+50') }; });
@@ -679,6 +689,7 @@ await section('픽업', async () => {
   check('수명 15초(900f) 중 마지막 150프레임에 깜빡임 경고, 그 전엔 계속 보임', life.L === 900 && life.blink === 150 && life.early && life.warnOn > 10 && life.warnOff > 10, JSON.stringify(life));
   check('깜빡임이 마지막에 더 빨라짐 (초당 3번 이하라 눈이 편함)', life.lastToggles >= life.toggles * 0.5 && life.toggles <= 14, JSON.stringify({ t: life.toggles, last: life.lastToggles }));
   const expire = await ev(() => {
+    Game.player.hp = 50;                                                  // (체력이 가득이면 사탕 수명이 멈추므로 다친 상태에서)
     const e = T.pk()[0]; e.age = e.life - 3; const before = Entities.list.includes(e); Loop.step(2); const mid = Entities.list.includes(e); Loop.step(3); return { before, mid, after: Entities.list.includes(e) };
   });
   check('수명이 다하면 바닥에서 사라짐 (직전엔 남아 있음)', expire.before && expire.mid && !expire.after, JSON.stringify(expire));
@@ -698,9 +709,9 @@ await section('픽업', async () => {
 await section('보통 난이도 죽음', async () => {
   await NEWGAME('normal', 13);
   await step(page, 95);                                    // fight 시작
-  await ev(() => { T.run(() => T.spawns.length === 1, 200, false); });   // 첫 슬라임만 나온 순간 (두 번째는 대기열에 남음)
+  await ev(() => { T.run(() => T.spawns.length === 1, 200, false); });   // 첫 슬라임만 나온 순간 (나머지 두 마리는 대기열에 남음)
   check('정상: 목숨 3개로 시작', (await ev(() => Game.lives)) === 3);
-  check('(준비) 대기열에 한 마리가 남은 채로 쓰러질 것', (await snapOf()).queue === 1);
+  check('(준비) 대기열에 두 마리가 남은 채로 쓰러질 것', (await snapOf()).queue === 2);
   await ev(() => { Game.score = 1000; T.die(); });
   let q = await snapOf();
   const g1 = await ev(() => ({ deaths: Game.deaths, lives: Game.lives, dead: Game.player.dead, state: Stage.state, hp: Game.player.hp }));
@@ -842,7 +853,7 @@ await section('일시정지와 콤보', async () => {
   const cb = await ev(() => { Game.combo.count = 5; Game.combo.timer = 3; T.events.length = 0; const seq = []; for (let i = 0; i < 4; i++) { Loop.step(1); seq.push([Game.combo.count, Game.combo.timer]); } return seq; });
   check('콤보 타이머가 3 → 0 으로 줄고 0 이 되면 콤보가 끊김 (직접 또 줄이지 않음)', eq(cb, [[5, 2], [5, 1], [0, 0], [0, 0]]), JSON.stringify(cb));
   // 전환(transition)·쓰러짐(dead) 중에도 한 번씩
-  const tr = await ev(() => { T.clearRoom(); Game.player.x = Game.world.width - 20; Loop.step(1); T.upd = { n: 0, fx: 0, combo: 0, order: [] }; Loop.step(20); return { st: Stage.state, u: T.upd }; });
+  const tr = await ev(() => { T.clearRoom(); Loop.step(STAGE_TUNE.clearMin); Game.player.x = Game.world.width - 20; Loop.step(1); T.upd = { n: 0, fx: 0, combo: 0, order: [] }; Loop.step(20); return { st: Stage.state, u: T.upd }; });
   check('전환 중에도 tickCombo 는 업데이트마다 1번', tr.st === 'transition' && tr.u.combo === 20 && tr.u.n === 20, JSON.stringify(tr));
   // 히트스톱 중에는 update 가 안 불리니 tickCombo 도 안 불림 (정지 연출과 같이 멈춤)
   await ev(() => { T.run(() => Stage.state === 'intro', 100, false); FX.freeze(5); T.upd = { n: 0, fx: 0, combo: 0, order: [] }; Loop.step(5); });
@@ -866,7 +877,7 @@ await section('재시작', async () => {
   await NEWGAME('normal', 18);
   await ev(() => { T.toBossFight(); Game.score = 777; Game.kills = 9; Game.combo.count = 5; Game.combo.max = 12; Stage.dropPickup(300, 400, 'candy'); FX.burst(300, 300, { kind: 'star', count: 30 }); FX.popup(10, 10, 'x'); FX.flash('#fff', 20); FX.shake(8, 20); FX.freeze(8); T.die(); Game.pause(true); });
   const dirty = await ev(() => ({ boss: !!Game.boss, paused: Game.paused, state: Stage.state, ri: Stage.roomIndex }));
-  check('(준비) 보스전 중 쓰러진 채 일시정지된 더러운 상태', dirty.boss && dirty.paused && dirty.state === 'dead' && dirty.ri === 4, JSON.stringify(dirty));
+  check('(준비) 보스전 중 쓰러진 채 일시정지된 더러운 상태', dirty.boss && dirty.paused && dirty.state === 'dead' && dirty.ri === 6, JSON.stringify(dirty));
   await ev(() => { RNG.seed(2); Stage.start({ difficulty: 'normal', nickname: '시험' }); });
   const s = await ev(() => T.snap());
   const clean = s.game.score === 0 && s.game.kills === 0 && s.game.deaths === 0 && s.game.lives === '3' && s.game.combo === '0/0' && !s.game.boss && s.game.result === null && !s.game.paused && s.game.w === 960;
@@ -875,7 +886,7 @@ await section('재시작', async () => {
   check('재시작: FX 입자/팝업/히트스톱/번쩍임이 비워짐', eq(s.fx, [0, 0, 0, 0]), JSON.stringify(s.fx));
   check('재시작: 방 0 intro, 웨이브 -1, 카메라 0, 타이머 0, 안내 없음', s.stage.state === 'intro' && s.stage.roomIndex === 0 && s.stage.waveIndex === -1 && s.cam === 0 && s.stage.t === 0 && s.stage.banner === null && s.stage.queue === 0 && s.stage.roomsCleared === 0 && s.stage.pickups === 0 && !s.stage.bossSpawned && !s.stage.bossCandy, JSON.stringify(s.stage));
   check('재시작: 주인공은 새 것 (살아 있고 체력 가득, 만세 아님)', await ev(() => Game.player.hp === Game.player.maxHp && !Game.player.dead && !Game.player.cheer && Game.player.x === 60));
-  check('재시작: Game.stage 가 방 0 으로', eq(s.game.stage, { id: 'stage1', name: '사탕 숲', roomIndex: 0, roomCount: 5, roomName: '숲 입구' }));
+  check('재시작: Game.stage 가 방 0 으로', eq(s.game.stage, { id: 'stage1', name: '사탕 숲', roomIndex: 0, roomCount: 7, roomName: '숲 입구' }));
   check('재시작: 음악이 stage 로', (await ev(() => Music.current)) === 'stage');
 
   // (b) 같은 시드로 두 번 돌리면 똑같은 스냅샷 (전환 중간/승리 중간에서 재시작해도)
@@ -891,7 +902,7 @@ await section('재시작', async () => {
   await ev(() => { T.toBossFight(); T.hit(Game.boss); Loop.step(30); });      // 승리 연출 중간에서
   const r2 = await play();
   check('같은 시드로 두 번 돌린 스냅샷이 같음 (이전 판의 찌꺼기 없음)', eq(r1, r2), eq(r1, r2) ? '' : JSON.stringify(r1.stage) + ' vs ' + JSON.stringify(r2.stage));
-  await ev(() => { T.clearRoom(); Game.player.x = Game.world.width - 20; Loop.step(10); });
+  await ev(() => { T.clearRoom(); Loop.step(STAGE_TUNE.clearMin); Game.player.x = Game.world.width - 20; Loop.step(10); });
   check('(준비) 전환 중간 상태', (await snapOf()).state === 'transition');
   await ev(() => { RNG.seed(3); Stage.start({ difficulty: 'normal' }); });
   const m = await ev(() => ({ st: Stage.state, ri: Stage.roomIndex, w: Game.world.width, cam: Cam.x, t: Stage.snapshot().t }));
@@ -994,7 +1005,7 @@ await section('배경 그리기', async () => {
     }
     return out;
   });
-  check('모든 방(5개) × 여러 카메라 위치에서 drawBackground 가 예외 없이 끝남', r.threw.length === 0, r.threw.join(' | '));
+  check('모든 방(7개) × 여러 카메라 위치에서 drawBackground 가 예외 없이 끝남', r.threw.length === 0, r.threw.join(' | '));
   check('drawBackground 가 ctx 변환/투명도를 망가뜨리지 않음 (save/restore 짝)', r.ctxKept.every(Boolean));
   const noArg = await ev(() => { try { const c = T.ctx(); Stage.drawBackground(c); return true; } catch (e) { return String(e); } });
   check('roomIndex 없이 부르면 현재 방 그림', noArg === true, String(noArg));
@@ -1003,9 +1014,9 @@ await section('배경 그리기', async () => {
   const same = await ev(() => {
     const sum = (i, cam) => { const ctx = T.ctx(); const o = Cam.x; Cam.x = cam; ctx.save(); ctx.translate(-cam, 0); Stage.drawBackground(ctx, i); ctx.restore(); Cam.x = o; const d = ctx.getImageData(0, 0, W, H).data; let h = 0; for (let k = 0; k < d.length; k += 7) h = (h * 31 + d[k]) | 0; return h; };
     const res = [];
-    for (let i = 0; i < 5; i++) { RNG.seed(1); const a = sum(i, 100); RNG.seed(999); const b = sum(i, 100); const c = sum(i, 100); res.push(a === b && b === c); }
+    for (let i = 0; i < STAGES[0].rooms.length; i++) { RNG.seed(1); const a = sum(i, 100); RNG.seed(999); const b = sum(i, 100); const c = sum(i, 100); res.push(a === b && b === c); }
     RNG.seed(3); const x = [rand(), rand(), rand()];
-    RNG.seed(3); sum(0, 0); sum(4, 0); const y = [rand(), rand(), rand()];
+    RNG.seed(3); sum(0, 0); sum(STAGES[0].rooms.length - 1, 0); const y = [rand(), rand(), rand()];
     return { stable: res, rngKept: eq3(x, y) };
     function eq3(p, q) { return p[0] === q[0] && p[1] === q[1] && p[2] === q[2]; }
   });
@@ -1033,13 +1044,14 @@ await section('배경 그리기', async () => {
   check('모든 방: 하늘과 바닥이 완전히 채워짐 (투명한 구멍 없음)', px.every(p => p.skyA === 255 && p.floorA === 255));
   check('바닥 띠는 중간 밝기(0.30~0.85)라 캐릭터가 눈에 띔', px.every(p => p.mean > 0.30 && p.mean < 0.85), px.map(p => p.mean.toFixed(2)).join(','));
   check('바닥 띠는 대비가 낮음 (밝기 표준편차 < 0.06)', px.every(p => p.sd < 0.06), px.map(p => p.sd.toFixed(3)).join(','));
-  check('보스방(5번째)은 숲 입구보다 훨씬 어두움', px[4].skyLum < px[0].skyLum * 0.45, `보스 ${px[4].skyLum.toFixed(2)} vs 숲 ${px[0].skyLum.toFixed(2)}`);
-  check('보스방 벽은 붉은 기운 (평균 R > B), 숲 입구는 푸른 기운 (B > R)', px[4].wallR > px[4].wallB && px[0].wallB > px[0].wallR, `보스 R=${px[4].wallR.toFixed(0)} B=${px[4].wallB.toFixed(0)} / 숲 R=${px[0].wallR.toFixed(0)} B=${px[0].wallB.toFixed(0)}`);
+  const bi = px.length - 1;
+  check('보스방(마지막)은 숲 입구보다 훨씬 어두움', px[bi].skyLum < px[0].skyLum * 0.45, `보스 ${px[bi].skyLum.toFixed(2)} vs 숲 ${px[0].skyLum.toFixed(2)}`);
+  check('보스방 벽은 붉은 기운 (평균 R > B), 숲 입구는 푸른 기운 (B > R)', px[bi].wallR > px[bi].wallB && px[0].wallB > px[0].wallR, `보스 R=${px[bi].wallR.toFixed(0)} B=${px[bi].wallB.toFixed(0)} / 숲 R=${px[0].wallR.toFixed(0)} B=${px[0].wallB.toFixed(0)}`);
 
   // 성능: 캐시된 뒤에는 한 프레임이 가볍다
   const perf = await ev(() => {
     const out = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < STAGES[0].rooms.length; i++) {
       const ctx = T.ctx(); Cam.x = 0; Stage.drawBackground(ctx, i);        // 첫 호출은 오프스크린에 그리느라 오래 걸림 (방 바뀔 때 페이드 중에 처리)
       const t0 = performance.now(); for (let k = 0; k < 40; k++) { Cam.x = Math.min(960, k * 20); ctx.save(); ctx.translate(-Cam.x, 0); Stage.drawBackground(ctx, i); ctx.restore(); } out.push((performance.now() - t0) / 40);
     }
@@ -1051,7 +1063,7 @@ await section('배경 그리기', async () => {
   const states = ['intro', 'fight', 'clear', 'transition', 'victory', 'dead', 'over', 'idle'];
   const ov = await ev(states => {
     const bad = [];
-    for (const touch of [false, true]) for (const lives of [3, Infinity, 0]) for (const room of [0, 4]) {
+    for (const touch of [false, true]) for (const lives of [3, Infinity, 0]) for (const room of [0, STAGES[0].rooms.length - 1]) {
       T.fresh('normal', 22); Game.touch = touch; Game.lives = lives;
       if (room) T.toRoom(room);
       for (const st of states) {
@@ -1067,10 +1079,232 @@ await section('배경 그리기', async () => {
 });
 
 // ===========================================================================
+// 16-2. QA 수정: 넓은 방 웨이브가 멍하니 서 있지 않음 (GP-3) / 보상 놓치지 않기 (GP-5) / 사탕은 체력이 가득이면 남겨 둠 (GP-6)
+//       보스 '화났다!' 와 사탕 글자가 겹치지 않음 (UI-10)
+// ===========================================================================
+await section('이 방부터 다시 시작 (Stage.start roomIndex)', async () => {
+  await NEWGAME('normal', 82, { roomIndex: 3 });
+  const a = await ev(() => ({ st: Stage.snapshot(), gs: Object.assign({}, Game.stage), w: Game.world.width, px: Game.player.x, music: Music.current, ev: T.events.filter(e => e.n === 'roomStarted').map(e => e.index), foes: T.foes().length }));
+  check('roomIndex:3 으로 시작하면 방 4(솜사탕 언덕)의 intro 에서 시작 (너비 1920, 주인공 x=60)', a.st.state === 'intro' && a.st.roomIndex === 3 && a.st.startRoom === 3 && a.gs.roomIndex === 3 && a.gs.roomName === '솜사탕 언덕' && a.gs.roomCount === 7 && a.w === 1920 && a.px === 60, JSON.stringify(a));
+  check("건너뛴 방은 깬 방으로 세지 않음 (roomsCleared 0), 'roomStarted' 는 3 한 번, 판 음악은 stage", a.st.roomsCleared === 0 && eq(a.ev, [3]) && a.music === 'stage', JSON.stringify(a));
+  await step(page, 95);
+  const f = await snapOf();
+  check('90프레임 뒤에는 그 방의 첫 웨이브가 시작됨', f.state === 'fight' && f.waveIndex === 0 && f.queue >= 3, JSON.stringify(f));
+  await ev(() => { T.run(() => Stage.state === 'clear', 4000); });
+  check('그 방을 깨면 다음 방으로 이어지고 깬 방은 1개로 셈', (await snapOf()).state === 'clear' && (await snapOf()).roomsCleared === 1);
+
+  // 보스방부터: 보스 음악 + 경고음 + 보스 등장 → 처치하면 스테이지 클리어, rooms 1
+  await NEWGAME('normal', 83, { roomIndex: 6 });
+  const b = await ev(() => ({ st: Stage.snapshot(), music: Music.current, warn: T.sfx.includes('warn'), width: Game.world.width }));
+  check('roomIndex:6 이면 보스방 intro 에서 시작, 보스 음악, 경고음, 너비 960', b.st.state === 'intro' && b.st.roomIndex === 6 && b.music === 'boss' && b.warn && b.width === 960, JSON.stringify(b));
+  await ev(() => { T.run(() => !!Game.boss && !Game.boss.untargetable && Stage.state === 'fight', 600, false); T.hit(Game.boss); Loop.step(STAGE_TUNE.victory.total + 5); });
+  const rs = await ev(() => Game.result);
+  check('보스방부터 시작해 보스를 잡으면 클리어, 깬 방 수는 1 (건너뛴 방 제외)', rs && rs.cleared === true && rs.rooms === 1, JSON.stringify(rs));
+
+  // 잘못된 값은 안전하게
+  const odd = await ev(() => {
+    const out = {};
+    for (const v of [99, -3, 'x', NaN, null, undefined, 2.7]) { T.fresh('normal', 84, { roomIndex: v }); out[String(v)] = Stage.roomIndex; }
+    return out;
+  });
+  check('roomIndex 가 범위 밖/이상한 값이면 보정 (99→마지막 방, -3·x·NaN·null·없음→첫 방, 2.7→2)', odd['99'] === 6 && odd['-3'] === 0 && odd.x === 0 && odd.NaN === 0 && odd.null === 0 && odd.undefined === 0 && odd['2.7'] === 2, JSON.stringify(odd));
+  await NEWGAME('normal', 85);
+  check('roomIndex 를 안 주면 늘 첫 방, startRoom 0', (await snapOf()).roomIndex === 0 && (await snapOf()).startRoom === 0);
+});
+
+await section('배경 캐시 키에 화면 배율 포함 (N07)', async () => {
+  await NEWGAME('normal', 69);
+  const r = await ev(() => {
+    const saved = Loop.dpr;
+    let made = 0; const ce = document.createElement.bind(document);
+    document.createElement = function (tag, ...a) { if (String(tag).toLowerCase() === 'canvas') made++; return ce(tag, ...a); };
+    const draw = () => { const c = T.ctx(); const before = made; Stage.drawBackground(c, 1); return made - before; };
+    const out = {};
+    Loop.dpr = 1; draw();                                            // 이 배율로 한 번 만들어 둠
+    out.again1 = draw();                                             // 같은 배율: 새로 안 만듦
+    Loop.dpr = 4 / 3; out.scale133 = draw(); out.again133 = draw();  // 1.333 (1280x720 창): 다시 만듦, 그 뒤엔 그대로
+    Loop.dpr = 2; out.scale2 = draw(); out.again2 = draw();
+    Loop.dpr = 1; out.back1 = draw();                                // 배율이 다시 바뀌면 또 다시 만듦
+    document.createElement = ce; Loop.dpr = saved;
+    return out;
+  });
+  check('같은 화면 배율에서는 배경을 다시 만들지 않음 (캔버스 새로 안 만듦)', r.again1 === 0 && r.again133 === 0 && r.again2 === 0, JSON.stringify(r));
+  check('화면 배율(Loop.dpr 1 → 1.33 → 2 → 1)이 바뀌면 배경을 새 배율로 다시 만듦 (캐시 키에 배율 포함)', r.scale133 > 0 && r.scale2 > 0 && r.back1 > 0, JSON.stringify(r));
+});
+
+await section('넓은 방 웨이브 (GP-3)', async () => {
+  await NEWGAME('normal', 70);
+  await ev(() => { T.toRoom(1); Debug.god = true; });
+  // 주인공은 방 왼쪽 끝에서 꼼짝 않음: 첫 적은 x≈1000 에서 나와 거리가 900 을 넘음 (예전에는 aggroRange 밖이라 영영 안 다가옴)
+  await ev(() => { T.run(() => Stage.state === 'fight' && T.foes().length >= 1, 400, false); Game.player.x = 60; });
+  const first = await ev(() => { const p = Game.player; const f = T.foes().map(e => ({ id: e.id, d: Math.round(Math.hypot(e.x - p.x, e.y - p.y)), hunt: e.hunt })); return f; });
+  check('(준비) 첫 적은 aggroRange(900)보다 멀리서 나옴, hunt 표시', first.length >= 1 && first.every(f => f.d > 900 && f.hunt === true), JSON.stringify(first));
+  await ev(() => { Game.player.invuln = 99999; });
+  for (let i = 0; i < 6; i++) await ev(() => { Game.player.x = 60; Loop.step(200); });
+  const near = await ev(() => {
+    const p = Game.player;
+    return T.foes().map(e => ({ st: e.state, d: Math.round(Math.hypot(e.x - p.x, e.y - p.y)) })).sort((a, b) => a.d - b.d);
+  });
+  check('가만히 1200프레임을 기다려도 적이 다가와 가장 가까운 적이 300px 안으로 옴 (멍하니 서 있지 않음)', near.length >= 1 && near[0].d < 300 && near[0].st !== 'idle', JSON.stringify(near));
+  check('멀리서도 쫓아오는 적은 idle 로 남지 않음', near.every(f => f.st !== 'idle'), JSON.stringify(near));
+});
+
+await section('방 보상과 오른쪽 끝 (GP-5)', async () => {
+  await NEWGAME('normal', 71);
+  await ev(() => { T.toRoom(1); T.run(() => Stage.state === 'fight', 400, false); Game.player.x = Game.world.width - 30; Game.player.y = 420; });
+  const r = await ev(() => {
+    const fr = T.run(() => Stage.state === 'clear', 3000);
+    const p = Game.player, cw = Game.world.width;
+    const out = { fr, px: Math.round(p.x), cw, states: [], candyX: null, maxExit: STAGE_TUNE.clearMin };
+    const newest = () => T.pk().filter(e => e.type === 'candy').sort((a, b) => b.id - a.id)[0];   // 가장 나중에 떨어진 사탕 = 방 보상 (앞서 적이 떨군 사탕이 섞일 수 있음)
+    const c0 = newest(); out.candyX = c0 ? Math.round(c0.x) : null; out.candyId = c0 ? c0.id : null;
+    out.candyAt = [];
+    for (let i = 0; i < 70; i++) { Game.player.x = cw - 30; Loop.step(1); out.states.push(Stage.state); out.candyAt.push(Entities.list.some(e => e.id === out.candyId && !e._removed)); }
+    return out;
+  });
+  const firstT = r.states.indexOf('transition');
+  check('오른쪽 끝(출구)에 서 있는 채로 방을 깨도 곧바로 넘어가지 않음: 처음 44프레임은 clear', r.states.slice(0, 44).every(s => s === 'clear'), r.states.slice(0, 50).join(','));
+  check(`clearMin(${r.maxExit}프레임)이 지난 뒤에 transition 으로 넘어감`, firstT >= r.maxExit - 3 && firstT <= r.maxExit + 3, 'first transition @' + firstT);
+  check('그 동안(전환 전) 보상 사탕이 바닥에 그대로 있음 (만들어지자마자 치워지지 않음)', r.candyId !== null && r.candyAt.slice(0, 44).every(Boolean), `candyX=${r.candyX} 방 너비=${r.cw}`);
+  const reward = await ev(() => { T.fresh('normal', 72); T.toRoom(1); T.run(() => Stage.state === 'fight', 400, false); const p = Game.player; p.hp = 40; p.x = Game.world.width - 30; p.y = 420; T.run(() => Stage.state === 'clear', 3000); const c = T.pk().filter(e => e.type === 'candy').sort((a, b) => b.id - a.id)[0]; const cx = c ? c.x : -1; p.x = cx; p.y = c ? c.y : 420; Loop.step(20); return { had: !!c, hp: p.hp, state: Stage.state }; });
+  check('출구에 서서 깬 방에서도 보상 사탕을 주울 수 있음 (HP 40 → 80)', reward.had && reward.hp === 80 && reward.state === 'clear', JSON.stringify(reward));
+  // 방 가운데에서 깨면 보상은 주인공 앞 110px (예전 위치)
+  const mid = await ev(() => { T.fresh('normal', 73); T.toRoom(1); T.run(() => Stage.state === 'fight', 400, false); const p = Game.player; p.x = 700; p.y = 420; T.run(() => Stage.state === 'clear', 3000); const c = T.pk().filter(e => e.type === 'candy').sort((a, b) => b.id - a.id)[0]; return { dx: c ? Math.round(c.x - p.x) : null }; });
+  check('방 가운데에서 깨면 보상은 주인공 앞쪽(오른쪽) 약 110px', mid.dx !== null && mid.dx > 60 && mid.dx < 160, JSON.stringify(mid));
+});
+
+await section('사탕은 체력이 가득이면 남겨 둠 (GP-6)', async () => {
+  await NEWGAME('normal', 74);
+  await step(page, 3);
+  const r = await ev(() => {
+    const p = Game.player; p.hp = p.maxHp; p.x = 400; p.y = 420; T.events.length = 0;
+    const e = Stage.dropPickup(p.x + 10, p.y + 5, 'candy'); e.kx = 0;
+    Loop.step(40);
+    const out = { stays: Entities.list.includes(e), hp: p.hp, evs: T.events.filter(x => x.n === 'pickup').length, said: FX.popups.some(q => q.text.includes('가득')) };
+    // 사라지는 시간도 멈춤: 오래 두어도 그대로
+    Loop.step(1200);
+    out.stillAfter = Entities.list.includes(e);
+    // 다치면 그때 먹을 수 있음 (같은 사탕)
+    p.hp = 50; Loop.step(5);
+    out.eaten = !Entities.list.includes(e); out.hpAfter = p.hp; out.evs2 = T.events.filter(x => x.n === 'pickup').map(x => x.type);
+    return out;
+  });
+  check('체력이 가득이면 사탕 위에 서도 먹지 않음 (사탕 그대로, HP 그대로, pickup 이벤트 없음)', r.stays && r.hp === 100 && r.evs === 0, JSON.stringify(r));
+  check('체력 가득 상태에서 사탕 위에 서면 "체력이 가득!" 안내 글자가 한 번 뜸', r.said);
+  check('체력이 가득인 동안엔 사탕 수명도 멈춤 (1200프레임 뒤에도 남아 있음)', r.stillAfter, JSON.stringify(r));
+  check('다친 뒤에는 같은 사탕을 먹고 HP 가 +40 오름 (50 → 90)', r.eaten && r.hpAfter === 90 && eq(r.evs2, ['candy']), JSON.stringify(r));
+  const coin = await ev(() => { const p = Game.player; p.hp = p.maxHp; p.x = 400; p.y = 420; const s0 = Game.score; const e = Stage.dropPickup(p.x, p.y, 'coin'); e.kx = 0; Loop.step(14); return { got: !Entities.list.includes(e), d: Game.score - s0 }; });
+  check('코인은 체력과 상관없이 주움 (+50)', coin.got && coin.d === 50);
+  // 다쳐 있을 때 떨어진 사탕은 수명이 줄어든다 (영원히 안 남음)
+  const decay = await ev(() => { const p = Game.player; p.hp = 50; p.x = 100; p.y = 420; const e = Stage.dropPickup(900, 440, 'candy'); e.kx = 0; Loop.step(e.life + 5); return !Entities.list.includes(e); });
+  check('다친 상태에서는 사탕이 예전처럼 15초 뒤에 사라짐', decay);
+});
+
+await section('보스 사탕 글자가 화났다! 와 겹치지 않음 (UI-10)', async () => {
+  await NEWGAME('normal', 75);
+  await ev(() => { T.toBossFight(); Debug.god = true; });
+  const r = await ev(() => {
+    const b = Game.boss, delay = STAGE_TUNE.bossCandySayDelay, out = { delay, angryAt: -1, bannerAt: -1, overlap: 0, candyAt: -1, bannerBefore: null };
+    const n0 = T.pk().filter(e => e.type === 'candy').length;
+    b.superArmor = true;                                    // 시험 동안 보스가 밀리거나 패턴을 바꾸지 않게
+    T.hit(b, b.hp - Math.floor(b.maxHp * 0.5) + 1);         // 정확히 50% 아래로
+    for (let i = 0; i < delay + 40; i++) {
+      Loop.step(1);
+      const angry = FX.popups.some(q => q.text === '화났다!'), bn = Stage.snapshot().banner === '사탕이 나왔어요!';
+      if (angry && out.angryAt < 0) out.angryAt = i;
+      if (bn && out.bannerAt < 0) out.bannerAt = i;
+      if (angry && bn) out.overlap++;
+      if (out.candyAt < 0 && T.pk().filter(e => e.type === 'candy').length > n0) out.candyAt = i;
+    }
+    return out;
+  });
+  check('보스 체력 50% 아래: 사탕은 바로 떨어지고 (처음 몇 프레임 안)', r.candyAt >= 0 && r.candyAt <= 3, JSON.stringify(r));
+  check("보스의 '화났다!' 글자가 먼저 뜸", r.angryAt >= 0 && r.angryAt <= 3, JSON.stringify(r));
+  check("'사탕이 나왔어요!' 글자는 bossCandySayDelay(90)프레임 뒤에 뜸", r.bannerAt >= r.delay - 2 && r.bannerAt <= r.delay + 2, JSON.stringify(r));
+  check("두 글자가 같은 프레임에 함께 보인 적이 없음 (겹침 0)", r.overlap === 0, JSON.stringify(r));
+});
+
+await section('튜토리얼 유지와 팁 (KIDS-12)', async () => {
+  // (1) 먼저 때려도 점프를 아직 안 했으면 점프 카드는 남음
+  await NEWGAME('normal', 76);
+  await ev(() => { T.run(() => T.foes().some(f => !f.untargetable), 400, false); });
+  await ev(() => { const e = T.foes().find(f => !f.untargetable); if (e) T.hit(e, 1); });
+  await step(page, 100);
+  let t = (await snapOf()).tut;
+  check('때리고 100프레임이 지나도 안 한 동작(점프)의 카드는 남음: card.jumped < 1, fade 0', t.hit && !t.jumped && t.card.jumped === 0 && t.card.moved === 0 && t.card.hit === 1 && t.fade === 0, JSON.stringify(t));
+  let txt = await ev(() => T.overlayTexts());
+  check('"폴짝!" 과 "걸어가요" 카드는 아직 그려지고 "때려요!" 는 사라짐', txt.includes('폴짝!') && txt.includes('걸어가요') && !txt.includes('때려요!'), JSON.stringify(txt));
+  await ev(() => { Game.player.x = 400; Game.player.vz = 11; });
+  await step(page, 3);
+  txt = await ev(() => T.overlayTexts());
+  check('점프하면 "폴짝!" 카드에 ✓ (done) 가 붙고 아직은 보임', (await snapOf()).tut.jumped && txt.includes('폴짝!'));
+  await step(page, 70);
+  txt = await ev(() => T.overlayTexts());
+  check('점프하고 fadeDelay+fadeFrames(60) 뒤에는 "폴짝!" 도 사라짐', !txt.includes('폴짝!') && txt.includes('걸어가요') === (!(await snapOf()).tut.moved), JSON.stringify(txt));
+  // (2) 끝내 안 해도 giveUp 이 지나면 모두 접힘
+  await NEWGAME('normal', 77);
+  const gu = await ev(() => STAGE_TUNE.hint.giveUp);
+  await step(page, gu - 20);
+  txt = await ev(() => T.overlayTexts());
+  check(`아무것도 안 해도 giveUp(${gu}프레임) 직전에는 카드 세 개가 모두 보임`, txt.includes('걸어가요') && txt.includes('때려요!') && txt.includes('폴짝!'), JSON.stringify(txt));
+  await step(page, 100);
+  txt = await ev(() => T.overlayTexts());
+  const tg = (await snapOf()).tut;
+  check('giveUp 이 지나면 카드가 모두 사라짐 (계속 떠 있지 않음)', tg.fade === 1 && !txt.includes('걸어가요') && !txt.includes('때려요!') && !txt.includes('폴짝!'), JSON.stringify([tg, txt]));
+});
+
+await section('첫 스킬·첫 ! 팁 (KIDS-12)', async () => {
+  // 방 1 에는 스킬 팁이 없음, 방 2 의 싸움에서 한 번만
+  await NEWGAME('normal', 78);
+  await step(page, 120);
+  check('방 1 에서는 스킬 팁이 안 뜸 (부정)', (await snapOf()).tip !== 'skill');
+  await ev(() => { T.toRoom(1); T.run(() => Stage.state === 'fight', 300, false); });
+  await step(page, 2);
+  const s1 = await snapOf();
+  check('방 2 싸움이 시작되고 첫 스킬을 쓸 수 있으면 팁이 한 번 뜸', s1.tip === 'skill' && s1.roomIndex === 1, JSON.stringify(s1));
+  await step(page, 30);
+  const kb = await ev(() => { Game.touch = false; return T.overlayTexts(); });
+  check('키보드: "A" 키 모양과 "를 눌러 회오리!" 문구', kb.includes('A') && kb.includes('를 눌러 회오리!') && !kb.some(x => x.includes('버튼')), JSON.stringify(kb));
+  await shot('tip_skill_keyboard');
+  const tc = await ev(() => { Game.touch = true; const o = T.overlayTexts(); Game.touch = false; return o; });
+  check('터치: "스킬 버튼을 눌러 회오리!" 문구, 키 이름(A) 없음', tc.some(x => x.includes('스킬 버튼을 눌러 회오리!')) && !tc.includes('A'), JSON.stringify(tc));
+  // 스킬을 쓰면 팁이 사라지고, 쿨타임이 끝나도 다시 안 뜸 (한 번만)
+  await ev(() => { Input.press('KeyA'); });
+  await step(page, 2);
+  await ev(() => { Input.release('KeyA'); });
+  check('스킬을 쓰면 팁이 곧바로 사라짐', (await snapOf()).tip === null);
+  await step(page, 400);
+  check('쿨타임이 끝나 다시 쓸 수 있어도 팁은 다시 안 뜸 (한 번만)', (await snapOf()).tip === null);
+  // 스킬을 이미 써 본 아이에게는 방 2 에서도 안 뜸
+  await NEWGAME('normal', 79);
+  await step(page, 100);
+  await ev(() => { Game.player.skills[0].cd = 100; Loop.step(2); });
+  await ev(() => { T.toRoom(1); T.run(() => Stage.state === 'fight', 300, false); });
+  await step(page, 5);
+  check('방 1 에서 스킬을 써 본 아이에게는 방 2 에서 스킬 팁이 안 뜸 (부정)', (await snapOf()).tip !== 'skill');
+  // 팁은 시간이 지나면 저절로 사라짐
+  await NEWGAME('normal', 80);
+  await ev(() => { T.toRoom(1); T.run(() => Stage.state === 'fight', 300, false); });
+  await step(page, 2);
+  check('(준비) 스킬 팁이 떠 있음', (await snapOf()).tip === 'skill');
+  await step(page, (await ev(() => STAGE_TUNE.tip.life)) + 5);
+  check('아무것도 안 눌러도 팁은 life(300프레임) 뒤에 저절로 사라짐', (await snapOf()).tip === null);
+  // 처음 '!' 팁 (방 1)
+  await NEWGAME('normal', 81);
+  await ev(() => { Debug.god = true; });
+  const bang = await ev(() => { const o = { at: -1, txt: null }; for (let i = 0; i < 1500; i++) { Loop.step(1); if (Stage.snapshot().tip === 'bang') { o.at = i; Loop.step(12); o.txt = T.overlayTexts(); break; } } return o; });
+  check("방 1 에서 처음 적이 '!' 로 예고하면 팁이 뜸 (머리 위에 ! 가 뜨면 피해요!)", bang.at >= 0 && bang.txt.some(x => x.includes('! 가 뜨면 피해요')), JSON.stringify(bang));
+  await ev(() => { T.killAll(); });
+  await step(page, 500);
+  const again = await ev(() => { let n = 0; for (let i = 0; i < 400; i++) { Loop.step(1); if (Stage.snapshot().tip === 'bang') n++; } return n; });
+  check("'!' 팁은 한 번만 (끝난 뒤 다시 안 뜸)", again === 0);
+});
+
+// ===========================================================================
 // 17. 스크린샷 (눈으로 확인)
 // ===========================================================================
 await section('스크린샷', async () => {
-  for (const [i, name] of [[0, 'r1_forest'], [1, 'r2_path'], [2, 'r3_river'], [3, 'r4_cave']]) {
+  for (const [i, name] of [[0, 'r1_forest'], [1, 'r2_path'], [2, 'r3_river'], [3, 'r4_hill'], [4, 'r5_cave'], [5, 'r6_crystal']]) {
     await NEWGAME('normal', 40 + i);
     await ev(i => { T.toRoom(i); }, i);
     await ev(() => { T.run(() => Stage.state === 'fight' && T.foes().length >= 2, 800, false); });
@@ -1082,7 +1316,7 @@ await section('스크린샷', async () => {
   }
   // 보스방 (경고 / 싸움)
   await NEWGAME('normal', 50);
-  await ev(() => { T.toRoom(4); Loop.step(95); });
+  await ev(() => { T.toRoom(T.last()); Loop.step(95); });
   await shot('boss_warning_drop');
   await ev(() => { Loop.step(70); T.run(() => !!Game.boss && !Game.boss.untargetable, 200, false); Loop.step(60); });
   await shot('boss_room_fight');

@@ -180,17 +180,17 @@ await section('생성', async () => {
     out.count = Enemies.aliveCount();
     return out;
   });
-  check('spawn: 슬라임은 kind enemy / team enemy / type / score 100 / hp 20', r.slime.kind === 'enemy' && r.slime.team === 'enemy' && r.slime.type === 'slime' && r.slime.score === 100 && r.slime.hp === 20 && r.slime.maxHp === 20);
+  check('spawn: 슬라임은 kind enemy / team enemy / type / score 100 / hp 30 (보통)', r.slime.kind === 'enemy' && r.slime.team === 'enemy' && r.slime.type === 'slime' && r.slime.score === 100 && r.slime.hp === 30 && r.slime.maxHp === 30);
   check('spawn: Entities 에 추가되고 draw 가 있음, boss 가 아님', r.slime.inList && r.slime.hasDraw && !r.slime.boss && r.slime.minion === false);
   check('spawn: 처음엔 idle 상태 (바로 공격하지 않음)', r.slime.state === 'idle');
-  check('spawn: 젤리 대왕은 kind boss / boss:true / heavy:true / hp 300 / score 3000', r.boss.kind === 'boss' && r.boss.boss === true && r.boss.heavy === true && r.boss.hp === 300 && r.boss.score === 3000 && r.boss.team === 'enemy');
+  check('spawn: 젤리 대왕은 kind boss / boss:true / heavy:true / hp 760 / score 3000', r.boss.kind === 'boss' && r.boss.boss === true && r.boss.heavy === true && r.boss.hp === 760 && r.boss.score === 3000 && r.boss.team === 'enemy');
   check('spawn: 보스를 만들면 Game.boss 가 그 보스', r.boss.isGameBoss);
   check('spawn: bossSpawned 이벤트가 정확히 한 번, 보스 엔티티와 함께', r.boss.ev === 1 && r.boss.evSame);
   check('spawn: 보스는 땅에서 시작, 처음엔 맞을 수 있음', r.boss.z === 0 && r.boss.untargetable === false);
   check('spawn: 알 수 없는 종류는 null (예외 없이)', r.unknown === null);
-  check('spawn: 구름은 noGravity + 공중(z≈90)에서 시작', r.cloud.noGravity === true && r.cloud.z >= 85 && r.cloud.z <= 95 && r.cloud.kind === 'enemy' && r.cloud.hp === 25, `z=${r.cloud.z}`);
+  check('spawn: 구름은 noGravity + 공중(z≈86)에서 시작, hp 38 (보통)', r.cloud.noGravity === true && r.cloud.z >= 80 && r.cloud.z <= 92 && r.cloud.kind === 'enemy' && r.cloud.hp === 38, `z=${r.cloud.z}`);
   check('spawn: 바닥 띠 밖 좌표는 안쪽으로 보정', r.soldierClamp.y === 500 && r.soldierClamp.x <= 960 - 20 && r.soldierClampLo.y === 330 && r.soldierClampLo.x >= 20, JSON.stringify([r.soldierClamp, r.soldierClampLo]));
-  check('spawn: hpMul 옵션이 체력에 곱해짐 (20×2=40)', r.hpMul === 40);
+  check('spawn: hpMul 옵션이 체력에 곱해짐 (30×2=60)', r.hpMul === 60);
   check('spawn: minion 옵션이 e.minion 으로 남음', r.minion === true);
   check('aliveCount: 지금까지 만든 7마리(보스 포함)를 센다', r.count === 7, String(r.count));
 });
@@ -224,7 +224,8 @@ await section('난이도 스케일', async () => {
     const a = {}; for (const d of ['easy', 'normal', 'hard']) { ET.setup(d); a[d] = [Enemies.spawn('soldier', 500, 420).hp, Enemies.spawn('soldier', 500, 420).speed]; }
     return a;
   });
-  check('난이도가 올라갈수록 체력·속도가 커짐 (쉬움 < 보통 < 어려움)', r.easy[0] < r.normal[0] && r.normal[0] < r.hard[0] && r.easy[1] < r.normal[1] && r.normal[1] < r.hard[1], JSON.stringify(r));
+  // (어려움은 체력 배율이 보통과 같은 1.0 — 어려움은 체력이 아니라 아픈 정도(dmgTaken 1.7)·빠른 속도·짧은 예고·poise 로 어려워짐)
+  check('난이도가 올라갈수록 속도가 커지고 체력은 쉬움 < 보통 ≤ 어려움 (어려움 체력 배율 1.0)', r.easy[0] < r.normal[0] && r.normal[0] <= r.hard[0] && r.easy[1] < r.normal[1] && r.normal[1] < r.hard[1], JSON.stringify(r));
 });
 
 // ===========================================================================
@@ -306,10 +307,10 @@ await section('구름 마커', async () => {
     if (mode === 'jump') ET.onFrame = () => { if (e.marker && e.marker.t >= e.marker.total - 2) p.z = 60; };
     ET.until(`ET.hbs.some(h => h.owner === ${e.id})`, 200);
     const hb = ET.firstHb(e.id);
-    return { hit: hb ? hb.hits.length : -1, loss: hp0 - p.hp, mx, px: p.x, found: !!hb };
+    return { hit: hb ? hb.hits.length : -1, loss: hp0 - p.hp, mx, px: p.x, found: !!hb, want: ENEMY_DEFS.cloud.atk };
   }, mode);
   const stay = await dodge('stay'), side = await dodge('side'), depth = await dodge('depth'), jump = await dodge('jump');
-  check('구름 낙뢰: 마커가 멈춘 뒤에도 가만히 있으면 맞는다 (대조군)', stay.found && stay.hit === 1 && stay.loss === 8, JSON.stringify(stay));
+  check('구름 낙뢰: 마커가 멈춘 뒤에도 가만히 있으면 맞는다 (대조군)', stay.found && stay.hit === 1 && stay.loss === stay.want, JSON.stringify(stay));
   check('구름 낙뢰: 마커가 멈춘 뒤 옆으로 비키면 안 맞는다', side.found && side.hit === 0 && side.loss === 0, JSON.stringify(side));
   check('구름 낙뢰: 깊이(y)를 70 옮겨도 안 맞는다 (벨트스크롤)', depth.found && depth.hit === 0 && depth.loss === 0, JSON.stringify(depth));
   check('구름 낙뢰: 번개가 칠 때 점프해 있으면 안 맞는다', jump.found && jump.hit === 0 && jump.loss === 0, JSON.stringify(jump));
@@ -389,7 +390,7 @@ await section('근접 공격 판정', async () => {
     check(`${t}: 판정이 닿는 거리는 사거리 이내 (${stay.reach.toFixed(0)}px ≤ ${t === 'slime' ? 60 : 130})`, stay.reach > 20 && stay.reach <= (t === 'slime' ? 60 : 130));
   }
 });
-function ENEMY_DEFS_atk(t) { return { slime: 5, soldier: 8 }[t]; }
+function ENEMY_DEFS_atk(t) { return { slime: 7, soldier: 11 }[t]; }
 
 // ===========================================================================
 // 6. 동시 공격자 제한 (maxAttackers)
@@ -472,7 +473,7 @@ await section('아군 오사 없음', async () => {
     Loop.step(40);
     return { hit: ET.hbs.filter(h => h.owner === boss.id).some(h => h.hits.some(id => minions.some(m => m.id === id))), full: minions.every(m => m.hp === m.maxHp), bossHp: boss.hp, n: ET.hbs.filter(h => h.owner === boss.id).length };
   });
-  check('보스 충격파/돌진도 소환수를 맞히지 않음', b.n > 0 && !b.hit && b.full && b.bossHp === 300, JSON.stringify(b));
+  check('보스 충격파/돌진도 소환수를 맞히지 않음', b.n > 0 && !b.hit && b.full && b.bossHp === 760, JSON.stringify(b));
 });
 
 // ===========================================================================
@@ -548,7 +549,7 @@ await section('보스 마커·피하기', async () => {
       ET.until(`ET.hbs.some(h => h.owner === ${b.id})`, 1500);
       const hb = ET.firstHb(b.id);
       const m = ET.markerOf(b.id, hb.f), last = m.trail[m.trail.length - 1];
-      return { f: hb.f, m: { frames: m.frames, rx: m.rx, ry: m.ry, shape: m.shape }, hb: { x1: hb.x1, x2: hb.x2, y: hb.y, depth: hb.depth, zMax: hb.zMax, ox: hb.ox, oy: hb.oy, oz: hb.oz }, last, locked: m.trail.filter(t => t.locked).length, stillLocked: m.trail.filter(t => t.locked).every(t => t.x === last.x && t.y === last.y), loss: 100000 - p.hp, want: Math.round(10 * 1.5 * CFG.difficulty[d].dmgTaken) };
+      return { f: hb.f, m: { frames: m.frames, rx: m.rx, ry: m.ry, shape: m.shape }, hb: { x1: hb.x1, x2: hb.x2, y: hb.y, depth: hb.depth, zMax: hb.zMax, ox: hb.ox, oy: hb.oy, oz: hb.oz }, last, locked: m.trail.filter(t => t.locked).length, stillLocked: m.trail.filter(t => t.locked).every(t => t.x === last.x && t.y === last.y), loss: 100000 - p.hp, want: Math.round(ENEMY_DEFS.jellyKing.atk * 1.5 * CFG.difficulty[d].dmgTaken) };
     }, d);
     check(`[${d}] 보스 점프 찍기: 착지 마커가 45프레임 이상 보임 (${r.m.frames})`, r.m.frames >= 45 && r.m.shape === 'ellipse');
     check(`[${d}] 보스 충격파는 마커 중심에 정확히 떨어지고 보스도 거기 착지 (z=0)`, Math.abs((r.hb.x1 + r.hb.x2) / 2 - r.last.x) < 0.5 && Math.abs(r.hb.y - r.last.y) < 0.5 && Math.abs(r.hb.ox - r.last.x) < 0.5 && Math.abs(r.hb.oy - r.last.y) < 0.5 && r.hb.oz === 0, JSON.stringify([r.hb, r.last]));
@@ -572,7 +573,7 @@ await section('보스 마커·피하기', async () => {
   check('보스 충격파: 마커가 멈춘 뒤 옆으로 비키면 안 맞는다', s.n > 0 && s.hits === 0 && s.loss === 0, JSON.stringify(s));
   check('보스 충격파: 위/아래(깊이)로 비켜도 안 맞는다', dp.n > 0 && dp.hits === 0 && dp.loss === 0, JSON.stringify(dp));
   check('보스 충격파: 착지 순간 점프해 있으면 안 맞는다', j.n > 0 && j.hits === 0 && j.loss === 0, JSON.stringify(j));
-  check('보스 충격파: 대조군 — 가만히 있으면 한 번만 맞는다 (4프레임 동안 같은 판정이 이어져도 중복 안 됨)', st.hits === 1 && st.loss === 15, JSON.stringify(st));
+  check('보스 충격파: 대조군 — 가만히 있으면 한 번만 맞는다 (4프레임 동안 같은 판정이 이어져도 중복 안 됨)', st.hits === 1 && st.loss === Math.round(12 * 1.5), JSON.stringify(st));
 
   // 돌진: 길 위에서만 맞고, 한 번만 맞고(관통), 옆으로 비키면 안 맞음
   const ch = async mode => ev(mode => {
@@ -590,7 +591,7 @@ await section('보스 마커·피하기', async () => {
     return { n: hbs.length, hits: hbs.reduce((a, h) => a + h.hits.length, 0), loss: hp0 - p.hp, bx, face, endX: b.x, recLen: rec && rec.len, wall: face > 0 ? Game.world.width - b.w / 2 : b.w / 2, depthOf: hbs[0] && hbs[0].depth, zMax: hbs[0] && hbs[0].zMax };
   }, mode);
   const c1 = await ch('stay'), c2 = await ch('depth');
-  check('보스 돌진: 길 위에 서 있으면 한 번만 맞는다 (관통 판정, 중복 피해 없음) 피해 12', c1.hits === 1 && c1.loss === 12 && c1.n > 5, JSON.stringify(c1));
+  check('보스 돌진: 길 위에 서 있으면 한 번만 맞는다 (관통 판정, 중복 피해 없음) 피해 14', c1.hits === 1 && c1.loss === Math.round(12 * 1.2) && c1.n > 5, JSON.stringify(c1));
   check('보스 돌진: 벽까지 달려가서 멈추고 어지러운 시간(≥100프레임)이 됨', Math.abs(c1.endX - c1.wall) < 3 && c1.recLen >= 100, `end=${c1.endX.toFixed(1)} wall=${c1.wall} rec=${c1.recLen}`);
   check('보스 돌진: 길(깊이) 밖으로 90 비키면 안 맞는다', c2.n > 5 && c2.hits === 0 && c2.loss === 0, JSON.stringify(c2));
 });
@@ -642,10 +643,11 @@ await section('보스 2페이즈', async () => {
     };
     out.p1 = measure();
     // 2페이즈 직전: 체력 51% 에서는 아직 아님
-    Combat.damage(b, 140, { team: 'player', owner: p, freeze: 0, stun: 0 });
-    out.at51 = b.phase2 === true; out.hpMid = b.hp;
+    const hp51 = Math.ceil(b.maxHp * 0.51);
+    Combat.damage(b, b.hp - hp51, { team: 'player', owner: p, freeze: 0, stun: 0 });
+    out.at51 = b.phase2 === true; out.hpMid = b.hp; out.hp51 = hp51;
     const warn0 = ET.sfx.filter(s => s[1] === 'warn').length;
-    Combat.damage(b, 10, { team: 'player', owner: p, freeze: 0, stun: 0 });   // 정확히 50%
+    Combat.damage(b, b.hp - b.maxHp * 0.5, { team: 'player', owner: p, freeze: 0, stun: 0 });   // 정확히 50%
     out.at50 = b.phase2 === true; out.hp50 = b.hp;
     out.popup = FX.popups.some(q => q.text === '화났다!');
     out.warnDelta = ET.sfx.filter(s => s[1] === 'warn').length - warn0;
@@ -656,8 +658,8 @@ await section('보스 2페이즈', async () => {
     // 속도: 돌진 중 최대 이동 속도 1페이즈 vs 2페이즈
     return out;
   });
-  check('2페이즈: 체력 51%에서는 아직 안 화남', r.at51 === false && r.hpMid === 160, JSON.stringify([r.at51, r.hpMid]));
-  check('2페이즈: 체력 50%가 되는 순간 phase2 가 켜짐', r.at50 === true && r.hp50 === 150);
+  check('2페이즈: 체력 51%에서는 아직 안 화남', r.at51 === false && r.hpMid === r.hp51, JSON.stringify([r.at51, r.hpMid]));
+  check('2페이즈: 체력 50%가 되는 순간 phase2 가 켜짐', r.at50 === true && r.hp50 === 380);
   check('2페이즈: "화났다!" 팝업이 뜨고 warn 효과음이 정확히 한 번', r.popup && r.warnDelta === 1, `warn=${r.warnDelta}`);
   check('2페이즈: 더 맞아도 다시 발동하지 않음 (warn 1번, 팝업 1개)', r.warnAfter === 1 && r.popups === 1, `warn=${r.warnAfter} popups=${r.popups}`);
   const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
@@ -668,7 +670,7 @@ await section('보스 2페이즈', async () => {
     const run = phase2 => {
       const p = ET.setup('normal', { px: 80, py: 420 });
       const b = Enemies.spawn('jellyKing', 800, 420);
-      if (phase2) { Combat.damage(b, 150, { team: 'player', owner: p, freeze: 0, stun: 0 }); }
+      if (phase2) { Combat.damage(b, b.maxHp / 2, { team: 'player', owner: p, freeze: 0, stun: 0 }); }
       b.cd = 0; Loop.step(1);                                      // idle → chase (한 틱만: 둘째 틱에는 패턴을 시작해 버림)
       b.cd = 99999;
       Loop.step(10);
@@ -962,7 +964,7 @@ await section('피격 반응', async () => {
       const p = ET.setup('normal', { px: 300, py: 420 });
       const e = Enemies.spawn(t, 520, 420); e.cd = 0;
       ET.until(`ET.byId(${e.id}).state === 'windup'`, 900);
-      Loop.step(8);
+      Loop.step(22);                                             // 예고 시작 번쩍(20프레임 한도) 이 지난 뒤에 맞아야 새 번쩍임이 생김 (KIDS-05)
       const hadMarker = !!e.marker;
       Combat.damage(e, 1, { team: 'player', owner: p, stun: 14, knock: 4, freeze: 0 });
       const out = { state: e.state, markerGone: !e.marker, hadMarker, flash: e.flash, stun: e.stun, engage: e.engage };
@@ -1204,7 +1206,7 @@ await section('clear 뒤 새 출발', async () => {
   });
   check('clear: 보스가 점프 찍기로 공중에 떠 있는 순간에도 깨끗이 지움 (마커 포함 엔티티 0, Game.boss null)', r.z0 > 20 && r.mk0 >= 1 && r.left === 0 && r.gameBoss === null && r.alive === 0 && r.minions === 0, JSON.stringify(r));
   check('clear 뒤 240프레임: 지워진 적이 남긴 공격 판정·오류·bossKilled 이벤트가 없음', r.hbAfter === 0 && r.errs === 0 && r.killedEv === 0, JSON.stringify([r.hbAfter, r.errs, r.killedEv]));
-  check('clear 뒤 새 보스는 완전히 처음 상태: 1페이즈, 체력 가득, 마커·소환수 없음, 첫 패턴은 점프 찍기', r.fresh.gb && r.fresh.state === 'idle' && r.fresh.patIdx === 0 && r.fresh.phase2 === false && r.fresh.hp === 300 && r.fresh.marker === null && r.fresh.minion === 0 && r.firstPattern === 'slam', JSON.stringify(r.fresh));
+  check('clear 뒤 새 보스는 완전히 처음 상태: 1페이즈, 체력 가득, 마커·소환수 없음, 첫 패턴은 점프 찍기', r.fresh.gb && r.fresh.state === 'idle' && r.fresh.patIdx === 0 && r.fresh.phase2 === false && r.fresh.hp === 760 && r.fresh.marker === null && r.fresh.minion === 0 && r.firstPattern === 'slam', JSON.stringify(r.fresh));
 });
 
 // 연출: 예고가 막 시작되면 하얗게 번쩍, 2페이즈 팝업이 데미지 숫자와 겹치지 않음
@@ -1222,17 +1224,17 @@ await section('예고 번쩍·팝업 위치', async () => {
     const out = { t: e.t };
     out.start = shot();                                          // 막 시작
     const bl = []; for (let i = 0; i < 12; i++) { Loop.step(1); bl.push([e.t, shot()]); }
-    out.mid = bl.filter(x => x[0] >= 1 && x[0] <= 3).map(x => x[1]);
+    out.mid = [out.start].concat(bl.filter(x => x[0] >= 1 && x[0] <= 2).map(x => x[1]));       // 예고 시작 프레임 + 다음 2프레임 = 3프레임
     out.after = bl.filter(x => x[0] >= 9).map(x => x[1]);
     // 2페이즈 팝업 위치
     ET.setup('normal', { px: 300, py: 420 });
     const b = Enemies.spawn('jellyKing', 700, 420); b.cd = 1e9;
-    Combat.damage(b, 150, { team: 'player', owner: ET.p, freeze: 0, stun: 0 });
-    const ang = FX.popups.find(q => q.text === '화났다!'), num = FX.popups.find(q => q.text === 150 || q.text === '150' || (typeof q.text === 'number'));
+    Combat.damage(b, 380, { team: 'player', owner: ET.p, freeze: 0, stun: 0 });
+    const ang = FX.popups.find(q => q.text === '화났다!'), num = FX.popups.find(q => q.text === 380 || q.text === '380' || (typeof q.text === 'number'));
     out.popY = ang && ang.y; out.numY = num && num.y;
     return out;
   });
-  check(`예고 시작 3프레임은 하얗게 번쩍 (흰 픽셀 ${r.mid.join(',')}) → 이후엔 원래 색 (${r.after.join(',')})`, Math.min(...r.mid) > 150 && Math.max(...r.after) < Math.min(...r.mid) * 0.5, JSON.stringify(r));
+  check(`예고 시작 3프레임(시작 + 2)은 하얗게 번쩍 (흰 픽셀 ${r.mid.join(',')}) → 이후엔 원래 색 (${r.after.join(',')})`, Math.min(...r.mid) > 150 && Math.max(...r.after) < Math.min(...r.mid) * 0.5, JSON.stringify(r));
   check(`"화났다!" 팝업이 데미지 숫자보다 위(${r.popY} < ${r.numY} - 30)에 떠서 안 겹침`, r.popY !== null && r.numY !== null && r.popY < r.numY - 30, JSON.stringify([r.popY, r.numY]));
 });
 
@@ -1330,6 +1332,241 @@ await section('그리기', async () => {
       }
     }
   }
+});
+
+// ===========================================================================
+// QA 수정 (GP-2): 난이도 poise — 예고 막판에는 맞아도 끊기지 않음 (어려움 0.5), 쉬움·보통은 언제든 끊김
+// ===========================================================================
+await section('난이도 poise (GP-2)', async () => {
+  const tbl = await ev(() => ({ easy: CFG.difficulty.easy.poise, normal: CFG.difficulty.normal.poise, hard: CFG.difficulty.hard.poise, diffHard: (Game.difficulty = 'hard', Game.diff.poise) }));
+  check('난이도 표: poise 쉬움 0 / 보통 0 / 어려움 0.5, Game.diff.poise 로 읽힘', tbl.easy === 0 && tbl.normal === 0 && tbl.hard === 0.5 && tbl.diffHard === 0.5, JSON.stringify(tbl));
+  // 예고(windup)가 frac 만큼 진행된 순간 한 대 맞았을 때
+  const hitAt = (diff, type, frac) => ev(({ diff, type, frac }) => {
+    const p = ET.setup(diff, { px: 300, py: 420 });
+    const e = Enemies.spawn(type, 520, 420); e.cd = 0;
+    ET.until(`ET.byId(${e.id}).state === 'windup'`, 900);
+    const target = Math.floor(e.len * frac);
+    for (let i = 0; i < 200 && e.t < target && e.state === 'windup'; i++) Loop.step(1);
+    const o = { t: e.t, len: e.len, st0: e.state, armor0: e.superArmor };
+    Combat.damage(e, 1, { team: 'player', owner: p, stun: 14, knock: 4, freeze: 0 });
+    o.state = e.state; o.armor = e.superArmor; o.stun = e.stun; o.kx = e.kx; o.hp = e.hp; o.maxHp = e.maxHp;
+    o.popups = FX.popups.filter(q => q.text === '단단!').length;
+    return o;
+  }, { diff, type, frac });
+  for (const t of ['slime', 'soldier', 'cloud']) {
+    const early = await hitAt('hard', t, 0.25), late = await hitAt('hard', t, 0.7);
+    check(`[hard ${t}] 예고 초반(25%)에 맞으면 끊김 (hurt, 경직)`, early.st0 === 'windup' && early.state === 'hurt' && early.stun > 0 && !early.armor, JSON.stringify(early));
+    check(`[hard ${t}] 예고 막판(70%)에 맞으면 끊기지 않음 (windup 유지, 경직·넉백 없음, 피해는 들어감)`, late.st0 === 'windup' && late.armor0 === true && late.state === 'windup' && late.stun === 0 && late.kx === 0 && late.hp < late.maxHp, JSON.stringify(late));
+    check(`[hard ${t}] 끊기지 않는 구간에 맞으면 "단단!" 글자가 한 번`, late.popups === 1 && early.popups === 0, JSON.stringify([early.popups, late.popups]));
+    for (const d of ['easy', 'normal']) {
+      const lt = await hitAt(d, t, 0.9);
+      check(`[${d} ${t}] poise 0 이라 예고 막판(90%)에도 맞으면 끊김`, lt.state === 'hurt' && lt.stun > 0 && !lt.armor, JSON.stringify(lt));
+    }
+  }
+  // 예고가 끝나 공격으로 이어지고, 공격이 끝나면 armor 가 풀림 (새지 않음)
+  const leak = await ev(() => {
+    const p = ET.setup('hard', { px: 300, py: 420 });
+    const e = Enemies.spawn('slime', 520, 420); e.cd = 0;
+    ET.until(`ET.byId(${e.id}).state === 'windup'`, 900);
+    while (e.t < Math.floor(e.len * 0.7) && e.state === 'windup') Loop.step(1);
+    Combat.damage(e, 1, { team: 'player', owner: p, stun: 14, knock: 4, freeze: 0 });
+    const st = [e.state];
+    ET.until(`ET.byId(${e.id}).state === 'attack'`, 100); st.push(e.state);
+    const armorInAttack = e.superArmor;
+    ET.until(`ET.byId(${e.id}).state === 'recover'`, 100); st.push(e.state);
+    const armorAfter = e.superArmor;
+    const hp0 = e.hp; Combat.damage(e, 1, { team: 'player', owner: p, stun: 14, knock: 4, freeze: 0 });
+    const hurt = { state: e.state, stun: e.stun };
+    ET.until(`ET.byId(${e.id}).state === 'chase'`, 100);
+    return { st, armorInAttack, armorAfter, hurt, armorChase: e.superArmor, attacked: ET.hbs.some(h => h.owner === e.id) };
+  });
+  check('끊기지 않은 예고는 공격으로 이어짐 (windup → attack → recover)', eq3(leak.st, ['windup', 'attack', 'recover']) && leak.attacked, JSON.stringify(leak));
+  check('공격이 끝나면 armor 가 풀림: recover 에서는 맞으면 다시 끊김·경직 (새지 않음)', leak.armorAfter === false && leak.hurt.state === 'hurt' && leak.hurt.stun > 0 && leak.armorChase === false, JSON.stringify(leak));
+  // poise 가 없거나 이상하면 0 으로 (끊김)
+  const odd = await ev(() => {
+    const out = {};
+    const saved = CFG.difficulty.hard.poise;
+    for (const v of [undefined, null, NaN, -1, 'x']) {
+      CFG.difficulty.hard.poise = v;
+      const p = ET.setup('hard', { px: 300, py: 420 });
+      const e = Enemies.spawn('slime', 520, 420); e.cd = 0;
+      ET.until(`ET.byId(${e.id}).state === 'windup'`, 900);
+      while (e.t < Math.floor(e.len * 0.9) && e.state === 'windup') Loop.step(1);
+      Combat.damage(e, 1, { team: 'player', owner: p, stun: 14, knock: 4, freeze: 0 });
+      out[String(v)] = { state: e.state, poise: Game.diff.poise };
+    }
+    CFG.difficulty.hard.poise = saved;
+    return out;
+  });
+  check('Game.diff.poise 가 없거나(undefined/null/NaN/음수/문자) 이상하면 0 으로 보고 막판에도 끊김', Object.values(odd).every(o => o.state === 'hurt' && o.poise === 0), JSON.stringify(odd));
+  function eq3(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+});
+
+// ===========================================================================
+// QA 수정 (GP-3): hunt — 웨이브로 나온 적은 멀리서도 처음부터 쫓아옴
+// ===========================================================================
+await section('hunt: 멀리서도 쫓아옴 (GP-3)', async () => {
+  const r = await ev(() => {
+    const out = {};
+    const run = hunt => {
+      const p = ET.setup('normal', { px: 100, py: 420, width: 1920 });
+      const e = Enemies.spawn('slime', 1700, 420, hunt ? { hunt: true } : {}); e.cd = 1e9; e.alert = 0;
+      Loop.step(240);
+      return { state: e.state, moved: 1700 - e.x, dist: Math.round(Math.abs(e.x - p.x)), hunt: e.hunt };
+    };
+    out.hunt = run(true); out.plain = run(false);
+    return out;
+  });
+  check('hunt:true 인 슬라임은 aggroRange(900) 밖(거리 1600)에서도 쫓아옴 (chase, 앞으로 움직임)', r.hunt.hunt === true && r.hunt.state === 'chase' && r.hunt.moved > 120, JSON.stringify(r.hunt));
+  check('대조군: hunt 가 없으면 aggroRange 밖에서는 계속 배회(idle)만 함', r.plain.state === 'idle' && r.plain.moved < 80 && r.plain.hunt === false, JSON.stringify(r.plain));
+});
+
+// ===========================================================================
+// QA 수정 (GP-4): 떠 있는 구름(출렁임 포함 최대 높이)도 서서 휘두르는 콤보에 늘 맞음
+// ===========================================================================
+await section('구름 높이와 서서 치는 콤보 (GP-4)', async () => {
+  const r = await ev(() => {
+    const out = { z: [], res: [] };
+    const p0 = ET.setup('normal', { px: 700, py: 420 });
+    Entities.remove(p0);                                        // 진짜 플레이어로 교체
+    const p = Player.create(300, 420); p.face = 1;
+    const def = ENEMY_DEFS.cloud;
+    out.maxHover = def.floatZ + 4; out.zMaxBox = PLAYER_DEF.h + PLAYER_DEF.headroom;
+    // 출렁임 한 바퀴(90프레임)에서 가장 높은 순간과 가장 낮은 순간, 그리고 중간에 서서 치는 콤보가 맞는지
+    for (const age of [0, 10, 22, 34, 45, 56, 67, 79]) {
+      Enemies.clear();
+      const c = Enemies.spawn('cloud', 350, 420); c.cd = 1e9; c.alert = 1e9; c.update = () => {}; c.hp = c.maxHp = 1000;
+      c.age = age; c.z = def.floatZ + Math.sin(age * 0.07) * 4; c.state = 'chase';
+      p.x = 300; p.y = 420; p.face = 1; p.state = 'idle'; p.invuln = 0; p.stun = 0;
+      for (let i = 0; i < 6; i++) Loop.step(1);
+      const z0 = c.z;
+      Input.press('KeyZ'); Loop.step(3); Input.release('KeyZ'); Loop.step(14);
+      out.res.push({ age, z: Math.round(z0 * 10) / 10, hit: c.hp < c.maxHp });
+    }
+    return out;
+  });
+  check('구름 최대 높이(floatZ+출렁임 4)가 서서 휘두르는 칼의 높이(몸 80 + headroom 14)보다 낮음', r.maxHover < r.zMaxBox - 2, `${r.maxHover} < ${r.zMaxBox}`);
+  check('출렁임의 모든 높이(맨 위 포함)에서 서서 친 1타가 구름을 맞힘 (8가지 위상)', r.res.length === 8 && r.res.every(x => x.hit), JSON.stringify(r.res));
+});
+
+// ===========================================================================
+// QA 수정 (KIDS-05): 하얗게 번쩍임 — 같은 적은 초당 3번 이하, 덩치 큰 적은 실루엣 전체를 칠하지 않음, '움직임 줄이기'면 없음
+// ===========================================================================
+await section('번쩍임 한도 (KIDS-05)', async () => {
+  // 초당 N번 때리는 공격자를 상대로, 하얗게 번쩍임이 새로 시작되는 횟수 (어느 1초(60프레임) 창에서도 3번 이하)
+  const onsets = (type, perSec) => ev(({ type, perSec }) => {
+    const p = ET.setup('normal', { px: 300, py: 420 });
+    const e = Enemies.spawn(type, 420, 420); e.cd = 1e9; e.hp = e.maxHp = 1e7;
+    Loop.step(5);
+    const period = Math.max(1, Math.round(60 / perSec)), frames = 480, on = [];
+    let prev = false;
+    for (let f = 0; f < frames; f++) {
+      if (f % period === 0) Combat.damage(e, 1, { team: 'player', owner: p, stun: 0, knock: 0, freeze: 0 });
+      Loop.step(1);
+      const w = e.flash > 0 || e.blink > 0;
+      if (w && !prev) on.push(f);
+      prev = w;
+    }
+    let max = 0;
+    for (let i = 0; i < on.length; i++) { let n = 0; for (const f of on) if (f >= on[i] && f < on[i] + 60) n++; max = Math.max(max, n); }
+    return { onsets: on.length, max, hits: Math.ceil(frames / period), period };
+  }, { type, perSec });
+  for (const type of ['jellyKing', 'slime', 'soldier', 'cloud']) {
+    const res = {};
+    for (const rate of [3, 4, 5, 8, 12]) res[rate] = await onsets(type, rate);
+    check(`[${type}] 초당 3·4·5·8·12번 때려도 하얗게 번쩍임이 어느 1초에도 3번 이하 (최대 ${Object.values(res).map(x => x.max).join('/')})`, Object.values(res).every(x => x.max <= 3), JSON.stringify(res));
+    check(`[${type}] 초당 3번(20프레임 간격)은 맞을 때마다 번쩍임 — 피격 표시가 사라지지 않음 (${res[3].onsets}/${res[3].hits})`, res[3].onsets >= res[3].hits - 1, JSON.stringify(res[3]));
+    check(`[${type}] 아주 빠르게(초당 12번) 때려도 번쩍임이 1번은 있음 (한 번도 안 번쩍이지는 않음)`, res[12].onsets >= 5, JSON.stringify(res[12]));
+  }
+  // 예고 시작 번쩍(3프레임) 직후에 맞아도 한 번만 번쩍임 (예고 번쩍 + 피격 번쩍 = 2번이 아님)
+  const bl = await ev(() => {
+    const p = ET.setup('normal', { px: 300, py: 420 });
+    const e = Enemies.spawn('slime', 520, 420); e.cd = 0;
+    ET.until(`ET.byId(${e.id}).state === 'windup'`, 900);
+    const on = []; let prev = e.flash > 0 || e.blink > 0; if (prev) on.push(0);
+    for (let f = 1; f < 24; f++) {
+      if (f === 6) Combat.damage(e, 1, { team: 'player', owner: p, stun: 14, knock: 4, freeze: 0 });
+      Loop.step(1);
+      const w = e.flash > 0 || e.blink > 0;
+      if (w && !prev) on.push(f);
+      prev = w;
+    }
+    return on;
+  });
+  check('예고 시작 번쩍 직후(6프레임 뒤)에 맞아도 20프레임 안에 새 번쩍임은 없음 (한 번만)', bl.length === 1, JSON.stringify(bl));
+
+  // 화면에서 얼마나 넓게 밝아지나: 번쩍임 켠 프레임 vs 끈 프레임에서 상대 휘도가 0.1 이상 오른 픽셀의 비율
+  const area = await ev(() => {
+    const lum = (r, g, b) => { const f = c => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+    const measure = (type, setFlash) => {
+      ET.setup('normal', { px: 100, py: 420 });
+      const e = Enemies.spawn(type, 480, 420); e.cd = 1e9; e.face = -1;
+      Loop.step(3); e.hitT = 6;                                      // 맞은 직후 모습(찌그러짐)은 두 장이 같게
+      const grab = f => { e.flash = f; Loop.draw(); const c = Loop.canvas, d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; return d; };
+      const a = grab(0), b = grab(setFlash);
+      let n = 0; for (let i = 0; i < a.length; i += 4) if (lum(b[i], b[i + 1], b[i + 2]) - lum(a[i], a[i + 1], a[i + 2]) >= 0.1) n++;
+      return n / (a.length / 4);
+    };
+    const out = {};
+    for (const t of ['slime', 'soldier', 'cloud', 'jellyKing']) out[t] = measure(t, 6);
+    const saved = ENEMY_TUNE.flash.bigW; ENEMY_TUNE.flash.bigW = 99999;     // 대조군: 덩치 큰 적도 예전처럼 실루엣 전체를 하얗게
+    out.oldBoss = measure('jellyKing', 6); ENEMY_TUNE.flash.bigW = saved;
+    return out;
+  });
+  const pct = x => (x * 100).toFixed(2) + '%';
+  check(`보스 피격 번쩍: 화면의 0.5% 이하만 확 밝아짐 (${pct(area.jellyKing)}) — 예전처럼 전체를 칠하면 ${pct(area.oldBoss)}`, area.jellyKing < 0.005 && area.oldBoss > 0.012, JSON.stringify(area));
+  check('작은 적들(슬라임·병정·구름)의 번쩍임도 화면의 1.5% 이하', ['slime', 'soldier', 'cloud'].every(t => area[t] < 0.015), JSON.stringify(area));
+
+  // '움직임 줄이기'면 하얀 실루엣이 없음: 맞아도 번쩍임 0, 그리는 그림도 번쩍임 값과 상관없이 같음
+  const calm = await ev(() => {
+    const out = {};
+    const saved = FX.reduceMotion; FX.reduceMotion = true;
+    for (const type of ['slime', 'jellyKing']) {
+      const p = ET.setup('normal', { px: 300, py: 420 });
+      const e = Enemies.spawn(type, 480, 420); e.cd = 1e9; e.face = -1; e.hp = e.maxHp = 1e6;
+      Loop.step(3);
+      Combat.damage(e, 1, { team: 'player', owner: p, stun: 0, knock: 0, freeze: 0 });
+      out[type + 'Flash'] = e.flash;
+      e.hitT = 6; e.flash = 0; Loop.draw();
+      const c = Loop.canvas, g = c.getContext('2d'), a = g.getImageData(0, 0, c.width, c.height).data;
+      e.flash = 6; e.blink = 3; Loop.draw();
+      const b = g.getImageData(0, 0, c.width, c.height).data;
+      let diff = 0; for (let i = 0; i < a.length; i += 4) if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 30) diff++;
+      out[type + 'Diff'] = diff;
+    }
+    FX.reduceMotion = saved;
+    return out;
+  });
+  check('움직임 줄이기: 맞아도 e.flash 가 0, 번쩍임 값을 켜도 그림이 달라지지 않음 (슬라임·보스)', calm.slimeFlash === 0 && calm.jellyKingFlash === 0 && calm.slimeDiff === 0 && calm.jellyKingDiff === 0, JSON.stringify(calm));
+  // 보스가 쓰러지는 연출: 하얀 구간은 아주 짧은 한 번 (작은 적은 길게 하얀 것과 비교)
+  const death = await ev(() => {
+    const whites = (type, frames) => {
+      const p = ET.setup('normal', { px: 100, py: 420 });
+      const e = Enemies.spawn(type, 480, 420); e.cd = 1e9; e.face = -1; Loop.step(3);
+      Combat.damage(e, 1e9, { team: 'player', owner: p, freeze: 0 });
+      Loop.step(frames); FX.particles.length = 0; FX.popups.length = 0; Loop.draw();
+      const box = [480 - 160, 420 - 240, 320, 270], d = ET.region(...box); let n = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] > 245 && d[i + 1] > 245 && d[i + 2] > 245) n++;
+      return n / (box[2] * box[3] * Loop.dpr * Loop.dpr);
+    };
+    const frame = frames => {                                         // 보스가 쓰러지는 중간 장면의 화소 (파티클·팝업 제외)
+      const p = ET.setup('normal', { px: 100, py: 420 });
+      const e = Enemies.spawn('jellyKing', 480, 420); e.cd = 1e9; e.face = -1; Loop.step(3);
+      Combat.damage(e, 1e9, { team: 'player', owner: p, freeze: 0 });
+      Loop.step(frames); FX.particles.length = 0; FX.popups.length = 0; Loop.draw();
+      return Array.from(ET.region(480 - 160, 420 - 240, 320, 270));
+    };
+    const withTint = frame(22);
+    const sv0 = ENEMY_TUNE.flash.bigTint; ENEMY_TUNE.flash.bigTint = 0;                    // 대조군: 덩치 큰 적의 옅은 흰 덧칠을 아예 끔
+    const noTint = frame(22); ENEMY_TUNE.flash.bigTint = sv0;
+    const out = { bossMid: whites('jellyKing', 22), slimeMid: whites('slime', 6), tintPx: ET.diffPx(withTint, noTint) };
+    const sv = { ...ENEMY_TUNE.flash }; ENEMY_TUNE.flash.deathPulse = 0.45; ENEMY_TUNE.flash.bigW = 99999;    // 대조군: 예전처럼 진행도 45% 까지 하얀 실루엣
+    out.oldBossMid = whites('jellyKing', 22); Object.assign(ENEMY_TUNE.flash, sv);
+    return out;
+  });
+  const pc = x => (x * 100).toFixed(1) + '%';
+  check(`보스 쓰러짐: 중간(30%)에는 하얀 실루엣이 없음 (흰 픽셀 ${pc(death.bossMid)}) — 예전처럼 하얗게 칠하면 ${pc(death.oldBossMid)}, 작은 슬라임은 같은 진행도에 하얗게 (${pc(death.slimeMid)})`, death.bossMid < 0.02 && death.oldBossMid > 0.05 && death.slimeMid > 0.015, JSON.stringify(death));
+  check('보스 쓰러짐: 중간(30%)에는 옅은 흰 덧칠도 이미 끝남 (덧칠을 끈 장면과 화소가 같음) — 하얀 구간은 처음 몇 프레임뿐', death.tintPx === 0, JSON.stringify(death));
 });
 
 // ===========================================================================

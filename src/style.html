@@ -5,7 +5,7 @@
        JS 가 켜지기 전에도 쓸 수 있게 CSS 만으로 계산한 값을 기본으로 둬요.
      · 작은 화면에서도 버튼은 최소 44px, 글자는 최소 13~15px 로 지켜요 (max() 사용).
      · 폰트 'Jua' 는 논블로킹(media="print" onload)으로 불러와요. 못 불러와도 한글 시스템 폰트로 정상 동작.
-     · prefers-reduced-motion 이면 모든 움직임(애니메이션)을 꺼요.
+     · 「움직임 줄이기」 스위치가 켜져 있거나 prefers-reduced-motion 이면 모든 움직임(애니메이션)을 꺼요.
      ========================================================================== -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -53,6 +53,8 @@ body { display: flex; align-items: center; justify-content: center; -webkit-user
 }
 #game { display: block; width: 100%; height: 100%; }       /* 캔버스 백버퍼는 960*dpr — CSS 크기는 여기서 정해요 */
 #ui { position: absolute; inset: 0; z-index: 10; pointer-events: none; overflow: hidden; font-size: var(--fs-m); }
+/* 한글은 글자 사이 어디서나 줄이 바뀌어서 "돌려 주세/요" 처럼 끝 글자만 덜렁 남아요. 띄어쓰기에서만 줄을 바꾸고, 정말 안 들어가는 긴 낱말만 쪼개요 */
+#ui, .rotate { word-break: keep-all; overflow-wrap: anywhere; }
 #ui [hidden], #touch [hidden] { display: none !important; }
 .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 input, button { font-family: inherit; }
@@ -114,6 +116,7 @@ input:focus-visible { outline: max(3px, calc(4 * var(--u))) solid var(--ink); ou
   animation: slidein .28s ease-out; transition: opacity .3s ease, transform .3s ease;
 }
 .toast.out { opacity: 0; transform: translateY(-10px); }
+.toasts.low { top: calc(184 * var(--u)); }       /* 보스 체력바(y 98~174)를 가리지 않게 그 아래 (바닥 띠 y 330 위) */
 
 /* ===== 6. 타이틀 ===== */
 .screen { position: absolute; inset: 0; pointer-events: none; }
@@ -135,7 +138,8 @@ input:focus-visible { outline: max(3px, calc(4 * var(--u))) solid var(--ink); ou
   border: var(--bw) solid var(--ink); border-radius: 999px; padding: 0 1em; box-shadow: 0 var(--sh) 0 var(--ink); margin-bottom: var(--sh);
   -webkit-user-select: text; user-select: text;
 }
-.nick-input::placeholder { color: #7a6a8a; }
+.nick-input::placeholder { color: #6a5a7a; }
+.dice-btn { flex: none; padding: 0; width: var(--tap); font-size: max(20px, calc(26 * var(--u))); margin-bottom: var(--sh); }
 .nick-input[aria-invalid="true"] { border-color: #c2183a; box-shadow: 0 var(--sh) 0 #c2183a; background: #fff0f3; }
 .nick-wrap { position: relative; }
 .nick-err {
@@ -145,7 +149,7 @@ input:focus-visible { outline: max(3px, calc(4 * var(--u))) solid var(--ink); ou
 }
 .nick-err:empty { display: none; }
 .nick-err.shake { animation: shake .35s ease; }
-.nick-hint { margin: 0; text-align: center; font-size: var(--fs-xs); color: var(--ink); background: rgba(255,244,224,.85); border-radius: 999px; padding: 0 .8em; align-self: center; }
+.nick-hint { margin: calc(-2 * var(--u)) auto 0; width: fit-content; max-width: 100%; text-align: center; font-size: var(--fs-xs); line-height: 1.35; color: var(--ink); background: rgba(255,244,224,.85); border-radius: 999px; padding: 0 .8em; }
 .diff-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap); padding-top: calc(4 * var(--u)); }
 .diff-card {
   font: inherit; color: var(--ink); cursor: pointer; position: relative;
@@ -168,6 +172,12 @@ input:focus-visible { outline: max(3px, calc(4 * var(--u))) solid var(--ink); ou
 .start-btn { width: 100%; position: relative; background: linear-gradient(#ffe56e, #ffb43c); animation: breathe 1.4s ease-in-out infinite; }
 .start-btn::after { content: ""; position: absolute; inset: calc(-1 * var(--bw)); border-radius: inherit; pointer-events: none; animation: ping 1.4s ease-out infinite; }
 .corner-btns { position: absolute; top: calc(8 * var(--u)); left: calc(10 * var(--u)); display: flex; flex-direction: column; align-items: flex-start; gap: calc(4 * var(--u)); z-index: 5; }
+/* 오른쪽 위, 소리 버튼 바로 아래: 「움직임 줄이기」 스위치 (KIDS-06) */
+.corner-btns-r { position: absolute; top: calc(max(44px, 50 * var(--u)) + 8 * var(--u) + var(--sh) + 4px); right: calc(10 * var(--u)); display: flex; flex-direction: column; align-items: flex-end; z-index: 5; }
+.corner-btns-r .btn { margin-bottom: 0; }
+.motion-btn .ico { flex: none; }
+.pause-card .motion-btn { font-size: var(--fs-s); }
+[data-on="1"] { box-shadow: 0 var(--sh) 0 var(--ink), 0 0 0 max(3px, calc(4 * var(--u))) var(--mint); }
 
 /* 조작법 패널 */
 .keys { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: auto auto; justify-content: center; gap: calc(8 * var(--u)) calc(28 * var(--u)); font-size: var(--fs-s); }   /* 두 줄 칸: 글자 길이에 맞춰 폭이 정해져서 라벨이 쪼개지지 않아요 */
@@ -185,6 +195,8 @@ kbd {
 .pause-card h2 { font-size: max(28px, calc(46 * var(--u))); margin: 0 0 calc(4 * var(--u)); }
 .pause-card .btn { width: 100%; }
 .pause-card .btn-cream { font-size: var(--fs-s); }
+.pause-row { display: flex; gap: var(--gap); }
+.pause-row .btn { flex: 1 1 0; min-width: 0; padding-inline: .5em; }
 .pause-hint { margin: 0; font-size: var(--fs-xs); }
 
 /* ===== 8. 결과 ===== */
@@ -222,7 +234,7 @@ kbd {
   background: var(--cream); border: var(--bw) solid var(--ink); border-radius: 999px; box-shadow: 0 var(--sh) 0 var(--ink); margin-bottom: var(--sh);
 }
 .total b { font-weight: 400; font-size: max(22px, calc(36 * var(--u))); color: #b0176f; font-variant-numeric: tabular-nums; line-height: 1.2; }
-.save { display: flex; align-items: center; justify-content: center; gap: var(--gap); flex-wrap: wrap; min-height: calc(30 * var(--u)); font-size: var(--fs-s); }
+.save { display: flex; align-items: center; justify-content: center; gap: var(--gap); flex-wrap: wrap; min-height: calc(30 * var(--u)); font-size: var(--fs-s); max-width: 100%; }
 .save-text { background: var(--cream); border: var(--bw) solid var(--ink); border-radius: 999px; padding: .05em .9em; }
 .save[data-state="failed"] .save-text { background: #ffe1e1; }
 .save[data-state="saved"] .save-text { background: #e1ffe6; }
@@ -232,22 +244,44 @@ kbd {
 
 /* 낮은 화면(가로 폰): 간격과 별을 조금 줄여 한 화면에 */
 @media (max-height: 460px) {
+  .nick-hint { display: none; }                  /* (별명 안내 줄은 자리가 모자라면 접어요 — 칸 이름이 「별명」 이라 뜻은 그대로 전해져요) */
+  .corner-btns-r .motion-btn { padding: 0; width: var(--tap); }       /* 낮은 화면에서는 로고와 겹치지 않게 ✨ 동그란 버튼만 (이름은 aria-label/툴팁으로) */
+  .corner-btns-r .motion-btn .lbl { display: none; }
   .result { padding-top: 6px; }
   .res-left { gap: 3px; }
   .star { width: 48px; height: 48px; }
-  .stat-grid li { padding: 0 .2em; }
+  /* 점수 칸(통계)은 한 줄짜리 작은 알약으로: 칸이 낮아도 낱말이 쪼개지거나 잘리지 않게 (UI-04) */
+  .stat-grid li { flex: 0 1 auto; flex-direction: row; align-items: baseline; gap: .35em; padding: 0 .6em; white-space: nowrap; }
+  .res-btns { flex-wrap: nowrap; }
+  .res-btns .btn { min-width: 0; padding-inline: .6em; }
+  .save { flex-wrap: nowrap; }
+  .save-more { display: none; }                  /* 저장 문구의 뒷부분(「다시 보내 볼까요?」, 버튼의 「보내기」)은 자리가 없으면 접어요 */
   .res-right { padding-top: 40px; }
+}
+
+/* 낮은 폰(가로 360~400px 높이): 「사탕 숲 · 어려움」 이름표 줄은 접어서 점수 칸 다섯 개가 잘리지 않게 (난이도는 랭킹 탭에도 나와요) */
+@media (max-height: 400px) {
+  .res-sub-row { display: none; }
+  .save-text { white-space: nowrap; }
+  .save .btn { white-space: nowrap; }
+  .res-card { padding-top: 3px; padding-bottom: 3px; }
+  .stat-grid { gap: 3px; }
+  .res-left { gap: 2px; }
+  /* 저장이 안 돼서 「다시」 버튼이 한 줄 더 차지할 때는 격려 문구를 접어요 (점수 칸이 잘리는 것보다 낫고, 이 상태는 드물어요) */
+  .res-left:has(.save[data-retry="1"]) .res-msg { display: none; }
 }
 
 /* 아주 낮은 화면(옛날 작은 폰 가로 568x320 등): 꼭 필요한 것만 남기고 줄여서 잘리지 않게 */
 @media (max-height: 340px) {
-  .res-sub-row { display: none; }
   .res-title { font-size: 24px; }
   .star { width: 38px; height: 38px; }
   .star:nth-child(2) { margin-bottom: 6px; }
   .total { font-size: 15px; } .total b { font-size: 21px; }
-  .res-msg { font-size: 14px; min-height: 0; }
-  .stat-grid li { flex: 0 1 auto; flex-direction: row; align-items: baseline; gap: .35em; padding: 0 .6em; font-size: 14px; white-space: nowrap; }
+  .save-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }   /* 아주 좁으면 저장 문구를 줄여서(…) 「다시」 버튼이 밀려나지 않게 */
+  .rank-tab { font-size: 13px; }
+  .rank-tab[aria-selected="true"]::before { display: none; }
+  .res-msg { display: none; }                    /* 격려 문구는 이 높이에선 접어요 (제목 「아쉬워요!」/「클리어!」 와 별이 남아 있어요) — 그 자리를 점수 칸과 버튼이 써요 */
+  .stat-grid li { font-size: 14px; }
   .stat-k { font-size: 13px; }
   .res-btns .btn { font-size: 16px; }
   .res-right { padding-top: 34px; }
@@ -263,6 +297,16 @@ kbd {
 /* ===== 9. 랭킹 ===== */
 .rank-card { flex: 0 1 auto; min-height: 0; max-height: 100%; display: flex; flex-direction: column; padding: calc(10 * var(--u)) calc(14 * var(--u)); width: 100%; }
 .rank-card h3 { font-size: var(--fs-m); text-align: center; }
+.rank-tabs { display: flex; gap: calc(6 * var(--u)); justify-content: center; margin: 0 0 calc(4 * var(--u)); flex: none; }
+.rank-tab {
+  flex: 1 1 0; min-width: 0; font: inherit; font-size: var(--fs-s); line-height: 1.1; color: var(--ink); cursor: pointer; text-align: center;
+  min-height: max(36px, calc(40 * var(--u))); padding: 0 .2em; white-space: nowrap; background: #fff; border: var(--bw) solid var(--ink); border-radius: 999px;
+}
+.rank-tab:hover { filter: brightness(1.05); }
+.rank-tab[aria-selected="true"] { background: var(--yellow); box-shadow: 0 max(2px, calc(3 * var(--u))) 0 var(--ink); }
+.rank-tab[aria-selected="true"]::before { content: "\2713\00a0"; }       /* ✓ — 색 말고도 어느 탭인지 알 수 있게 */
+.rank-tab:focus-visible { outline: max(3px, calc(4 * var(--u))) solid var(--ink); outline-offset: 2px; box-shadow: 0 0 0 max(3px, calc(4 * var(--u))) #fff; }
+.rank-note { margin: 0 0 calc(4 * var(--u)); text-align: center; font-size: var(--fs-xs); line-height: 1.3; background: #ffe1e1; border: 2px solid var(--ink); border-radius: 999px; padding: 0 .8em; flex: none; }
 .rank-list { margin: 0; padding: 0; list-style: none; overflow-y: auto; flex: 1 1 auto; min-height: 0; scrollbar-width: thin; }
 .rank-row {
   display: grid; grid-template-columns: 2.1em minmax(0, 1fr) auto auto; align-items: center; gap: .5em;
@@ -350,8 +394,11 @@ html[data-portrait="1"] .rotate { display: flex; }
 @keyframes starpop { 0% { transform: scale(0) rotate(-50deg); } 55% { transform: scale(1.4) rotate(12deg); } 100% { transform: scale(1) rotate(0); } }
 @keyframes tilt { 0%, 15% { transform: rotate(0); } 55%, 85% { transform: rotate(-90deg); } 100% { transform: rotate(0); } }
 
-/* 움직임을 줄여 달라는 설정이면 장식 애니메이션 전부 끔 */
+/* 움직임을 줄여 달라는 설정이면 장식 애니메이션 전부 끔.
+   · 「움직임 줄이기」 스위치(또는 기기 설정)를 JS 가 html[data-calm] 에 "1"(줄임) / "0"(그대로) 로 적어 줘요. 스위치를 끄면 기기 설정보다 스위치가 먼저예요.
+   · JS 가 아직 안 켜졌을 때(data-calm 없음)는 기기 설정을 그대로 따라요. */
+html[data-calm="1"] *, html[data-calm="1"] *::before, html[data-calm="1"] *::after { animation: none !important; transition: none !important; }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
+  html:not([data-calm]) *, html:not([data-calm]) *::before, html:not([data-calm]) *::after { animation: none !important; transition: none !important; }
 }
 </style>

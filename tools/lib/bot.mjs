@@ -13,6 +13,7 @@
 //   - 적이 2마리 이상 모이면 회오리(A), 앞줄에 늘어서면 돌진(S), 3마리 이상/위험하면 대폭발(D)
 //   - 예고 동작(머리 위 !, 바닥 마커)이 보이면 그 자리에서 비켜 서기
 //   - 체력이 낮으면 사탕을 주우러 감, 방이 깨지면(GO) 오른쪽으로 걷기
+//   - skill:'mash' (= 난투 봇): 가장 가까운 적에게 가서 Z 만 연타. 피하지도, 점프도, 스킬도, 사탕 줍기도 안 함 (밸런스 검사용: 연타만으로 이기면 안 됨)
 
 /** 타이틀 화면에서 닉네임을 쓰고 → 난이도 카드를 누르고 → 「시작!」 을 누른다 (실제 DOM 클릭) */
 export async function startThroughUI(page, { nickname = '봇용사', difficulty = 'easy' } = {}) {
@@ -64,13 +65,15 @@ function botMain(cfg) {
     expert: { think: 1, mashEvery: 4, dodgeLag: 0, hesitate: 0, look: 0, interruptRate: 0.5 },
     kid:    { think: 9, mashEvery: 7, dodgeLag: 15, hesitate: 0.06, look: 30, interruptRate: 0.15 },
     novice: { think: 22, mashEvery: 11, dodgeLag: 34, hesitate: 0.3, look: 70, interruptRate: 0 },     // 처음 해 보는 아이: 느린 반응·느린 연타·자주 멈칫
+    mash:   { think: 1, mashEvery: 4, dodgeLag: 0, hesitate: 0, look: 0, interruptRate: 0, brawl: true },        // 난투 봇: 반응 즉시 + Z 연타만 (피하기·점프·스킬·사탕 없음)
+    mashkid: { think: 9, mashEvery: 7, dodgeLag: 0, hesitate: 0.06, look: 30, interruptRate: 0, brawl: true },   // 사람 속도의 난투 봇
   };
   const P = PROFILES[cfg.skill] || PROFILES.expert;
 
   const B = window.__bot = {
     cfg, on: true, ticks: 0, hook: null,
     plan: { dirs: [], mash: false }, idleUntil: 0, threatSince: -1, lastTargets: 0,
-    stats: { hitsTaken: 0, dodgeTicks: 0, jumps: 0, skillA: 0, skillS: 0, skillD: 0, candyWalks: 0, coinsGot: 0, pickups: 0, stuckEvents: 0, interrupts: 0 },
+    stats: { hitsTaken: 0, minHpRatio: 1, dodgeTicks: 0, jumps: 0, skillA: 0, skillS: 0, skillD: 0, candyWalks: 0, coinsGot: 0, pickups: 0, stuckEvents: 0, interrupts: 0 },
     lastProgress: { t: 0, kills: 0, room: 0, hp: 0 },
   };
   // 봇 전용 난수 (게임의 rand()/RNG 를 건드리면 안 됨)
@@ -153,6 +156,7 @@ function botMain(cfg) {
     if (!B.on) return;
     B.ticks++;
     const p = Game.player;
+    if (p && p.maxHp > 0) B.stats.minHpRatio = Math.min(B.stats.minHpRatio, p.hp / p.maxHp);
     const live = Game.scene === 'play' && p && !Game.paused && !p.dead && p.state !== 'down';
     const st = typeof Stage !== 'undefined' ? Stage.state : '';
     if (!live || cfg.mode === 'idle' || st === 'victory' || st === 'transition' || st === 'dead' || st === 'over') { plan.dirs = []; plan.mash = false; flush(); return; }
@@ -185,7 +189,7 @@ function botMain(cfg) {
     } else if (B.ticks - prog.t > 1800) { B.stats.stuckEvents++; prog.t = B.ticks; B.stats.lastStuck = { tick: B.ticks, room: Stage.roomIndex, state: st, foes: foes.length, px: Math.round(p.x), py: Math.round(p.y) }; }
 
     // ---- 1) 위험 피하기 ----
-    const th = !air && !acting ? threat(p, foes, markers) : null;
+    const th = !air && !acting && !P.brawl ? threat(p, foes, markers) : null;
     if (!th) B.threatSince = -1;
     else if (B.threatSince < 0) B.threatSince = B.ticks;
     // 위협한 적이 코앞이고 막 예고를 시작했다면 먼저 때려서 끊는다 (사람도 하는 플레이)
@@ -208,7 +212,7 @@ function botMain(cfg) {
     const bossNear = near.some(e => e.boss);
     const sk = p.skills || [];
     const skillOK = P.think > 1 ? brand() < 0.5 : true;            // 사람은 스킬을 늘 제때 쓰지는 못해요
-    if (!air && !acting && skillOK) {
+    if (!air && !acting && skillOK && !P.brawl) {
       const ready = i => sk[i] && sk[i].cd === 0;
       if (ready(2) && (near.length >= 3 || (hpRatio < 0.4 && near.length >= 2) || (bossNear && brand() < 0.02))) { set('KeyD'); B.stats.skillD++; }
       else if (ready(0) && (near.length >= 2 || (bossNear && brand() < 0.04))) { set('KeyA'); B.stats.skillA++; }
@@ -227,7 +231,7 @@ function botMain(cfg) {
     // 목표가 없으면 (아직 안 나왔거나 다 잡음): 방이 깨졌으면(GO) 오른쪽으로, 아니면 아이템 줍기 / 가만히
     const needHeal = hpRatio < 0.6;
     let goal = null;       // { x, y }  걸어가서 닿을 곳
-    if (!t || (needHeal && pickups.some(e => e.type === 'candy') && (near.length === 0 || hpRatio < 0.35))) {
+    if (!P.brawl && (!t || (needHeal && pickups.some(e => e.type === 'candy') && (near.length === 0 || hpRatio < 0.35)))) {
       let c = null, cd = 1e9;
       for (const e of pickups) {
         if (e.type === 'candy' ? !(needHeal || st === 'clear' && hpRatio < 0.9) : e.type !== 'coin') continue;
@@ -257,7 +261,7 @@ function botMain(cfg) {
     const aligned = ady < 12;
     const zClose = Math.abs((t.z || 0) - p.z) < 75;
 
-    if (air) {
+    if (air && !P.brawl) {
       // 공중: 적 쪽으로 조종하고 닿으면 내려찍기 연타
       if (adx > 40) dirKey(dx, 0);
       if (ady > 14) dirKey(0, dy);
@@ -277,7 +281,8 @@ function botMain(cfg) {
       if (interrupt) B.stats.interrupts++;
     }
     // 가끔 점프: 공중에 뜬 적(띄운 적)이 가까이 있으면
-    if (!acting && (t.z || 0) > 26 && adx < 100 && ady < 20 && brand() < 0.05) { set('KeyX'); B.stats.jumps++; }
+    if (P.brawl) { /* 난투 봇은 점프하지 않음 */ }
+    else if (!acting && (t.z || 0) > 26 && adx < 100 && ady < 20 && brand() < 0.05) { set('KeyX'); B.stats.jumps++; }
     else if (!acting && inRangeX && aligned && brand() < 0.0015) { set('KeyX'); B.stats.jumps++; }
     applyPlan();
   }

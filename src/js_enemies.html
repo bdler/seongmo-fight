@@ -47,11 +47,14 @@ const ENEMY_TUNE = {
   waitCap: 600,           // 위 보너스가 쌓이는 최대 프레임
   sep: { depth: 18, push: 1.6, flyGap: 40 },   // 적끼리 겹치지 않게 밀어내기 (깊이 두께 / 힘 / 공중-지상 구분 높이)
   chain: { hits: 4, frames: 50, armor: 40 },   // 보스: 50프레임 안에 4번 맞으면 "흔들어 털기" (무한 경직 방지)
+  // 깜빡임(광과민성) 안전: 같은 적에서 하얗게 번쩍이는 건 초당 3번 이하, 덩치 큰 적(보스)은 실루엣 전체를 하얗게 칠하지 않고 옅게만 섞어요
+  flash: { minGap: 20, bigW: 100, bigTint: 0.18, deathPulse: 0.08, frames: (typeof CORE_TUNE !== 'undefined' && CORE_TUNE.combat && CORE_TUNE.combat.flashFrames) || 6 },
+  poiseLabel: '단단!',    // 예고 막판에 맞으면 끊기지 않을 때(난이도 poise) 한 번 떠오르는 글자
 };
 
 const ENEMY_DEFS = {
   slime: {
-    name: '사탕 슬라임', hp: 20, atk: 5, speed: 1.2, windup: 30, score: 100,
+    name: '사탕 슬라임', hp: 30, atk: 7, speed: 1.2, windup: 30, score: 100,
     w: 44, h: 40, top: 48,                  // top: 그림이 실제로 올라가는 높이 (체력바·! 표시 위치)
     colors: ['#ff8ad8', '#7ad7f0', '#7bd88f', '#ffd93d'],   // 사탕 색 (태어날 때 하나 고름)
     startDist: 70, alignY: 14,    // 이 거리 안(가로)·이 깊이 차 안이면 예고 시작
@@ -60,7 +63,7 @@ const ENEMY_DEFS = {
     recover: 48, cooldown: [40, 90], hover: 150,
   },
   soldier: {
-    name: '장난감 병정', hp: 35, atk: 8, speed: 1.6, windup: 36, score: 200,
+    name: '장난감 병정', hp: 54, atk: 11, speed: 1.6, windup: 36, score: 200,
     w: 40, h: 78, top: 94,
     startMin: 50, startMax: 104, spacing: 84, alignY: 14,   // 창 찌르기 시작 거리 범위 / 유지하는 간격
     reach: 122, thrustFrames: 12, hitFrom: 2, hitTo: 6, depth: 18,   // 창: 사거리 / 동작 길이 / 판정 켜지는 구간
@@ -68,16 +71,16 @@ const ENEMY_DEFS = {
     recover: 54, cooldown: [50, 100], hover: 170,
   },
   cloud: {
-    name: '심술 구름', hp: 25, atk: 8, speed: 1.0, windup: 50, score: 200,
+    name: '심술 구름', hp: 38, atk: 10, speed: 1.0, windup: 50, score: 200,
     w: 62, h: 46, top: 52, flying: true,
-    floatZ: 92, lowZ: 50, hurtDrop: 20,     // 떠 있는 높이 / 번개를 모을 때 내려오는 높이 / 맞으면 내려오는 양
+    floatZ: 86, lowZ: 50, hurtDrop: 20,     // 떠 있는 높이 (출렁임 ±4 까지 더해도 90 — 서서 휘두르는 칼(머리 위 94)이 늘 닿게) / 번개를 모을 때 내려오는 높이 / 맞으면 내려오는 양
     startDx: 150, alignY: 70, hover: 190,
     markerRx: 74, markerRy: 30,              // 번개 마커(보이는 원) 크기 — 실제 판정은 이 안쪽
     knock: 4, launch: 4, stun: 22, zMax: 36, // 번개: 낮게 뛰면 피할 수 있음
     attackFrames: 10, recover: 70, cooldown: [60, 110],
   },
   jellyKing: {
-    name: '젤리 대왕', hp: 300, atk: 10, speed: 1.0, windup: 40, score: 3000,
+    name: '젤리 대왕', hp: 760, atk: 12, speed: 1.0, windup: 40, score: 3000,
     w: 130, h: 130, top: 160, boss: true, heavy: true,
     knockMul: 0.3,                           // 맞았을 때 밀리는 정도 (무거움)
     gap: 48,                                 // 패턴 사이에 다가가는 시간
@@ -111,6 +114,13 @@ const Enemies = (() => {
     return Math.max(T.minWindup, Math.round(base * Game.diff.windupMul * (mul || 1)));
   }
 
+  // 지금 이 일반 적의 예고가 "끊기지 않는 구간"인가 (Game.diff.poise 가 없거나 이상하면 0)
+  function poiseOn(e) {
+    const po = Number(Game.diff && Game.diff.poise) || 0;
+    if (!(po > 0 && e.len > 0)) return false;
+    return e.t >= e.len * (1 - clamp(po, 0, 1));
+  }
+
   // 플레이어 (죽었거나 없으면 null → 적들은 얌전히 배회)
   function getTarget() {
     const p = Game.player;
@@ -134,6 +144,8 @@ const Enemies = (() => {
   function enter(e, state, len) {
     e.state = state; e.t = 0; e.len = len || 0;
     e.engage = false;
+    if (!e.boss && state !== 'windup' && state !== 'attack') e.superArmor = false;   // 일반 적의 "끊기지 않는 구간"(poise)은 공격이 끝나면 반드시 풀림
+    if (state === 'windup') e.armorPop = false;
     if (state === 'idle') e.lost = !getTarget();                   // 플레이어를 놓쳐서(쓰러짐/없음) 배회하는 중인지 기억
     if (state !== 'windup' && state !== 'attack') dropMarker(e);   // 예고/공격이 끝나면 바닥 마커도 같이 사라짐
   }
@@ -386,6 +398,7 @@ const Enemies = (() => {
     const len = forceLen || windupFrames(base);
     enter(e, 'windup', len);
     e.windupLen = len;
+    if (flashAllowed(e)) e.blink = 3;                                  // 예고 시작 때 3프레임 번쩍 (같은 적의 번쩍임은 초당 3번 이하 — flashAllowed)
     e.waitT = 0;                                                       // 차례가 왔으니 기다린 시간은 0부터 다시
     SFX.play('ui', { rate: 1.5, vol: 0.45 });                         // "삐릭!" 작은 예고음
   }
@@ -416,7 +429,7 @@ const Enemies = (() => {
         e.cd = Math.max(e.cd, T.hurtCooldown);
         break;
       case 'idle':
-        if (p && e.t >= e.alert && dist(e, p) < T.aggroRange) { enter(e, 'chase'); regroup(e, T.regroup); }
+        if (p && e.t >= e.alert && (e.hunt || dist(e, p) < T.aggroRange)) { enter(e, 'chase'); regroup(e, T.regroup); }
         else { wander(e); separate(e); }
         break;
       case 'chase':
@@ -430,6 +443,9 @@ const Enemies = (() => {
       case 'windup':
         if (!p) { enter(e, 'idle'); e.alert = 20; e.cd = 40; break; }   // 플레이어가 쓰러졌으면 공격 취소
         A.windup(e, p, def);
+        // poise (난이도별 0~1): 예고의 "막판" poise 비율 동안은 맞아도 끊기지 않아요 (이미 공격이 정해진 뒤라서). 보스의 superArmor 와 같은 장치.
+        //   → 연타(Z)만 눌러 모든 공격을 끊어 버리는 요령이 어려움에서는 통하지 않고, 피하기·스킬이 필요해져요. 쉬움·보통은 poise 0 이라 늘 끊을 수 있어요.
+        if (poiseOn(e)) e.superArmor = true;
         if (e.t >= e.len) beginAttack(e, p);
         break;
       case 'attack':
@@ -454,6 +470,7 @@ const Enemies = (() => {
     if (e.hitT > 0) e.hitT--;
     if (e.hpBarT > 0) e.hpBarT--;
     if (e.landT > 0) e.landT--;
+    if (e.blink > 0) e.blink--;
     if (e.state === 'chase' && !e.engage) e.waitT++;                    // 공격 차례를 기다린 시간 (오래 기다린 적이 먼저)
     if (e.dead) {
       e.deathT++;
@@ -535,12 +552,31 @@ const Enemies = (() => {
   }
 
   // ===== 6. 맞았을 때 / 죽었을 때 / 착지했을 때 =====
+  // 하얗게 번쩍임 한도 (KIDS-05): 같은 적은 minGap(20)프레임에 한 번만 새로 번쩍여요 = 초당 3번 이하. '움직임 줄이기'면 아예 안 번쩍임.
+  //   커널은 맞을 때마다 e.flash = 6 으로 되돌리므로, 너무 잦으면 여기서 이전 번쩍임의 남은 시간(없으면 0)으로 되돌려요.
+  function flashAllowed(e) {
+    if (FX.reduceMotion) return false;
+    if (e.age - e.flashAt < T.flash.minGap) return false;
+    e.flashAt = e.age;
+    return true;
+  }
+  function limitHitFlash(e) {
+    if (FX.reduceMotion) { e.flash = 0; return; }
+    if (flashAllowed(e)) return;                                      // 새 번쩍임 허용 (flashAt 갱신됨)
+    e.flash = Math.max(0, e.flashAt + T.flash.frames - e.age);        // 막 시작된 번쩍임이 아직 남았으면 그만큼만 (늘리지 않음)
+  }
+
   function onHit(e, hb, dmg) {
     e.hpBarT = T.hpBarFrames;
     e.hitT = 10;
+    limitHitFlash(e);
     if (e.hp <= 0) return;                                            // 마지막 한 방은 onDeath 가 처리
     if (e.boss) { bossOnHit(e); return; }
     if (e.def.flying) { e.hitDrop = 24; e.vz = 0; }                   // 구름: 맞으면 살짝 내려옴
+    if (e.superArmor && !e.armorPop && e.state === 'windup') {        // 끊기지 않는 구간에 맞음: "단단!" 한 번 (왜 안 끊기는지 보여 줌)
+      e.armorPop = true;
+      FX.popup(e.x, e.y - e.z - (e.def.top || e.h) - 10, T.poiseLabel, { color: COLORS.cream, size: 22, life: 34 });
+    }
     if (!e.superArmor) {
       dropMarker(e);                                                  // 때려서 예고를 끊음! (번개 마커도 사라짐)
       enter(e, 'hurt');
@@ -670,6 +706,7 @@ const Enemies = (() => {
       addMarker(e, 'lane', { style: 'charge', x: e.x, y: e.y, rx: 0, ry: P.depth, total: W, lockAt: W - lock, dir: e.face, limit: e.face > 0 ? Game.world.width : 0 });   // 길은 벽 끝까지 보여 줌 (벽 앞에 서 있어도 판정 자리가 길에 포함됨)
     }
     enter(e, 'windup', W);
+    if (flashAllowed(e)) e.blink = 3;
     SFX.play(name === 'summon' ? 'bossHit' : 'warn', { rate: name === 'summon' ? 0.55 : 0.7, vol: 0.7 });
   }
 
@@ -839,6 +876,8 @@ const Enemies = (() => {
     e.def = def;
     e.speed = def.speed * Game.diff.enemySpeed;                        // 난이도 반영한 이동 속도 (px/프레임)
     e.minion = !!opts.minion;
+    e.hunt = !!opts.hunt;                                              // true 면 거리와 상관없이 처음부터 플레이어를 쫓아옴 (웨이브로 나온 적이 멀리서 멍하니 서 있지 않게)
+    e.flashAt = -999; e.blink = 0; e.armorPop = false;
     e.state = drop ? 'drop' : 'idle'; e.t = 0; e.len = 0; e.age = 0;
     e.cd = def.boss ? 80 : randInt(10, 40);                            // 처음엔 잠깐 있다가 공격
     e.alert = def.boss ? 0 : randInt(4, 24);
@@ -974,8 +1013,12 @@ const Enemies = (() => {
       death = p;
     }
     // 하얗게 번쩍: 맞았을 때(e.flash) / 죽을 때 / 그리고 예고가 막 시작된 3프레임 ("곧 공격한다!" 신호)
-    const blink = e.state === 'windup' && e.t >= 1 && e.t <= 3;
-    const white = e.flash > 0 || blink || (death !== null && death < 0.45);
+    //   작은 적은 실루엣 전체를 하얗게(1), 덩치 큰 적(보스)은 원래 색 위에 옅게만(bigTint) — 화면의 넓은 부분이 확 밝아지지 않게.
+    //   죽을 때 하얀 구간은 작은 적만 길게, 보스는 아주 짧은 한 번. '움직임 줄이기'면 하얀 실루엣은 아예 없음.
+    const big = e.w >= T.flash.bigW;
+    const hitWhite = e.flash > 0 || e.blink > 0;
+    const deathWhite = death !== null && death < (big ? T.flash.deathPulse : 0.45);
+    const amt = FX.reduceMotion ? 0 : ((hitWhite || deathWhite) ? (big ? T.flash.bigTint : 1) : 0);
     ctx.save();
     ctx.translate(e.x, e.y - e.z);
     if (death !== null) {                                              // 펑! : 부풀었다가 → 작아지며 사라짐
@@ -984,7 +1027,11 @@ const Enemies = (() => {
       ctx.translate(0, -e.h * 0.5); ctx.rotate(death * 1.6 * e.face); ctx.scale(Math.max(0.01, grow), Math.max(0.01, grow)); ctx.translate(0, e.h * 0.5);
     }
     ctx.scale(e.face, 1);
-    fn(ctx, e, white, death !== null);
+    if (amt >= 1) fn(ctx, e, true, death !== null);
+    else {
+      fn(ctx, e, false, death !== null);
+      if (amt > 0) { ctx.save(); ctx.globalAlpha *= amt; fn(ctx, e, true, death !== null); ctx.restore(); }   // 흰 실루엣을 옅게 덧칠
+    }
     ctx.restore();
     if (death !== null) return;
     // 표시들 (좌우 반전 없이)

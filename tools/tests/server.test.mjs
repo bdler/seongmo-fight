@@ -234,6 +234,9 @@ await section('닉네임', async () => {
     ['씨바', null, BAD], ['시바', null, BAD], ['ㅅㅣㅂㅏㄹ', null, BAD], ['ㅆㅣㅂㅏㄹ', null, BAD], ['쉬발', null, BAD], ['시이발', null, BAD], ['ㅅㅣ발', null, BAD], ['시ㅂㅏㄹ', null, BAD], ['fuuck', null, BAD], ['shiit', null, BAD], ['fvck', null, BAD], ['phuck', null, BAD], ['fuk', null, BAD], ['ㅁㅊ', null, BAD], ['졸라', null, BAD], ['새끼', null, BAD], ['뒤져', null, BAD], ['죽어', null, BAD], ['ㅅ1ㅂ', null, BAD], ['시ㅋ발', null, BAD],
     // 괜히 막으면 안 되는 이름 (짧고 뜻이 둘인 낱말은 이름 전체일 때만 걸러요)
     ['시바견', '시바견'], ['보지마', '보지마'], ['보지 못함', '보지 못함'], ['걸레질', '걸레질'], ['가자 지금', '가자 지금'], ['말랑이', '말랑이'], ['사과', '사과'], ['시간', '시간'], ['조나단', '조나단'], ['진달래', '진달래'], ['옷방', '옷방'], ['Cucumber', 'Cucumber'], ['Anna', 'Anna'], ['Bobby', 'Bobby'], ['Shiba', 'Shiba'],
+    // 첫 글자만 자음으로 쓴 것 / 아이들이 흔히 쓰는 말 (홀로 쓴 자음일 때만: 옷발·밥신 은 통과)
+    ['시ㅇ발', null, BAD], ['시a발', null, BAD], ['fㅇuck', null, BAD], ['ㅅ발', null, BAD], ['ㅆ발', null, BAD], ['ㅂ신', null, BAD], ['ㅁ친', null, BAD], ['ㅈ같', null, BAD], ['ㅇㅅ발', null, BAD], ['아이ㅅ발', null, BAD], ['애미', null, BAD], ['애비', null, BAD], ['딸딸이', null, BAD], ['좆만이', null, BAD], ['죽어라', null, BAD], ['멍청이', null, BAD], ['fcuk', null, BAD], ['idiot', null, BAD],
+    ['옷발', '옷발'], ['밥신', '밥신'], ['말랑jelly', '말랑jelly'], ['Mia하늘', 'Mia하늘'], ['쓰레기통', '쓰레기통'], ['성교육', '성교육'], ['에어로빅', '에어로빅'], ['2018년생', '2018년생'], ['Heroine', 'Heroine'], ['Tweed', 'Tweed'],
   ];
   const got = await g.ev(rows => rows.map(([input]) => Server.validateNickname(input)), table);
   table.forEach(([input, want, err], i) => {
@@ -594,6 +597,16 @@ await section('랜덤닉네임', async () => {
     return { n, maxLen, bad: bad.slice(0, 10), nbad: bad.length };
   });
   check(`[랜덤닉네임] 낱말 × 낱말 × 숫자(10~99) 전부 ${exhaustive.n}개가 validateNickname 을 통과 (가장 긴 이름 ${exhaustive.maxLen}글자 ≤ 8)  [${Math.round((Date.now() - t0) / 1000)}초]`, exhaustive.nbad === 0 && exhaustive.maxLen <= 8, J(exhaustive));
+  // 안전망: 낱말 목록에 금칙어가 섞여 들어와도(누가 낱말을 잘못 늘렸을 때) 나쁜 이름이 나가지 않고, 늘 통과하는 이름이 돌아와요
+  const safety = await g.ev(() => {
+    const W = Server.nickWords, adj = W.adj.slice(), noun = W.noun.slice(), out = { names: [], bad: [] };
+    W.adj.splice(0, W.adj.length, '시발'); W.noun.splice(0, W.noun.length, '병신');           // 모든 짝이 금칙어
+    for (let seed = 1; seed <= 200; seed++) { RNG.seed(seed); const n = Server.randomNickname(); out.names.push(n); if (!Server.validateNickname(n).ok) out.bad.push(n); }
+    W.adj.splice(0, W.adj.length, ...adj); W.noun.splice(0, W.noun.length, ...noun);
+    out.n = new Set(out.names).size; out.sample = out.names[0]; out.names = null;
+    return out;
+  });
+  check('[랜덤닉네임] 낱말이 전부 금칙어여도 나쁜 이름을 내보내지 않음 (안전망: 200번 모두 validateNickname 통과)', safety.bad.length === 0 && safety.n > 5 && /^[가-힣]+[0-9]{2}$/.test(safety.sample), J(safety));
   check('[랜덤닉네임] UI 의 닉네임 검사(UI.validateNickname)도 통과하고, 저장도 됨', await g.ev(async () => { RNG.seed(9); const n = Server.randomNickname(); const u = UI.validateNickname(n); const s = await Server.saveScore({ nickname: n, score: 5, difficulty: 'easy' }); return u.ok && u.value === n && s.ok === true; }));
   await g.done('랜덤닉네임');
 });
@@ -631,6 +644,7 @@ await section('UI계약', async () => {
     await g.ev(() => { Server.local.clear(); Server.config.retryDelayMs = 20; });
     const r = await g.ev(p => Server.saveScore(p), { ...GOOD, nickname: '실패' + mode.length, score: 11 });
     check(`[UI계약] 서버 실패(${label}) → { ok:true, source:'local', warning:'server_failed', error:문자열 } (UI 가 "다시 보내 볼까요?" 단추를 보일 근거)`, r.ok === true && r.source === 'local' && r.warning === 'server_failed' && typeof r.error === 'string' && r.error.length > 0, J(r));
+    check(`[UI계약] 서버 실패(${label}) → retryable === ${mode !== 'rejectKo'} (서버가 기록 자체를 거절하면 false: 다시 보내도 소용없으니 단추를 안 보여도 돼요)`, r.retryable === (mode !== 'rejectKo'), J(r));
     await g.done('UI계약-' + mode);
   }
   let g = await open();

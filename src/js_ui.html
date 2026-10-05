@@ -26,31 +26,36 @@ const UI_TUNE = {
   },
   touch: { stickOn: 0.38, stickOff: 0.2 },          // 조이스틱: 이 정도(반지름 비율) 넘게 밀면 방향키 눌림, 이 아래로 돌아오면 뗌
   result: { startDelay: 36, starGap: 26, countFrames: 80,     // 결과 화면: 첫 별 / 별 사이 / 점수 세어 올리는 시간(프레임)
-            keyLockMs: 900 },                                  // 결과가 뜬 직후 이 시간 동안은 Space/Enter 로 버튼이 눌리지 않음 (공격 버튼을 연타하다가 결과 화면의 「다시 하기」가 눌려 버리는 사고 방지)
+            keyLockMs: 1600 },                                 // 결과가 뜬 직후 이 시간 동안은 Space/Enter 로 버튼이 눌리지 않음 (공격 버튼을 연타하다가 결과 화면의 「다시 하기」가 눌려 버리는 사고 방지). 마지막 별(약 1.47초)이 뜬 뒤까지. 꾹 누르고 있는 키(자동 반복)는 시간과 상관없이 늘 막아요
   saveTimeoutMs: 12000,                             // 저장이 이만큼 걸리면 "실패"로 보고 다시 시도 버튼을 보여줌
   confirmMs: 3000,                                  // 일시정지 화면의 「다시 시작/처음으로」: 첫 클릭 뒤 이 시간 안에 한 번 더 눌러야 실행
+  confirmGuardMs: 500,                              // …그런데 첫 클릭 직후 이 시간 안의 두 번째 클릭은 무시 (더블클릭/더블탭/Enter 꾹 누름으로 확인이 뚫리지 않게)
   toastMs: 2500, breakToastMs: 7000,
+  breakDeferTicks: 1800,                            // 휴식 알림은 싸우는 중에는 잠깐 미뤄요 (최대 이만큼, 30초). 그래도 못 쉬면 그냥 보여줘요
   breakText: '잠깐 쉬어요! 눈과 손을 풀어 볼까요? 🙆',
+  rankTop: 10,                                      // 랭킹 줄 수
   // 스킬 버튼의 처음 모양 (플레이어가 만들어지면 p.skills 의 값으로 바뀜)
   skillDefaults: [
     { key: 'A', code: 'KeyA', icon: '🌪️', label: '회오리 베기' },
     { key: 'S', code: 'KeyS', icon: '💨', label: '돌진 찌르기' },
     { key: 'D', code: 'KeyD', icon: '🌟', label: '별빛 대폭발' },
   ],
-  // 결과 화면 격려 문구 (별 개수별 / 게임 오버)
+  // 결과 화면 격려 문구 (별 개수별 / 게임 오버). 쉬운 낱말, 짧은 문장으로 (글 읽기를 막 배우는 친구도 읽을 수 있게)
   clearMsgs: {
     3: ['완벽해요! 별 3개, 최고의 용사예요! 🎉', '와! 한 번도 안 쓰러졌어요! 대단해요! 🌟'],
     2: ['멋져요! 별 2개! 조금만 더 하면 3개예요!', '잘했어요! 다음엔 별 3개에 도전해 봐요!'],
     1: ['클리어 성공! 정말 잘했어요! 👏', '해냈어요! 다음엔 더 많은 별을 모아 봐요!'],
     0: ['클리어! 끝까지 해낸 게 멋져요!'],
   },
-  overMsgs: [
-    '아쉬워요! 다시 도전해 볼까요? 💪',
-    '괜찮아요! 누구나 처음엔 어려워요. 한 번 더!',
-    '거의 다 왔어요! 몬스터 머리의 "!" 를 보고 피해 봐요.',
-    '힘내요! 점프 공격과 스킬을 써 보면 더 쉬워요.',
-  ],
+  // 게임 오버 문구: "어디까지 왔는지" 에 맞춰 골라요 (early: 첫 방까지, mid: 중간 방들, boss: 대왕의 방까지 왔어요)
+  overGroups: {
+    early: ['괜찮아요! 누구나 처음엔 어려워요. 한 번 더!', '아쉬워요! 다시 해 볼까요? 💪'],
+    mid: ['잘하고 있어요! 몬스터 머리의 "!" 를 보고 피해 봐요.', '힘내요! 점프 공격과 스킬을 써 보면 더 쉬워요.'],
+    boss: ['거의 다 왔어요! 대왕을 만났어요! 조금만 더! 🔥', '대왕까지 왔어요! 대단해요! 한 번 더 해 봐요!'],
+  },
+  overMsgs: [],                                     // (아래에서 overGroups 를 모두 모아 채워요 — 테스트와 다른 곳에서 "준비된 문구 전부" 로 읽어요)
 };
+UI_TUNE.overMsgs.push(...UI_TUNE.overGroups.early, ...UI_TUNE.overGroups.mid, ...UI_TUNE.overGroups.boss);
 
 const UI = (() => {
   const T = UI_TUNE;
@@ -84,8 +89,10 @@ const UI = (() => {
   const easeOut = t => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
   const isTyping = t => !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable === true);
   const fx = () => RNG.fx();
+  // 움직임 줄이기: 코어의 FX.reduceMotion 하나만 봐요 (코어가 처음 값을 OS 의 "동작 줄이기" 설정에서 가져오고, 저장된 선택이 있으면 그걸 따라요).
+  // FX 가 없는 이상한 상황에서만 OS 설정을 직접 물어봐요.
   const reduceMotion = () => {
-    try { if (FX.reduceMotion) return true; } catch (e) { /* 무시 */ }
+    try { if (typeof FX.reduceMotion === 'boolean') return FX.reduceMotion; } catch (e) { /* 무시 */ }
     try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
   };
   const sfx = (name, o) => { try { SFX.play(name, o); } catch (e) { /* 소리는 없어도 돼요 */ } };
@@ -99,8 +106,10 @@ const UI = (() => {
     t: 0,                                           // 타이틀/결과 장식 시계 (update 마다 +1)
     starting: false,
     res: null, saveToken: 0, saveState: '',
-    playTicks: 0, reminded: 0, breakMsgs: 0,
+    playTicks: 0, reminded: 0, breakMsgs: 0, breakDue: 0,
     confirm: null, kbdUsed: false,
+    touchSeen: false, lastPointer: '', fine: false,               // 진짜 터치가 한 번이라도 있었는지 / 마지막으로 쓴 포인터 종류(touch|mouse|pen)
+    calm: null, nickAuto: false,                     // 마지막으로 반영한 "움직임 줄이기" 값 / 닉네임 칸이 자동으로 채운 값인지
   };
 
   // ===== 2. 귀여운 그림 부품 (젤리 · 사탕 · 구름 · 반짝이 · 하트) =====
@@ -409,8 +418,10 @@ const UI = (() => {
     const ratio = clamp(b.hp / b.maxHp, 0, 1);
     HUD.bossLag = ratio > HUD.bossLag ? ratio : HUD.bossLag + (ratio - HUD.bossLag) * 0.05;   // 깎인 부분이 천천히 따라 내려옴
     const slide = calm ? 1 : easeOut((now - HUD.bossT) / 24);
-    const w = 420, x = (W - w) / 2, y = T.hud.bossBarY - (1 - slide) * 90;      // 위에서 아래로 미끄러져 내려옴
+    // 아래에서 살짝 올라오며 스르륵 나타나요. (예전엔 위에서 내려왔는데, 그러면 처음 0.3초 동안 점수판·방 이름판 위를 지나가며 겹쳤어요 → 늘 판들 아래(y ≥ bossBarY-40)에만 있게)
+    const w = 420, x = (W - w) / 2, y = T.hud.bossBarY + (1 - slide) * 26;
     ctx.save();
+    ctx.globalAlpha = slide;
     Draw.roundRect(ctx, x - 14, y - 40, w + 28, 76, 20); ctx.fillStyle = 'rgba(43,27,58,.66)'; ctx.fill();
     ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke();
     Draw.text(ctx, '👑 ' + (b.name || '젤리 대왕'), x + 4, y - 12, { size: 22, align: 'left', lw: 4 });
@@ -441,7 +452,10 @@ const UI = (() => {
 
   // HUD 전체: play 씬의 마지막에 stage 가 부름. 플레이어/보스가 없어도, 목숨이 ∞ 여도 안전해야 해요
   function drawHUD(ctx) {
+    syncMotion();
     const now = nowF(), calm = reduceMotion(), p = Game.player;
+    const bossUp = !!(Game.boss && Game.boss.maxHp > 0);                              // 보스 체력바가 떠 있는 동안엔 토스트를 그 아래로 (UI-08)
+    if (S.bossUp !== bossUp && S.els.toasts) { S.bossUp = bossUp; S.els.toasts.classList.toggle('low', bossUp); }
     ctx.save();
     try {
       hudVignette(ctx, p, now, calm);
@@ -459,8 +473,10 @@ const UI = (() => {
   const show = (e, on) => { if (e) e.hidden = on === false; };
   const modalOpen = () => !!S.modal;
   const overlayActive = () => Game.scene !== 'play' || !!Game.paused || modalOpen();
-  // 터치 컨트롤을 쓸지: 터치 기기이고, (터치 화면 + 키보드가 둘 다 있는 기기에서) 키보드로 플레이 중이 아닐 때
-  const touchActive = () => !!Game.touch && !S.kbdUsed;
+  // 터치 컨트롤을 쓸지: 터치 기기이고, (터치 화면 + 키보드가 둘 다 있는 기기에서) 키보드로 플레이 중이 아닐 때.
+  // 마우스/터치패드가 기본인 노트북(손가락 대신 포인터가 정밀하고 호버가 되는 기기)은 화면을 실제로 만지기 전까지는 터치 버튼을 숨겨요 (UI-12)
+  const finePointer = () => { try { return !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches); } catch (e) { return false; } };
+  const touchActive = () => !!Game.touch && !S.kbdUsed && (S.touchSeen || !S.fine);          // (S.fine 은 measure() 가 창 크기가 바뀔 때마다 새로 읽어요 — 프레임마다 물어보지 않게)
 
   function blurAll() {                                                              // 시작 후 포커스가 버튼에 남아 Space 를 먹지 않게
     try {
@@ -489,7 +505,7 @@ const UI = (() => {
     if (!b) return;
     const m = !!SFX.muted;
     b.textContent = m ? '🔇' : '🔊';
-    b.setAttribute('aria-label', m ? '소리 켜기' : '소리 끄기');
+    b.setAttribute('aria-label', '소리 끄기');                                       // 이름은 늘 같게 + 눌림 상태(aria-pressed = 지금 꺼져 있음). (이름이 바뀌면서 눌림도 켜지면 "소리 켜기, 눌림" 처럼 앞뒤가 안 맞게 읽혀요)
     b.setAttribute('aria-pressed', m ? 'true' : 'false');
     b.title = m ? '소리 켜기 (M)' : '소리 끄기 (M)';
     const pm = S.els.pauseMute;
@@ -500,6 +516,42 @@ const UI = (() => {
     updateMuteBtn();
     if (withToast) toast(SFX.muted ? '🔇 소리를 껐어요' : '🔊 소리를 켰어요', 1200);
     return !!SFX.muted;
+  }
+
+  // --- 움직임 줄이기 (KIDS-06): 켜면 흔들림·번쩍임·통통 튀는 장식이 조용해져요. 코어의 FX.reduceMotion 을 바꾸고 Store 에 기억해요 ---
+  const motionLabel = on => '움직임 줄이기 ' + (on ? '켜짐' : '꺼짐');
+  // short: 좁은 칸(일시정지 창의 반쪽 버튼)에서는 글자는 「움직임 줄이기」 만 두고, 켜짐/꺼짐은 아이콘(✨ → ✅)·초록 테두리·aria-pressed 로 알려요
+  const makeMotionBtn = (id, onclick, short) => el('button', { class: 'btn btn-small btn-cream motion-btn', type: 'button', id, 'aria-label': '움직임 줄이기', 'aria-pressed': 'false', 'data-on': '0', 'data-short': short ? '1' : '0', onclick },
+    el('span', { class: 'ico', 'aria-hidden': 'true', text: '✨' }), el('span', { class: 'lbl', text: short ? '움직임 줄이기' : motionLabel(false) }));
+  function syncMotion(force) {                                                      // (값이 바뀌었을 때만 DOM 을 건드려요. OS 설정이 바뀐 것도 여기서 따라가요)
+    const calm = reduceMotion();
+    if (!force && S.calm === calm) return;
+    S.calm = calm;
+    docEl.setAttribute('data-calm', calm ? '1' : '0');                              // CSS 애니메이션도 이걸 따라요 (style.html)
+    [S.els.motionBtn, S.els.pauseMotion].forEach(b => {
+      if (!b) return;
+      const l = b.querySelector('.lbl'); if (l && b.getAttribute('data-short') !== '1') l.textContent = motionLabel(calm);
+      const ic = b.querySelector('.ico'); if (ic) ic.textContent = calm ? '✅' : '✨';
+      b.title = motionLabel(calm);
+      b.setAttribute('aria-pressed', calm ? 'true' : 'false');
+      b.setAttribute('data-on', calm ? '1' : '0');
+    });
+  }
+  function setReduceMotion(on) {
+    on = !!on;
+    try { Store.set('reduceMotion', on); } catch (e) { /* 저장은 못 해도 이번 판엔 적용돼요 */ }
+    try { FX.reduceMotion = on; } catch (e) { /* 무시 */ }
+    syncMotion(true);
+    return on;
+  }
+  function toggleMotion() { return setReduceMotion(!reduceMotion()); }
+
+  // --- 화면 읽어 주기 (UI-11): 눈이 불편한 친구를 위해 방이 바뀔 때·체력이 위험할 때만 짧게 알려요. 캔버스 그림은 읽을 수 없어서요 ---
+  function announce(text) {
+    const l = S.els.live;
+    if (!l || !text) return;
+    S.liveFlip = !S.liveFlip;
+    l.textContent = text + (S.liveFlip ? '' : '\u200b');                            // (같은 말을 또 해도 다시 읽히게 보이지 않는 글자를 번갈아 붙여요)
   }
 
   // --- 모달(조작법 / 랭킹) 열고 닫기 ---
@@ -519,17 +571,35 @@ const UI = (() => {
   }
 
   // --- 랭킹 목록 (결과 화면과 랭킹 모달이 같이 씀) ---
-  function makeRankView(opts) {
-    const list = el('ol', { class: 'rank-list', 'aria-label': '랭킹 TOP 10' });
+  //   쉬움/보통/어려움 탭마다 따로 보여줘요 (KIDS-09: 목숨이 많은 쉬움이 어려움을 눌러 이기면 안 되니까).
+  //   서버 랭킹을 못 불러와서 이 기기의 기록을 보여줄 땐 솔직하게 알려요 (GAS-07).
+  const RANK_FAIL = '랭킹을 불러올 수 없어요. 조금 있다가 다시 봐요!';
+  function makeRankView() {
+    const keys = Object.keys(CFG.difficulty);
+    const tabs = el('div', { class: 'rank-tabs', role: 'tablist', 'aria-label': '난이도별 랭킹' });
+    const tabBtns = keys.map(key => {
+      const b = el('button', { class: 'rank-tab', type: 'button', role: 'tab', 'data-diff': key, 'aria-selected': 'false', tabindex: '-1', text: CFG.difficulty[key].label, onclick: () => { sfx('ui'); view.touched = true; view.load(key); } });
+      tabs.append(b);
+      return b;
+    });
+    const note = el('p', { class: 'rank-note', role: 'status', hidden: true });
+    const list = el('ol', { class: 'rank-list', 'aria-label': '랭킹 TOP ' + T.rankTop });
     const status = el('p', { class: 'rank-status', role: 'status' });
-    let token = 0;
+    let token = 0, cur = CFG.difficulty.normal ? 'normal' : keys[0];
     const myNick = () => Game.nickname || Store.get('nickname', '');
+    function setTab(key) {
+      if (!CFG.difficulty[key]) return;
+      cur = key;
+      tabBtns.forEach(b => { const on = b.getAttribute('data-diff') === key; b.setAttribute('aria-selected', on ? 'true' : 'false'); b.tabIndex = on ? 0 : -1; });
+    }
     function render(rows) {
       list.textContent = '';
+      note.hidden = !(rows && rows.source === 'local');                              // 서버 대신 이 기기의 기록이면 정직하게 알려요
+      note.textContent = note.hidden ? '' : '📱 이 기기에서 한 기록만 보여요';
       if (!Array.isArray(rows) || !rows.length) { status.textContent = '아직 기록이 없어요. 첫 번째 주인공이 되어 봐요!'; return; }
       status.textContent = '';
       const me = myNick();
-      rows.slice(0, 10).forEach((r, i) => {
+      rows.slice(0, T.rankTop).forEach((r, i) => {
         r = r || {};
         const rank = Number(r.rank) || i + 1, nick = String(r.nickname === undefined ? '?' : r.nickname);
         const stars = clamp(Math.round(Number(r.stars) || 0), 0, 3);
@@ -543,29 +613,54 @@ const UI = (() => {
           el('span', { class: 'rank-score', text: fmt(r.score) })));
       });
     }
-    function load() {
-      const my = ++token;
-      list.textContent = ''; status.textContent = '랭킹을 불러오는 중…';
-      let p = null;
-      try { if (hasFn(Server, 'getTopScores')) p = Server.getTopScores(10); } catch (e) { p = null; }
-      if (!p || typeof p.then !== 'function') { status.textContent = '랭킹을 불러올 수 없어요. 조금 있다가 다시 봐요!'; return; }
-      p.then(rows => { if (my === token) render(rows); }, () => { if (my === token) status.textContent = '랭킹을 불러올 수 없어요. 조금 있다가 다시 봐요!'; });
+    function reset(key) {                                                            // 이전 판의 랭킹이 남아 있지 않게 비우고 "불러오는 중" 으로 (UI-07)
+      token++; view.touched = false;
+      list.textContent = ''; note.hidden = true; note.textContent = ''; status.textContent = '랭킹을 불러오는 중…';
+      if (key) setTab(key);
     }
-    return { list, status, render, load, cancel() { token++; } };
+    function load(key) {                                                             // key 를 주면 그 난이도 탭으로 바꿔서, 안 주면 지금 탭을 다시
+      if (key) setTab(key);
+      const my = ++token, diff = cur;
+      list.textContent = ''; note.hidden = true; note.textContent = ''; status.textContent = '랭킹을 불러오는 중…';
+      let p = null;
+      try { if (hasFn(Server, 'getTopScores')) p = Server.getTopScores(T.rankTop, diff); } catch (e) { p = null; }
+      if (!p || typeof p.then !== 'function') { status.textContent = RANK_FAIL; return; }
+      p.then(rows => { if (my === token) render(rows); }, () => { if (my === token) status.textContent = RANK_FAIL; });
+    }
+    const view = { tabs, note, list, status, tabBtns, render, load, reset, select: setTab, tab: () => cur, touched: false, cancel() { token++; } };
+    setTab(cur);
+    return view;
   }
 
   // --- 닉네임 검사: 서버 모듈이 있으면 그걸, 없으면 간단한 검사 ---
+  //   (칸 이름이 "별명" 이라서, 서버가 돌려준 문구의 '이름' 도 화면에 보여줄 때 '별명' 으로 바꿔요. 받침이 같아서 조사(은/는/을/를)는 그대로 맞아요. UI.validateNickname 이 돌려주는 값은 서버 결과 그대로예요)
+  const niceNickError = msg => String(msg).replace(/이름/g, '별명');
+  const NICK_EMPTY = '별명을 적어 주세요! (' + T.nick.min + '~' + T.nick.max + '글자, 🎲 를 눌러도 돼요)';
   function validateNick(raw) {
     const s = String(raw === undefined || raw === null ? '' : raw);
+    if (!s.trim()) return { ok: false, error: NICK_EMPTY };                          // 비어 있으면 주사위를 알려줘요
     if (hasFn(Server, 'validateNickname')) {
       const r = safe(() => Server.validateNickname(s));
       if (r && typeof r.ok === 'boolean') return r.ok ? { ok: true, value: String(r.value === undefined ? s.trim() : r.value) } : { ok: false, error: String(r.error || '이름을 다시 적어 주세요') };
     }
     const v = s.replace(/\s+/g, ' ').trim(), len = Array.from(v).length;
-    if (len < T.nick.min) return { ok: false, error: '이름은 ' + T.nick.min + '~' + T.nick.max + '글자로 적어 주세요' };
-    if (len > T.nick.max) return { ok: false, error: '이름은 ' + T.nick.max + '글자까지만 쓸 수 있어요' };
-    if (!/^[0-9A-Za-zㄱ-ㆎ가-힣 ]+$/.test(v)) return { ok: false, error: '한글, 영어, 숫자만 쓸 수 있어요' };
+    if (len < T.nick.min) return { ok: false, error: '별명은 ' + T.nick.min + '~' + T.nick.max + '글자로 적어 주세요' };
+    if (len > T.nick.max) return { ok: false, error: '별명은 ' + T.nick.max + '글자까지만 쓸 수 있어요' };
+    if (!/^[0-9A-Za-zㄱ-ㅣ가-힣 ]+$/.test(v)) return { ok: false, error: '한글, 영어, 숫자만 쓸 수 있어요' };
     return { ok: true, value: v };
+  }
+  // 주사위: 귀여운 별명 하나 만들어 주기 (서버 모듈의 안전한 이름 만들기. 서버가 없으면 아주 작은 대체)
+  function makeNick() {
+    let n = '';
+    try { if (hasFn(Server, 'randomNickname')) n = String(Server.randomNickname() || ''); } catch (e) { n = ''; }
+    if (n && validateNick(n).ok) return n;
+    const adj = ['말랑', '폭신', '반짝', '통통'], noun = ['젤리', '사탕', '구름', '토끼'], f = () => RNG.fx();    // (게임 난수는 건드리지 않게 연출 난수로)
+    return adj[Math.floor(f() * adj.length)] + noun[Math.floor(f() * noun.length)] + (10 + Math.floor(f() * 90));
+  }
+  function fillNick(auto) {
+    const e = S.els;
+    e.nick.value = makeNick(); S.nickAuto = !!auto;
+    showNickError('');
   }
   function showNickError(msg) {
     const e = S.els;
@@ -590,7 +685,7 @@ const UI = (() => {
   function startGame() {
     if (Game.scene !== 'title' || S.starting) return false;
     const r = validateNick(S.els.nick.value);
-    if (!r.ok) { showNickError(r.error); focusEl(S.els.nick); sfx('ui'); return false; }
+    if (!r.ok) { showNickError(niceNickError(r.error)); focusEl(S.els.nick); sfx('ui'); return false; }
     showNickError('');
     S.els.nick.value = r.value;
     Store.set('nickname', r.value); Store.set('difficulty', S.diff);
@@ -619,15 +714,18 @@ const UI = (() => {
     try { Music.play('title'); } catch (e) { /* 무시 */ }
     Game.setScene('title');
   }
-  function resume() { if (Game.paused) Game.pause(false); }
+  function resume() { if (Game.paused && !S.portrait) Game.pause(false); }          // "가로로 돌려 주세요" 가 떠 있는 동안은 계속하지 않아요 (안 보이는 채로 게임이 흘러가면 안 되니까)
 
   // --- 일시정지 오버레이의 "한 번 더 누르세요" (실수로 눌러 기록을 잃지 않게) ---
   function armConfirm(btn, label, action) {
-    if (S.confirm && S.confirm.btn === btn) { const a = S.confirm.action; disarmConfirm(); a(); return; }
+    if (S.confirm && S.confirm.btn === btn) {
+      if (performance.now() - S.confirm.t0 < T.confirmGuardMs) return;               // 더블클릭·더블탭·Enter 꾹 누름은 "한 번 더" 로 치지 않아요 (그대로 확인 상태 유지)
+      const a = S.confirm.action; disarmConfirm(); a(); return;
+    }
     disarmConfirm();
     const old = btn.textContent;
     btn.textContent = '정말요? 한 번 더 눌러요!';
-    S.confirm = { btn, old, action, timer: setTimeout(disarmConfirm, T.confirmMs) };
+    S.confirm = { btn, old, action, t0: performance.now(), timer: setTimeout(disarmConfirm, T.confirmMs) };
   }
   function disarmConfirm() {
     if (!S.confirm) return;
@@ -644,25 +742,29 @@ const UI = (() => {
     const btnMute = el('button', { class: 'round-btn', type: 'button', id: 'ui-mute', onclick: () => { toggleMute(false); if (Game.scene === 'play') blurAll(); } });
     const hudBtns = el('div', { class: 'hud-btns' }, btnPause, btnMute);
     const toasts = el('div', { class: 'toasts', id: 'ui-toasts', role: 'status', 'aria-live': 'polite' });
+    const live = el('div', { class: 'sr', id: 'ui-live', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' });   // 눈에는 안 보이고 화면 읽기 도구에만 방/체력 소식을 알려줘요
     // 세로 화면 안내
     const rotate = el('div', { class: 'rotate', id: 'ui-rotate', role: 'alert' },
       el('div', { class: 'rotate-phone', 'aria-hidden': 'true', text: '📱' }),
       el('h2', { text: '가로로 돌려 주세요' }),
       el('p', { text: '화면을 옆으로 눕히면 게임이 훨씬 크게 보여요! (컴퓨터라면 창을 넓게 해 줘요)' }));
     // 화면(타이틀/결과 …)을 다 만든 뒤에 맨 끝에 붙여요 (Tab 순서가 "화면 안 버튼들 → 일시정지/소리 버튼" 이 되게. 겹치는 순서는 CSS z-index 가 정함)
-    Object.assign(S.els, { btnPause, btnMute, hudBtns, toasts, rotate });
+    Object.assign(S.els, { btnPause, btnMute, hudBtns, toasts, rotate, live });
     updateMuteBtn();
   }
 
   function buildTitle() {
-    const nick = el('input', { class: 'nick-input', id: 'ui-nick', type: 'text', maxlength: T.nick.max, placeholder: T.nick.min + '~' + T.nick.max + '글자', autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go', 'aria-label': '내 이름 (' + T.nick.min + '~' + T.nick.max + '글자)', 'aria-describedby': 'ui-nick-err', 'aria-invalid': 'false' });
+    const nickRule = '별명 (' + T.nick.min + '~' + T.nick.max + '글자)';                  // (진짜 이름이 아니라 별명! 랭킹에 모두에게 보여요)
+    const nick = el('input', { class: 'nick-input', id: 'ui-nick', type: 'text', maxlength: T.nick.max, placeholder: nickRule, autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go', 'aria-label': nickRule, 'aria-describedby': 'ui-nick-err ui-nick-hint', 'aria-invalid': 'false' });
     const nickErr = el('p', { class: 'nick-err', id: 'ui-nick-err', role: 'alert' });
-    nick.addEventListener('input', () => { if (nickErr.textContent) showNickError(''); });
+    const nickHint = el('p', { class: 'nick-hint', id: 'ui-nick-hint', text: '진짜 이름은 쓰지 마요! 별명과 점수가 랭킹에 모두에게 보여요.' });
+    nick.addEventListener('input', () => { S.nickAuto = false; if (nickErr.textContent) showNickError(''); });
     nick.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); startGame(); }   // 한글 조합을 끝내는 Enter 는 무시
     });
-    const nickRow = el('div', { class: 'nick-row' }, el('label', { class: 'nick-label', for: 'ui-nick', text: '내 이름' }), nick);
-    const nickWrap = el('div', { class: 'nick-wrap' }, nickRow, nickErr);
+    const dice = el('button', { class: 'btn btn-sky dice-btn', type: 'button', id: 'ui-dice', 'aria-label': '별명 새로 만들기', title: '별명 새로 만들기', text: '🎲', onclick: () => { sfx('ui'); fillNick(true); focusEl(nick); } });
+    const nickRow = el('div', { class: 'nick-row' }, el('label', { class: 'nick-label', for: 'ui-nick', text: '별명' }), nick, dice);
+    const nickWrap = el('div', { class: 'nick-wrap' }, nickRow, nickHint, nickErr);
     const diffRow = el('div', { class: 'diff-row', role: 'radiogroup', 'aria-label': '난이도' });
     const cards = Object.keys(CFG.difficulty).map(key => {
       const d = CFG.difficulty[key];
@@ -674,10 +776,11 @@ const UI = (() => {
     const start = el('button', { class: 'btn btn-big start-btn', type: 'button', id: 'ui-start', 'aria-label': '시작하기', text: '▶ 시작!', onclick: () => startGame() });
     const helpBtn = el('button', { class: 'btn btn-small btn-sky', type: 'button', id: 'ui-help', text: '❓ 조작법', onclick: () => { sfx('ui'); openModal('help'); } });
     const rankBtn = el('button', { class: 'btn btn-small btn-sky', type: 'button', id: 'ui-rank', text: '🏆 랭킹', onclick: () => { sfx('ui'); showRanking(); } });
+    const motionBtn = makeMotionBtn('ui-motion', () => { sfx('ui'); toggleMotion(); });
     const panel = el('div', { class: 'title-panel' }, nickWrap, diffRow, start);
-    const title = el('section', { class: 'screen title', id: 'ui-title', 'aria-label': '시작 화면', hidden: true }, el('h1', { class: 'sr', text: CFG.title }), el('div', { class: 'corner-btns' }, helpBtn, rankBtn), panel);
+    const title = el('section', { class: 'screen title', id: 'ui-title', 'aria-label': '시작 화면', hidden: true }, el('h1', { class: 'sr', text: CFG.title }), el('div', { class: 'corner-btns' }, helpBtn, rankBtn), el('div', { class: 'corner-btns-r' }, motionBtn), panel);
     S.els.root.append(title);
-    Object.assign(S.els, { title, nick, nickErr, diffCards: cards, startBtn: start, helpBtn, rankBtn });
+    Object.assign(S.els, { title, nick, nickErr, diceBtn: dice, diffCards: cards, startBtn: start, helpBtn, rankBtn, motionBtn });
     // 난이도 카드: 화살표 키로 고르기 (모듈 전체가 쓰는 한 곳의 키 처리에서 부름)
     S.els.diffRow = diffRow;
   }
@@ -705,7 +808,7 @@ const UI = (() => {
     const close = el('button', { class: 'btn btn-mint', type: 'button', 'data-first': '1', text: '닫기', onclick: () => hideRanking() });
     const modal = el('div', { class: 'modal-back', id: 'ui-rank-modal', hidden: true, onclick: e => { if (e.target === e.currentTarget) hideRanking(); } },
       el('div', { class: 'card modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'ui-rank-h', style: 'display:flex;flex-direction:column;max-height:100%' },
-        el('h2', { id: 'ui-rank-h', text: '🏆 랭킹 TOP 10' }), view.status, view.list,
+        el('h2', { id: 'ui-rank-h', text: '🏆 랭킹 TOP ' + T.rankTop }), view.tabs, view.note, view.status, view.list,
         el('div', { class: 'modal-actions' }, close)));
     S.els.root.append(modal);
     S.els.rankModal = modal; S.els.rankView = view;
@@ -716,12 +819,13 @@ const UI = (() => {
     const restartBtn = el('button', { class: 'btn btn-sky', type: 'button', id: 'ui-restart', text: '🔄 다시 시작', onclick: () => armConfirm(restartBtn, '', restartRun) });
     const homeBtn = el('button', { class: 'btn btn-pink', type: 'button', id: 'ui-home', text: '🏠 처음으로', onclick: () => armConfirm(homeBtn, '', toTitle) });
     const muteBtn = el('button', { class: 'btn btn-cream', type: 'button', id: 'ui-pause-mute', onclick: () => toggleMute(false) });
+    const motionBtn = makeMotionBtn('ui-pause-motion', () => toggleMotion(), true);
     const modal = el('div', { class: 'modal-back', id: 'ui-pause-modal', hidden: true },
       el('div', { class: 'card pause-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'ui-pause-h' },
-        el('h2', { id: 'ui-pause-h', text: '잠깐 멈춤' }), resumeBtn, restartBtn, homeBtn, muteBtn,
+        el('h2', { id: 'ui-pause-h', text: '잠깐 멈춤' }), resumeBtn, restartBtn, homeBtn, el('div', { class: 'pause-row' }, muteBtn, motionBtn),
         el('p', { class: 'pause-hint', text: 'Esc 나 P 키를 눌러도 계속할 수 있어요' })));
     S.els.root.append(modal);
-    Object.assign(S.els, { pauseModal: modal, resumeBtn, restartBtn, homeBtn, pauseMute: muteBtn });
+    Object.assign(S.els, { pauseModal: modal, resumeBtn, restartBtn, homeBtn, pauseMute: muteBtn, pauseMotion: motionBtn });
   }
 
   // 별 모양 SVG (속이 빈 별 → 켜지면 노랗게 꽉 참)
@@ -742,45 +846,58 @@ const UI = (() => {
   function buildResult() {
     const stars = el('div', { class: 'stars', role: 'img', 'aria-label': '별 0개' }, makeStarEl(), makeStarEl(), makeStarEl());
     const title = el('h2', { class: 'res-title', id: 'ui-res-title' });
-    const sub = el('p', { class: 'res-sub' }), badge = el('span', { class: 'badge', text: '무사망!', hidden: true });
+    const sub = el('p', { class: 'res-sub' }), badge = el('span', { class: 'badge', text: '한 번도 안 쓰러졌어요!', hidden: true });
     const subRow = el('div', { class: 'res-sub-row' }, sub, badge);
     const msg = el('p', { class: 'res-msg', role: 'status' });
     const stats = el('ul', { class: 'stat-grid' });
     const total = el('div', { class: 'total', 'aria-live': 'off' }, el('span', { text: '점수' }), el('b', { text: '0' }));
     const card = el('div', { class: 'card res-card' }, stats), mid = el('div', { class: 'res-mid' }, card);
     const saveText = el('span', { class: 'save-text', text: '저장 중…' });
-    const retry = el('button', { class: 'btn btn-small btn-pink', type: 'button', id: 'ui-retry', hidden: true, text: '다시 시도', onclick: () => { if (S.res) startSave(S.res.data); } });
+    const retry = el('button', { class: 'btn btn-small btn-pink', type: 'button', id: 'ui-retry', hidden: true, 'aria-label': '점수 다시 보내기', onclick: () => { if (S.res) startSave(S.res.data); } }, '🔁 다시', el('span', { class: 'save-more', text: ' 보내기' }));    // (낮은 화면에서는 「🔁 다시」 만 보여요)
     const save = el('div', { class: 'save', role: 'status', 'aria-live': 'polite', 'data-state': 'saving' }, saveText, retry);
     const again = el('button', { class: 'btn btn-mint', type: 'button', id: 'ui-again', 'data-first': '1', text: '🔄 다시 하기', onclick: () => restartRun() });
     const home = el('button', { class: 'btn btn-sky', type: 'button', id: 'ui-toTitle', text: '🏠 처음으로', onclick: () => toTitle() });
     const left = el('div', { class: 'res-left' }, title, subRow, stars, total, msg, mid, save, el('div', { class: 'res-btns' }, again, home));
     const view = makeRankView();
-    const rank = el('div', { class: 'card rank-card' }, el('h3', { text: '🏆 랭킹 TOP 10' }), view.status, view.list);
+    const rank = el('div', { class: 'card rank-card' }, el('h3', { text: '🏆 랭킹 TOP ' + T.rankTop }), view.tabs, view.note, view.status, view.list);
     const screen = el('section', { class: 'screen result', id: 'ui-result', 'aria-label': '결과 화면', hidden: true }, left, el('div', { class: 'res-right' }, rank));
     S.els.root.append(screen);
     Object.assign(S.els, { result: screen, resTitle: title, resSub: sub, resBadge: badge, resMsg: msg, resStats: stats, resTotal: total.querySelector('b'), resStars: stars, save, saveText, retry, againBtn: again, homeBtn2: home, resRank: view });
   }
 
   // 저장 상태 문구 (저장 중 → 저장됨 / 내 기기에만 / 실패)
+  //   saving / saved
+  //   local  : 내 기기에만 저장됨. 서버가 없는 환경이거나 서버가 기록을 받지 않았으면 그걸로 끝 (다시 보내도 소용없으니 버튼 없음).
+  //            서버에 못 올렸을 때(느림·점검·잠깐 바쁨…)는 data-retry="1" 로 「다시 보내기」 버튼과 "다시 보내 볼까요?" 가 같이 나와요 (GAS-03)
+  //   failed : 저장하지 못했어요 (별명이 잘못됐거나 응답이 너무 늦음) → 「다시 보내기」
   const SAVE_TEXT = {
     saving: '⏳ 저장 중…', saved: '✅ 저장됐어요!', local: '📱 내 기기에만 저장됐어요', failed: '⚠️ 저장 실패 — 다시 시도해 봐요',
   };
-  function setSave(state) {
+  const SAVE_MORE = ' 다시 보내 볼까요?';                                           // 'local' 에서 다시 보낼 수 있을 때 문구 뒤에 붙는 말 (낮은 화면에서는 CSS 가 접어요)
+  function setSave(state, retry) {
     S.saveState = state;
-    const e = S.els;
+    const e = S.els, again = state === 'failed' || (state === 'local' && !!retry);
     e.save.setAttribute('data-state', state);
+    e.save.setAttribute('data-retry', again ? '1' : '0');
     e.saveText.textContent = SAVE_TEXT[state] || '';
-    e.retry.hidden = state !== 'failed';
+    if (state === 'local' && again) e.saveText.append(el('span', { class: 'save-more', text: SAVE_MORE }));
+    e.retry.hidden = !again;
+  }
+  // 서버 응답 → 저장 상태 (Server.saveScore 는 reject 하지 않고 { ok, source, warning, retryable } 로 알려줘요)
+  function saveStateOf(r) {
+    if (!r || r.ok === false) return { state: 'failed' };
+    if (r.source !== 'local') return { state: 'saved' };
+    return { state: 'local', retry: r.warning === 'server_failed' && r.retryable !== false };
   }
   function startSave(res) {
     const token = ++S.saveToken;
     setSave('saving');
     let done = false, timer = 0;
-    const finish = state => {
+    const finish = (state, retry) => {
       if (token !== S.saveToken || done) return;
       done = true; clearTimeout(timer);
-      setSave(state);
-      S.els.resRank.load();                                                         // 저장이 끝나면(성공이든 실패든) 랭킹을 보여줘요
+      setSave(state, retry);
+      S.els.resRank.load();                                                         // 저장이 끝나면(성공이든 실패든) 랭킹을 보여줘요 (이번 판 난이도 탭, 친구가 다른 탭을 골랐으면 그 탭)
     };
     timer = setTimeout(() => finish('failed'), T.saveTimeoutMs);
     const payload = {
@@ -791,7 +908,7 @@ const UI = (() => {
     let p = null;
     try { if (hasFn(Server, 'saveScore')) p = Server.saveScore(payload); } catch (e) { p = null; }
     if (!p || typeof p.then !== 'function') { finish('failed'); return; }
-    p.then(r => finish(r && r.ok === false ? 'failed' : (r && r.source === 'local' ? 'local' : 'saved')), () => finish('failed'));
+    p.then(r => { const o = saveStateOf(r); finish(o.state, o.retry); }, () => finish('failed'));
   }
 
   // ===== 5. 터치 컨트롤 =====
@@ -801,10 +918,18 @@ const UI = (() => {
     const zone = el('div', { class: 'tc-stick', 'data-role': 'stick', role: 'group', 'aria-label': '움직이기 조이스틱' }, base);
     const held = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ArrowDown: false };
     let pid = null;
+    // 방향키 누르기/떼기. 누를 땐 우리가 기억하는 값(held)뿐 아니라 "진짜 Input 상태"와도 맞춰 봐요:
+    // 일시정지·창 이동·장면 전환으로 Input.clear() 가 불리면 키는 풀렸는데 held 만 true 로 남아서, 손가락이 그대로여도 영영 안 움직이던 문제(R-09)
+    // (뗄 땐 우리가 누른 것만 떼요 — 키보드로 누르고 있는 방향키를 스틱이 대신 풀어 버리면 안 되니까)
     const setDir = (code, on) => {
-      if (held[code] === on) return;
-      held[code] = on;
-      if (on) Input.press(code); else Input.release(code);
+      if (on) {
+        if (held[code] && Input.isDown(code)) return;
+        held[code] = true;
+        if (!Input.isDown(code)) Input.press(code);
+      } else {
+        if (!held[code]) return;
+        held[code] = false; Input.release(code);
+      }
     };
     function stickMove(e) {
       const r = base.getBoundingClientRect(), R = Math.max(1, r.width / 2);
@@ -828,7 +953,15 @@ const UI = (() => {
       try { zone.setPointerCapture(e.pointerId); } catch (err) { /* 가짜 포인터 등 */ }
       stickMove(e);
     });
-    zone.addEventListener('pointermove', e => { if (e.pointerId === pid) stickMove(e); });
+    zone.addEventListener('pointermove', e => {
+      if (e.pointerId === pid) { stickMove(e); return; }
+      // 일시정지 화면을 닫았을 때 손가락이 아직 스틱 위에 있으면, 새 pointerdown 이 없어도 그 손가락을 다시 이어받아요 (움직이는 터치만. 마우스는 누르고 있을 때만)
+      if (pid === null && (e.pointerType === 'touch' || (e.buttons & 1))) {
+        pid = e.pointerId; zone.classList.add('held');
+        try { zone.setPointerCapture(e.pointerId); } catch (err) { /* 가짜 포인터 등 */ }
+        stickMove(e);
+      }
+    });
     ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(n => zone.addEventListener(n, e => { if (e.pointerId === pid) stickEnd(); }));
     zone.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -864,13 +997,14 @@ const UI = (() => {
     const w = r && r.width > 0 ? r.width : Math.min(window.innerWidth, window.innerHeight * 16 / 9);
     S.u = Math.max(0.2, w / W);
     docEl.style.setProperty('--u', S.u.toFixed(4) + 'px');
+    S.fine = finePointer();
     let coarse = false;
     try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) { coarse = false; }
     const portrait = window.innerHeight > window.innerWidth && (window.innerWidth < 700 || coarse || !!Game.touch);
     docEl.setAttribute('data-portrait', portrait ? '1' : '0');
     const was = S.portrait;
     S.portrait = portrait;
-    if (portrait && !was && Game.scene === 'play' && !Game.paused) Game.pause(true);      // 세로로 돌려진 동안 게임이 몰래 진행되지 않게
+    if (portrait && !was && Game.scene === 'play' && !Game.paused) Game.pause(true);      // 세로로 돌려진 동안 게임이 몰래 진행되지 않게 (이미 세로인 채로 시작한 판은 syncChrome 이 멈춰요)
     syncChrome();
   }
   // HUD 점수판이 오른쪽 위 버튼(일시정지/소리)과 겹치지 않게 비켜 줄 폭 (논리 단위)
@@ -885,6 +1019,10 @@ const UI = (() => {
     const e = S.els;
     if (!e.root) return;
     const scene = Game.scene;
+    // "가로로 돌려 주세요" 가 떠 있는 동안에는 play 가 진행되면 안 돼요 (GP-1 / UI-03: 세로 창에서 Enter 로 시작하거나 「다시 하기」를 눌러도 안 보이는 채로 게임이 흘러가 목숨을 잃었어요).
+    // 장면이 바뀔 때·멈춤이 풀릴 때·크기가 바뀔 때마다 여기를 지나가니까, 어떤 길로 play 에 들어오든 한 줄로 막혀요. (Game.pause 가 다시 이 함수를 부르지만 이번엔 paused 라서 그대로 이어져요)
+    if (S.portrait && scene === 'play' && !Game.paused) { Game.pause(true); return; }
+    syncMotion();
     e.btnPause.hidden = scene !== 'play';
     updateMuteBtn();
     updateInset();
@@ -987,10 +1125,13 @@ const UI = (() => {
     ctx.restore();
   }
 
+  // 타이틀이 열릴 때 포커스: 손가락만 쓰는 기기(폰/태블릿)에선 키보드가 불쑥 뜨지 않게 아무 데도 안 줘요 (그래도 키보드를 연결했다면 Enter 로 시작할 수 있어요 — 위 keydown 처리).
+  // 마우스+터치 노트북은 일반 컴퓨터처럼: 기억하는 별명이 있으면 「시작」, 새로 만든 별명이면 칸에 두고 전체를 선택해 둬서 바로 쳐서 바꿀 수 있어요 (UI-12)
   function focusTitle() {
     const e = S.els;
-    if (Game.touch) return;                                                         // 터치 기기에선 키보드가 불쑥 뜨지 않게
-    focusEl(e.nick.value.trim() ? e.startBtn : e.nick);
+    if (Game.touch && (S.lastPointer === 'touch' || !S.fine)) return;
+    if (S.nickAuto) { focusEl(e.nick); try { e.nick.select(); } catch (err) { /* 무시 */ } }
+    else focusEl(e.nick.value.trim() ? e.startBtn : e.nick);
   }
   Scenes.title = {
     enter() {
@@ -998,7 +1139,9 @@ const UI = (() => {
       S.t = 0; S.starting = false;
       const e = S.els;
       showNickError('');
-      e.nick.value = Game.nickname || String(Store.get('nickname', '') || '');
+      const remembered = Game.nickname || String(Store.get('nickname', '') || '');
+      if (remembered) { e.nick.value = remembered; S.nickAuto = false; }
+      else fillNick(true);                                                          // 처음이면 별명을 하나 만들어 줘요: 글자를 안 쳐도 바로 「시작!」 (KIDS-08)
       const saved = Game.nickname ? Game.difficulty : Store.get('difficulty', 'normal');   // 한 판 하고 돌아왔으면 방금 난이도, 처음이면 마지막으로 고른 난이도
       selectDiff(CFG.difficulty[saved] ? saved : 'normal', false);
       show(e.title);
@@ -1014,6 +1157,7 @@ const UI = (() => {
     },
     update() { S.t++; },
     draw(ctx) {
+      syncMotion();
       const calm = reduceMotion(), t = calm ? 40 : S.t;
       drawTitleBG(ctx, t, calm);
       drawTitleLogo(ctx, t, calm);
@@ -1022,16 +1166,25 @@ const UI = (() => {
 
   // ---- 결과 ----
   function defaultResult() { return { cleared: false, score: Game.score || 0, stars: 0, timeFrames: Game.frame || 0, kills: Game.kills || 0, deaths: Game.deaths || 0, maxCombo: (Game.combo && Game.combo.max) || 0, difficulty: Game.difficulty, stageId: '', stageName: '', rooms: 0 }; }
+  // 게임 오버 문구는 "어디까지 왔는지" 로 골라요 (KIDS-13): 처음 방에서 쓰러졌는데 "거의 다 왔어요!" 라고 하면 이상하니까.
+  //   res.rooms = 깨고 온 방 수, 전체 방 수 = Game.stage.roomCount (맨 마지막 방이 대왕의 방). 몇 방인지 모르면 가운데 문구.
+  function overMsgsFor(res) {
+    const done = Math.max(0, Number(res.rooms) || 0), total = Math.max(0, Number(res.roomCount) || Number(Game.stage && Game.stage.roomCount) || 0);
+    const g = T.overGroups;
+    if (total >= 2 && done >= total - 1) return g.boss;
+    if (done <= 1) return g.early;
+    return g.mid;
+  }
   function fillResult(res) {
     const e = S.els, d = CFG.difficulty[res.difficulty] || Game.diff;
     const stars = clamp(Math.round(Number(res.stars) || 0), 0, 3);
     e.resTitle.textContent = res.cleared ? '스테이지 클리어!' : '아쉬워요!';
     e.resSub.textContent = (res.stageName ? res.stageName + ' · ' : '') + (d ? d.label : '');
-    const msgs = res.cleared ? (T.clearMsgs[stars] || T.clearMsgs[1]) : T.overMsgs;
+    const msgs = res.cleared ? (T.clearMsgs[stars] || T.clearMsgs[1]) : overMsgsFor(res);
     const idx = Math.abs(Math.round((Number(res.score) || 0) / 10) + (res.kills | 0) + (res.deaths | 0)) % msgs.length;
     e.resMsg.textContent = msgs[idx];
     e.resStats.textContent = '';
-    const rows = [['처치', (res.kills | 0) + '마리'], ['최고 콤보', (res.maxCombo | 0) + ' HIT'], ['걸린 시간', clock(res.timeFrames)], ['쓰러진 횟수', (res.deaths | 0) + '번']];
+    const rows = [['물리친 몬스터', (res.kills | 0) + '마리'], ['최고 콤보', (res.maxCombo | 0) + ' HIT'], ['걸린 시간', clock(res.timeFrames)], ['쓰러진 횟수', (res.deaths | 0) + '번']];
     if (res.rooms !== undefined && res.rooms !== null) rows.push(['지나온 방', (res.rooms | 0) + '개']);
     rows.forEach(([k, v]) => e.resStats.append(el('li', null, el('span', { class: 'stat-k', text: k }), el('b', { text: v }))));
     e.resBadge.hidden = !(res.cleared && !(res.deaths | 0));                          // 한 번도 안 쓰러지고 클리어하면 뱃지
@@ -1096,6 +1249,7 @@ const UI = (() => {
       S.res = { data: res, f: 0, shown: 0, total: 0, score: Math.max(0, Math.round(Number(res.score) || 0)), cleared: !!res.cleared, lastText: '0', t0: performance.now() };
       S.res.total = fillResult(res);
       try { FX.clear(); } catch (err) { /* 무시 */ }
+      e.resRank.reset(CFG.difficulty[res.difficulty] ? res.difficulty : Game.difficulty);   // 지난 판의 랭킹/「나」 표시가 새 점수 옆에 남지 않게 비우고, 이번에 한 난이도 탭을 먼저 보여줘요
       show(e.result);
       syncChrome();
       if (!res.cleared) sfx('gameover');                                            // (클리어 팡파르는 stage 가 "CLEAR!" 배너에서 이미 울려요 — 겹치지 않게)
@@ -1123,6 +1277,7 @@ const UI = (() => {
       try { FX.update(); } catch (err) { /* 무시 */ }
     },
     draw(ctx) {
+      syncMotion();
       const calm = reduceMotion(), r = S.res, t = calm ? 40 : S.t;
       drawResultBG(ctx, t, !r || r.cleared, calm);
       try { FX.drawWorld(ctx); } catch (err) { /* 무시 */ }
@@ -1131,29 +1286,51 @@ const UI = (() => {
 
   // ===== 7. 이벤트 · 키 처리 · 휴식 알림 (파일을 읽을 때 딱 한 번 등록) =====
   Events.on('paused', () => syncChrome());
-  Events.on('sceneChanged', () => { S.starting = false; syncChrome(); });
+  Events.on('sceneChanged', () => {
+    S.starting = false; S.lowSaid = false;
+    if (Game.scene !== 'play' && S.bossUp) { S.bossUp = false; if (S.els.toasts) S.els.toasts.classList.remove('low'); }     // 타이틀/결과에서는 토스트를 다시 위쪽 자리로
+    syncChrome();
+  });
   Events.on('touchDetected', () => measure());
   Events.on('windowBlur', () => {                                                   // 창을 벗어나면 자동 일시정지
     if (Game.scene === 'play' && !Game.paused) Game.pause(true);
   });
-  Events.on('playerHit', () => { HUD.hitT = nowF(); });
+  Events.on('playerHit', () => {
+    HUD.hitT = nowF();
+    const p = Game.player;                                                          // 체력이 위험해지면 화면 읽기 도구에 한 번만 알려줘요 (UI-11)
+    if (p && p.maxHp > 0 && p.hp > 0) {
+      if (p.hp / p.maxHp <= T.hud.lowHpRatio) { if (!S.lowSaid) { S.lowSaid = true; announce('체력이 얼마 안 남았어요! ' + Math.ceil(p.hp) + ' 남았어요'); } }
+      else S.lowSaid = false;
+    }
+  });
+  Events.on('playerRevived', () => { S.lowSaid = false; });
+  Events.on('playerDied', () => announce('쓰러졌어요!'));
+  Events.on('roomStarted', d => {
+    const n = Math.round(Number(Game.stage && Game.stage.roomCount)) || 0, i = d ? d.index | 0 : 0, name = d && d.room && d.room.name ? d.room.name : '';
+    const p = Game.player, lives = Game.lives;                                      // 방이 바뀔 때 체력·목숨도 같이 알려줘요 (HUD 숫자를 눈으로 볼 수 없는 친구를 위해)
+    const status = [p && p.maxHp > 0 ? '체력 ' + Math.ceil(clamp(p.hp || 0, 0, p.maxHp)) : '', lives === Infinity ? '목숨 무한' : (Number.isFinite(lives) ? '목숨 ' + Math.max(0, Math.round(lives)) + '개' : '')].filter(Boolean).join(', ');
+    announce('방 ' + (i + 1) + (n ? ' / ' + n : '') + (name ? ', ' + name : '') + (status ? '. ' + status : ''));
+  });
   Events.on('comboChanged', d => {
     const c = d ? d.count | 0 : 0;
     if (c > HUD.comboLast) HUD.comboPop = nowF();
     else if (c === 0 && HUD.comboLast >= 3) HUD.ghost = { count: HUD.comboLast, t: nowF() };
     HUD.comboLast = c;
   });
-  Events.on('bossSpawned', () => { HUD.boss = null; });
+  Events.on('bossSpawned', () => { HUD.boss = null; announce('보스가 나타났어요! 젤리 대왕'); });
 
   const GAME_KEYS = /^(Arrow(Left|Right|Up|Down)|Key[ZXASD]|Space)$/;
   // 터치 기기에서 손가락이 닿으면 다시 터치 모드로 (키보드로 바꿨다가 화면을 만지면 버튼이 돌아와요)
-  window.addEventListener('touchstart', () => { if (S.kbdUsed) { S.kbdUsed = false; syncChrome(); } }, { passive: true, capture: true });
+  window.addEventListener('touchstart', () => { const first = !S.touchSeen; S.touchSeen = true; S.lastPointer = 'touch'; if (S.kbdUsed || first) { S.kbdUsed = false; syncChrome(); } }, { passive: true, capture: true });
+  window.addEventListener('pointerdown', ev => { if (ev.pointerType) S.lastPointer = ev.pointerType; }, { passive: true, capture: true });   // 마지막으로 쓴 손(터치/마우스) — 타이틀에서 키보드가 불쑥 뜨지 않게 고를 때 써요
   // 키보드: 창 전체의 capture 단계에서 먼저 받아요 (Esc/P = 일시정지, M = 소리 — 이 한 곳에서만)
   window.addEventListener('keydown', ev => {
     if (ev.isComposing || ev.keyCode === 229) return;                               // 한글 조합 중
     const t = ev.target, typing = isTyping(t), mods = ev.ctrlKey || ev.metaKey || ev.altKey;
     if (ev.code === 'Tab' && (modalOpen() || !S.els.pauseModal.hidden)) { trapTab(ev); return; }
     if (ev.isTrusted && Game.touch && !S.kbdUsed && !typing && Game.scene === 'play' && !Game.paused && GAME_KEYS.test(ev.code)) { S.kbdUsed = true; syncChrome(); }   // 물리 키보드로 플레이하면 터치 버튼은 치워요
+    // 타이틀에서 아무 칸/버튼에도 포커스가 없을 때(터치 화면 + 키보드 노트북 등) Enter 로 시작해요
+    if (ev.code === 'Enter' && !ev.repeat && !typing && !mods && Game.scene === 'title' && !modalOpen() && (!t || t === doc.body || t === docEl)) { ev.preventDefault(); startGame(); return; }
     if (!typing && !mods && !ev.repeat) {
       if (ev.code === 'KeyM') toggleMute(true);
       else if (ev.code === 'Escape') {
@@ -1172,8 +1349,22 @@ const UI = (() => {
       ev.preventDefault(); selectDiff(keys[nx], true); sfx('ui');
       ev.stopPropagation(); return;
     }
-    // 결과 화면이 막 떴을 때는 Space/Enter 로 버튼이 눌리지 않게 삼켜요 (마우스/터치 클릭은 그대로)
-    if (Game.scene === 'result' && S.res && (ev.code === 'Space' || ev.code === 'Enter') && t && t.tagName === 'BUTTON' && S.els.result && S.els.result.contains(t) && performance.now() - S.res.t0 < T.result.keyLockMs) { ev.preventDefault(); ev.stopPropagation(); return; }
+    // 랭킹 탭(쉬움/보통/어려움)도 화살표 키로 고르기
+    if (t && t.classList && t.classList.contains('rank-tab') && /^(Arrow(Left|Right|Up|Down)|Home|End)$/.test(ev.code)) {
+      const tabs = Array.from(t.parentNode.children), cur = tabs.indexOf(t);
+      let nx = cur;
+      if (ev.code === 'ArrowLeft' || ev.code === 'ArrowUp') nx = (cur + tabs.length - 1) % tabs.length;
+      else if (ev.code === 'ArrowRight' || ev.code === 'ArrowDown') nx = (cur + 1) % tabs.length;
+      else if (ev.code === 'Home') nx = 0; else nx = tabs.length - 1;
+      ev.preventDefault(); ev.stopPropagation();
+      tabs[nx].click(); focusEl(tabs[nx]);
+      return;
+    }
+    // 결과 화면이 막 떴을 때는 Space/Enter 로 버튼이 눌리지 않게 삼켜요 (마우스/터치 클릭은 그대로).
+    // 꾹 누르고 있는 키(자동 반복 keydown)는 시간이 지나도 늘 삼켜요: 공격 키를 누른 채 결과 화면으로 넘어와도 「다시 하기」가 눌리지 않게 (UI-01). 일부러 누르는 첫 keydown 은 repeat 이 아니라서 그대로 눌려요.
+    if (Game.scene === 'result' && S.res && (ev.code === 'Space' || ev.code === 'Enter') && t && t.tagName === 'BUTTON' && S.els.result && S.els.result.contains(t) && (ev.repeat || performance.now() - S.res.t0 < T.result.keyLockMs)) { ev.preventDefault(); ev.stopPropagation(); return; }
+    // 일시정지 화면의 버튼은 Enter 를 꾹 눌러도(자동 반복) 계속 눌리지 않아요: 「정말요? 한 번 더」 확인이 뚫리지 않게 (UI-02)
+    if (ev.repeat && ev.code === 'Enter' && t && t.tagName === 'BUTTON' && S.els.pauseModal && S.els.pauseModal.contains(t)) { ev.preventDefault(); ev.stopPropagation(); return; }
     // 화면(오버레이)이 떠 있는 동안 포커스된 버튼의 Space/방향키는 게임 입력으로 보내지 않아요 → 버튼이 Space 로도 눌려요
     if (overlayActive() && t && t.tagName === 'BUTTON' && S.els.root && S.els.root.contains(t)) ev.stopPropagation();
   }, true);
@@ -1190,12 +1381,16 @@ const UI = (() => {
   }
 
   // 휴식 알림: play 씬이 실제로 진행된 시간(틱)이 CFG.breakReminderMinutes 를 넘을 때마다 한 번씩 (히트스톱 중에도 시간은 흘러요)
+  //   싸우는 중(방의 전투·보스전)에는 잠깐 미뤄서, 방을 깨고 숨 돌릴 때 보여줘요 (UI-08: 보스 체력바를 가리지 않게). 그래도 T.breakDeferTicks 동안 못 쉬면 그냥 보여줘요.
+  const inFight = () => { try { return typeof Stage !== 'undefined' && Stage.state === 'fight'; } catch (e) { return false; } };
   Loop.hooks.push(() => {
     if (Game.scene !== 'play' || Game.paused) return;
     S.playTicks++;
     const every = Math.max(1, Math.round((Number(CFG.breakReminderMinutes) || 30) * 3600));
     if (S.playTicks >= (S.reminded + 1) * every) {
-      S.reminded = Math.floor(S.playTicks / every);
+      if (!S.breakDue) S.breakDue = S.playTicks;                                    // 알림 시간이 된 순간
+      if (inFight() && S.playTicks - S.breakDue < T.breakDeferTicks) return;
+      S.reminded = Math.floor(S.playTicks / every); S.breakDue = 0;
       S.breakMsgs++;
       toast(T.breakText, T.breakToastMs);
     }
@@ -1206,7 +1401,10 @@ const UI = (() => {
   try { if (window.ResizeObserver && $('app')) new ResizeObserver(() => measure()).observe($('app')); } catch (e) { /* 무시 */ }
 
   // ===== 8. 공개 API =====
-  function showRanking() { S.els.rankView.load(); openModal('rank'); }
+  function showRanking(diff) {                                                     // diff 를 안 주면 타이틀에서 고른 난이도의 랭킹부터
+    const d = CFG.difficulty[diff] ? diff : (Game.scene === 'title' ? S.diff : Game.difficulty);
+    S.els.rankView.load(CFG.difficulty[d] ? d : undefined); openModal('rank');
+  }
   function hideRanking() { closeModal('rank'); S.els.rankView.cancel(); }
 
   const api = {
@@ -1217,7 +1415,8 @@ const UI = (() => {
     validateNickname: validateNick,
     startGame, restartRun, toTitle, resume, toggleMute,
     resize: measure,
-    resetBreakTimer() { S.playTicks = 0; S.reminded = 0; },
+    resetBreakTimer() { S.playTicks = 0; S.reminded = 0; S.breakDue = 0; },
+    setReduceMotion, toggleMotion, announce,
     state() {
       const e = S.els;
       return {
@@ -1225,16 +1424,18 @@ const UI = (() => {
         difficulty: S.diff, nickError: e.nickErr ? e.nickErr.textContent : '', nickValue: e.nick ? e.nick.value : '',
         titleVisible: !!e.title && !e.title.hidden, resultVisible: !!e.result && !e.result.hidden, pauseVisible: !!e.pauseModal && !e.pauseModal.hidden,
         touchVisible: !!e.touchRoot && e.touchRoot.classList.contains('on'), kbdUsed: S.kbdUsed,
-        starsShown: S.res ? S.res.shown : 0, starsTotal: S.res ? S.res.total : 0, saveState: S.saveState,
+        starsShown: S.res ? S.res.shown : 0, starsTotal: S.res ? S.res.total : 0, saveState: S.saveState, saveRetry: !!e.retry && !e.retry.hidden,
         playTicks: S.playTicks, breakMsgs: S.breakMsgs, motion: !reduceMotion(),
+        resultTab: e.resRank ? e.resRank.tab() : '', rankTab: e.rankView ? e.rankView.tab() : '', touchSeen: S.touchSeen, lastPointer: S.lastPointer,
       };
     },
   };
 
   // 화면 부품은 파일을 읽는 즉시 만들어 둬요 (index.html 의 #ui / #touch 안에 JS 로 생성)
   buildChrome(); buildTitle(); buildHelp(); buildRank(); buildPause(); buildResult(); buildTouch();
-  S.els.root.append(S.els.hudBtns, S.els.toasts, S.els.rotate);
+  S.els.root.append(S.els.hudBtns, S.els.toasts, S.els.live, S.els.rotate);
   selectDiff(CFG.difficulty[Store.get('difficulty', 'normal')] ? Store.get('difficulty', 'normal') : 'normal', false);
+  syncMotion(true);
   measure();
   return api;
 })();

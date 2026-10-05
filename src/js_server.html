@@ -8,7 +8,7 @@
      Server.randomNickname()               -> '말랑젤리37' 처럼 귀여운 낱말 둘 + 숫자 두 개 (2~8글자, 늘 validateNickname 을 통과해요). 주사위 버튼·기본 이름용
      Server.saveScore({ nickname, score, stageId, difficulty, stars, cleared, timeSec })
                                            -> Promise<{ ok:true, source:'server'|'local', rank?, warning? }>  (절대 reject 안 함)
-                                              warning: 'server_failed' = 서버에 못 올려서 내 기기에만 저장 (error 에 이유) / 'no_server' = 서버가 없는 환경
+                                              warning: 'server_failed' = 서버에 못 올려서 내 기기에만 저장 (error 에 이유, retryable: 다시 보내 볼 만한지 - false 면 서버가 기록 자체를 거절한 거라 소용없어요) / 'no_server' = 서버가 없는 환경
      Server.getTopScores(n=10, difficulty?) -> Promise<[{ rank, nickname, score, stars, difficulty }]>        (절대 reject 안 함)
                                               배열에 숨은 속성 rows.source: 'server' | 'local' (local = 이 기기의 기록이에요)
      Server.call(fn, ...args)              google.script.run 을 Promise 로 (10초 타임아웃, 서버가 없으면 reject)
@@ -53,36 +53,42 @@ const NICKNAME_BLOCKLIST = [
   '병신', '빙신', '븅신', '병쉰', '지랄', '지럴', '염병', '옘병', '엠창', '앰창',
   '개새', '개세끼', '개쉐', '개쉑', '개색', '개섹', '개년', '개놈', '개자식', '개소리', '개돼지',
   '저새끼', '그새끼', '미친새끼', '미친놈', '미친년', '미친개', '쌍년', '쌍놈', '썅년', '썅놈', '썅새끼',
-  '좆같', '좃같', '좆나', '좆새', '좆밥', '좆까', '좆빠', '존나', '존내', '존니', '조낸', '십새', '십창', '씹보지',
-  '또라이', '돌아이', '닥쳐', '닥처', '꺼져', '찐따', '느금마', '니애미', '니엄마', '니미럴', '패드립', '엿먹', '퍽큐', '뻐큐',
-  '죽어버', '죽여버', '뒤져버', '뒈져버',
+  '좆', '좃', '존나', '존내', '존니', '조낸', '십새', '십창', '씹보지',
+  '또라이', '돌아이', '닥쳐', '닥처', '꺼져', '찐따', '느금마', '느그매', '니애미', '니애비', '니엄마', '니미럴', '패드립', '엿먹', '퍽큐', '뻐큐',
+  '죽어버', '죽여버', '뒤져버', '뒈져버', '죽어라', '죽여라', '뒤져라', '디져라', '뒈져라',
+  // 첫 글자만 자음으로 쓴 것 (홀로 쓴 자음일 때만 찾아요. 옷발 · 밥신 은 괜찮아요)
+  'ㅅ발', 'ㅅ팔', 'ㅂ신', 'ㅁ친', 'ㅈ랄', 'ㅈ같', 'ㅈ까', 'ㅈ나',
   // 한국어 성적 표현 / 위험한 말
-  '섹스', '섹시', '야동', '포르노', '음란', '창녀', '창년', '성폭행', '성추행',
-  '자살', '자해', '죽고싶', '살인마', '살인자', '살인범',
+  '섹스', '섹시', '야동', '야설', '포르노', '음란', '창녀', '창년', '성폭행', '성추행', '성관계', '성행위', '성매매', '강제추행', '조건만남', '원나잇', '몸캠',
+  '딸딸이', '딸치', '딸쳐', '꼴려', '꼴리', '젖꼭지', '젖탱', '빨통', '쭉빵', '보빨', '질싸', '사까시',
+  '자살', '자해', '죽고싶', '살인마', '살인자', '살인범', '총기난사',
   // 한국어 차별/혐오 표현, 나쁜 약물
-  '한남충', '김치녀', '김치남', '된장녀', '맘충', '틀딱', '급식충', '노인충', '짱깨', '짱개', '쪽바리', '쪽발이', '왜놈', '깜둥이', '조센징', '똥남아', '일베', '정신병자',
-  '히틀러', '대마초', '필로폰', '히로뽕', '코카인',
+  '한남충', '김치녀', '김치남', '된장녀', '맘충', '틀딱', '급식충', '노인충', '짱깨', '짱개', '쪽바리', '쪽발이', '왜놈', '깜둥이', '조센징', '똥남아', '일베', '정신병자', '개독', '빨갱이', '노알라',
+  '히틀러', '대마초', '필로폰', '히로뽕', '코카인', '마리화나', '엑스터시',
   // 한글 자판으로 안 바꾸고 영어로 친 것 (시발 = tlqkf) / 로마자
   'tlqkf', 'qudtls', 'wlfkf', 'sibal', 'ssibal', 'shibal', 'gaesaeki', 'gaesaekki', 'byeongsin', 'byungshin',
   // 자음만 쓴 줄임말 (이름 속에 자음 낱글자로 쓴 것만 찾아요. 글자 속 받침은 괜찮아요: 옷방, 없는)
   'ㅅㅂ', 'ㅂㅅ', 'ㅈㄹ', 'ㅈㄴ', 'ㅁㅊ', 'ㅅㅋ', 'ㅅㄲ', 'ㄱㅅㄲ', 'ㄲㅈ', 'ㄷㅊ', 'ㄴㄱㅁ',
   // 영어
-  'fuck', 'fck', 'fvck', 'phuck', 'fuxk', 'fuking', 'shit', 'shyt', 'bitch', 'biatch', 'bastard', 'asshole', 'arsehole', 'dumbass', 'jackass', 'fatass',
-  'dickhead', 'cocksucker', 'penis', 'vagina', 'pussy', 'cunt', 'slut', 'whore', 'nigger', 'nigga', 'faggot', 'fagot', 'retard',
-  'porn', 'sex', 'hentai', 'horny', 'dildo', 'orgasm', 'blowjob', 'handjob', 'jizz', 'masturbat', 'erotic', 'bukkake', 'bollocks', 'wanker', 'molest', 'pedophile', 'rapist',
-  'hitler', 'neonazi', 'terrorist', 'suicide', 'killme', 'killyou', 'killyourself',
+  'fuck', 'fck', 'fcuk', 'fvck', 'phuck', 'fuxk', 'fuking', 'shit', 'shyt', 'bitch', 'biatch', 'bastard', 'asshole', 'arsehole', 'dumbass', 'jackass', 'fatass',
+  'dickhead', 'cocksucker', 'penis', 'vagina', 'pussy', 'cunt', 'slut', 'whore', 'nigger', 'nigga', 'faggot', 'fagot', 'retard', 'tranny', 'shemale', 'lesbo',
+  'porn', 'xvideos', 'sex', 'hentai', 'horny', 'dildo', 'orgasm', 'blowjob', 'handjob', 'jizz', 'cumshot', 'masturbat', 'jerkoff', 'erotic', 'bukkake', 'bollocks', 'wanker', 'molest', 'pedophile', 'rapist', 'sperm', 'nipple',
+  'hitler', 'neonazi', 'terrorist', 'suicide', 'killme', 'killyou', 'killyourself', 'massacre', 'cocaine',
 ];
 
 // (2) 이름 "전체"가 이 낱말일 때만 걸러요 (뜻이 둘이거나 다른 낱말 속에 흔히 들어 있는 짧은 말).
 //     ※ 숫자·띄어쓰기·ㅋㅋ ㅎㅎ ㅠㅠ 는 무시하고 봐요: '보지' '보 지' '보지ㅋㅋ' '보지2' 는 걸리고, '보지마' '시바견' '걸레질' 은 괜찮아요.
 const NICKNAME_BLOCKLIST_WHOLE = [
-  '시바', '십팔', '졸라', '미친', '별신', '니미', '새기', '새키', '색기', '쉐기', '섀기', '썅', '씹', '좆', '좃', 'ㅗ',
+  '시바', '십팔', '졸라', '미친', '별신', '니미', '새기', '새키', '색기', '쉐기', '섀기', '썅', '씹', 'ㅗ',
   '보지', '자지', '걸레', '갈보', '성기', '자위', '강간', '윤간', '불알', '변태', '몰카', '게이', '호모', '레즈',
-  '한남', '메갈', '워마드', '나치', '애자', '장애', '장애인', '마약',
-  '죽어', '죽여', '죽일', '죽을래', '뒤져', '디져', '뒤질래', '뒈져', '뒈져라',
-  'fuc', 'fuk', 'ass', 'arse', 'dick', 'cock', 'tit', 'tits', 'boob', 'boobs', 'anal', 'anus', 'cum', 'rape', 'nazi', 'kkk', 'gay', 'homo', 'dyke', 'fag',
-  'wtf', 'stfu', 'kys', 'kms', 'hoe', 'crap', 'nude', 'nudes', 'naked', 'xxx', 'jap', 'chink', 'spic', 'kike', 'coon', 'paki', 'negro', 'tard', 'pedo',
+  '한남', '한녀', '메갈', '워마드', '나치', '애자', '장애', '장애인', '마약', '아편', '테러', '운지',
+  '죽어', '죽여', '죽일', '죽을래', '뒤져', '디져', '뒤질래', '뒈져',
+  '애미', '애비', '멍청이', '찌질이', '찌질', '못생김', '왕따', '꼴통', '등신', '머저리', '쓰레기', '대가리', '아가리',
+  '항문', '후장', '에로', '유두', '고환', '음경', '음순', '성교', '섹', '발기', '정액', '학살',
+  'fuc', 'fuk', 'fuq', 'ass', 'arse', 'dick', 'cock', 'tit', 'tits', 'boob', 'boobs', 'anal', 'anus', 'cum', 'rape', 'nazi', 'kkk', 'gay', 'homo', 'dyke', 'fag',
+  'wtf', 'stfu', 'kys', 'kms', 'hoe', 'crap', 'nude', 'nudes', 'naked', 'xxx', 'jap', 'chink', 'spic', 'kike', 'coon', 'paki', 'negro', 'tard', 'pedo', 'gook',
   'wank', 'twat', 'turd', 'prick', 'moron', 'spaz', 'cripple', 'midget', 'die', 'drug', 'drugs',
+  'piss', 'boner', 'weed', 'meth', 'heroin', 'condom', 'semen', 'hooker', 'incest', 'thot', 'jerk', 'idiot', 'stupid', 'dumb', 'loser', 'ugly',
 ];
 // ==== BLOCKLIST END ====
 
@@ -172,6 +178,7 @@ const Server = (() => {
    *   strong: 이름 어디에 들어 있어도 걸러요 (마지막 글자가 완성형이면 받침이 더 붙은 글자는 다른 글자로 봐요: 창녀 != 창녕)
    *   whole : 이름 전체가 이 낱말일 때만 걸러요 (보지 != 보지마)
    *   jamoOnly: 자음만 쓴 줄임말(ㅅㅂ)이에요. 이름 속에 자음 낱글자로 쓴 것만 찾아요 (옷방 의 ㅅ+ㅂ 은 괜찮아요)
+   *   첫 글자만 자음으로 쓴 낱말(ㅅ발 ㅂ신 ㅈ같)은 홀로 쓴 자음일 때만 걸러요 (옷발 · 밥신 은 괜찮아요)
    */
   function nickPattern_(entry) {
     let p = nickPatternMemo_.get(entry);
@@ -192,22 +199,34 @@ const Server = (() => {
     }).join(NICK_SYL_END_ + '?' + NICK_SYL_START_ + '?');
     p = { jamoOnly: /^[ㄱ-ㅎ]+$/.test(e), strong: null, whole: null };
     if (e) {
-      p.strong = new RegExp(body + (lastIsSyllable ? '(?![\\u3131-\\u314E]+' + NICK_SYL_END_ + ')' : ''));
+      const head = /^[ㄱ-ㅎ][가-힣]/.test(e) ? '^(?:[^\\u0002]|\\u0002[^\\u0003]*\\u0003)*' : '';   // 'ㅅ발' 처럼 첫 글자만 자음으로 쓴 낱말: 완성형 글자 사이(글자의 경계)에서 시작할 때만 걸러요. 옷발 의 받침 ㅅ 은 글자 안이라 괜찮아요
+      p.strong = new RegExp(head + body + (lastIsSyllable ? '(?![\\u3131-\\u314E]+' + NICK_SYL_END_ + ')' : ''));
       p.whole = new RegExp('^' + NICK_SYL_START_ + '?' + body + NICK_SYL_END_ + '?$');
     }
     nickPatternMemo_.set(entry, p);
     return p;
   }
 
-  /** 이름을 여러 모양으로 바꿔 봐요: 그대로 / 숫자를 글자로(sh1t, hit1er) / 숫자를 빼고(시1발) - 각각 ㅋㅎ 를 지운 것도. */
+  /**
+   * 이름을 여러 모양으로 바꿔 봐요: 그대로 / 숫자를 글자로(sh1t, hit1er) / 숫자를 빼고(시1발) - 각각 ㅋㅎ 를 지운 것도.
+   * 한글이 들어 있으면 낱글자 자모를 뺀 것(시ㅇ발), 한글과 영어가 섞여 있으면 영어를 뺀 것(시a발) / 둘 다 뺀 것(시ㅇa발) / 한글을 뺀 것(fㅇuck) 도 같은 방법으로 봐요.
+   * (엉뚱한 글자를 끼워 낱말을 갈라 숨기는 것을 막아요)
+   */
   function nickVariants_(s) {
     const base = s.toLowerCase();
-    const forms = [
-      base,
-      base.replace(/[0-9]/g, function (c) { return LEET_[c] || c; }),
-      base.replace(/[0-9]/g, function (c) { return c === '1' ? 'l' : (LEET_[c] || c); }),
-      base.replace(/[0-9]/g, ''),
-    ];
+    const hasKo = /[ㄱ-ㅣ가-힣]/.test(base), hasEn = /[a-z]/.test(base);
+    const bases = [base];
+    if (hasKo) bases.push(base.replace(/[ㄱ-ㅣ]/g, ''));
+    if (hasKo && hasEn) bases.push(base.replace(/[a-z]/g, ''), base.replace(/[ㄱ-ㅣa-z]/g, ''), base.replace(/[ㄱ-ㅣ가-힣]/g, ''));
+    const forms = [];
+    bases.forEach(function (b) {
+      forms.push(
+        b,
+        b.replace(/[0-9]/g, function (c) { return LEET_[c] || c; }),
+        b.replace(/[0-9]/g, function (c) { return c === '1' ? 'l' : (LEET_[c] || c); }),
+        b.replace(/[0-9]/g, '')
+      );
+    });
     const all = forms.concat(forms.map(function (f) { return f.replace(NICK_LAUGH_LIGHT_, ''); }));
     return all.filter(function (f, i) { return all.indexOf(f) === i; });
   }
@@ -430,7 +449,7 @@ const Server = (() => {
 
   async function doSave(p) {                                            // 무슨 일이 있어도 reject 하지 않아요 (맨 아래 catch 가 마지막 안전망)
     try { return await doSaveInner(p); }
-    catch (err) { warn('저장 중 예상 못 한 오류', err); return { ok: true, source: 'local', warning: 'server_failed', error: String((err && err.message) || err) }; }
+    catch (err) { warn('저장 중 예상 못 한 오류', err); return { ok: true, source: 'local', warning: 'server_failed', retryable: true, error: String((err && err.message) || err) }; }
   }
 
   async function doSaveInner(p) {
@@ -443,7 +462,7 @@ const Server = (() => {
       return { ok: true, source: 'server', rank: Number.isInteger(res.rank) && res.rank > 0 ? res.rank : undefined };
     } catch (err) {
       warn('서버 저장 실패 → 내 기기에만 저장', err && err.message);
-      return { ok: true, source: 'local', rank: localRank || undefined, warning: 'server_failed', error: String((err && err.message) || err) };
+      return { ok: true, source: 'local', rank: localRank || undefined, warning: 'server_failed', retryable: !(err && err.rejected), error: String((err && err.message) || err) };   // retryable=false: 서버가 기록 자체를 거절했어요(한글 오류 문구). 다시 보내도 소용없으니 "다시 보내 볼까요?" 단추를 보이지 않아도 돼요
     }
   }
 

@@ -644,7 +644,7 @@ await section('피격·경직·죽음·부활·회복', async () => {
   check('[부정] 무적 중엔 또 안 맞음(피해 0), 무적이 끝나면 맞음', r.second === 0 && r.hpSame && r.third === 10, `${r.second} ${r.third}`);
   check('공격 도중에 맞으면 콤보 취소 (act 없음, 기억 지움), 다음엔 1타부터', r.cancel.act === null && r.cancel.step === -1 && r.cancel.state === 'hurt' && r.cancel.link === 0 && r.restart === 0, JSON.stringify([r.cancel, r.restart]));
   check('공중에서 맞으면 땅에 닿을 때까지 hurt, 착지 후 경직이 풀리면 idle', r.airHurt.state === 'hurt' && r.airHurt.z > 0 && r.landedHurt === 'hurt' && r.airRecovered === 'idle', JSON.stringify([r.airHurt, r.landedHurt, r.airRecovered]));
-  check('난이도: 쉬움 5 / 보통 10 / 어려움 15 (커널 dmgTaken)', r.easy === 5 && r.dmg === 10 && r.hard === 15, `${r.easy} ${r.dmg} ${r.hard}`);
+  check('난이도: 쉬움 5 / 보통 10 / 어려움 17 (커널 dmgTaken 0.5 / 1.0 / 1.7)', r.easy === 5 && r.dmg === 10 && r.hard === 17, `${r.easy} ${r.dmg} ${r.hard}`);
   check('죽으면 dead, state down, 뿅 튕김, playerDied 한 번, 목록에서 안 사라짐', r.dead.dead && r.dead.state === 'down' && r.dead.hp === 0 && r.dead.vz > 0 && r.dead.died === 1 && r.dead.inList, JSON.stringify(r.dead));
   check('300프레임 뒤에도 쓰러진 채 그대로 (제거 안 됨, 땅에 누움, 이벤트 중복 없음)', r.deadLater.state === 'down' && r.deadLater.inList && r.deadLater.z === 0 && r.deadLater.died === 1, JSON.stringify(r.deadLater));
   check('[부정] 쓰러지면 방향키/공격/스킬/점프가 먹지 않음', r.deadMove === 0 && r.deadActs.act === null && r.deadActs.cd === 0 && r.deadActs.z === 0 && r.deadActs.state === 'down', JSON.stringify([r.deadMove, r.deadActs]));

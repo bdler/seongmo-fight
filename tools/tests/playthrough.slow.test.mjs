@@ -7,11 +7,16 @@
 //
 // 확인하는 것
 //   a. 쉬움(god 없음): 결과 씬 도착, cleared=true, 별 1~3, 점수>0, 걸린 시간
-//   b. 보통·어려움(god): 5개 방과 보스의 3패턴·2페이즈까지 전부 도달해서 클리어
+//   b. 보통·어려움(god): 모든 방(7개)과 보스의 3패턴·2페이즈까지 전부 도달해서 클리어
 //   c. 결과 화면에 점수가 보이고, 랭킹 목록에 내 닉네임 줄이 있음 (서버 없음 → 내 기기 저장)
 //   d. 처음부터 끝까지 console.error / pageerror 없음
 //   e. 결과 화면의 「다시 하기」 → 깨끗한 새 판 (점수 0, 방 1, 남은 엔티티 없음)
 //   f. 어려움(god 없음)에서 가만히 있으면 게임 오버 → cleared=false + 격려 문구
+//   g. 밸런스 (난이도 × 봇 실력 × 여러 시드, god 없음): 걸리는 시간 구간 / 쓰러짐 / 이기는 비율 / 점수 상한
+//        - 처음 해 보는 아이(novice) 쉬움: 5~8분, 쓰러져도 드묾 (쉬움은 게임 오버 자체가 없음)
+//        - 사람 속도 아이(kid) 보통: 4~6분
+//        - 숙련(expert) 어려움: 3~5분에 클리어하되 지는 판도 있음 (절반쯤), 무료 클리어가 아님
+//        - Z 연타만 하는 봇(mash): 어려움을 못 깸 (연타만으로 모든 공격을 끊는 요령이 통하지 않음)
 import { openGame, step, launch, gameUrl } from '../lib/browser.mjs';
 import { check, finish } from '../lib/check.mjs';
 import { startThroughUI, installBot, botStats, runUntil } from '../lib/bot.mjs';
@@ -20,8 +25,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const CAP_FRAMES = 14 * 60 * 60;          // 하드 캡: 게임 시간 14분 (50400 프레임)
-const MIN_SECONDS = 60;                   // 이보다 짧으면 방을 건너뛰었거나 보스가 순식간에 죽은 것 (설계 목표 5~8분과는 따로 아래에서 알려줌)
-const DESIGN_FLOOR_SECONDS = 180;         // 과제가 요구한 "3분" — 못 미치면 경고만 출력 (이유는 최종 보고서에 적어 둠)
+const MIN_SECONDS = 60;                   // 이보다 짧으면 방을 건너뛰었거나 보스가 순식간에 죽은 것 (실제 시간 구간은 아래 g 구역에서 난이도·실력별로 따로 검사)
+const DESIGN_FLOOR_SECONDS = 180;         // 이보다 짧으면 경고만 출력
 const SHOT_DIR = process.env.SHOT_DIR || '';
 if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
 
@@ -56,7 +61,8 @@ async function playRun({ name, difficulty, god = false, skill = 'kid', mode = 'p
   const rec = await page.evaluate(() => ({ ...window.__rec }));
   const bs = await botStats(page);
   const end = await page.evaluate(() => ({ lives: Game.lives, deaths: Game.deaths, maxCombo: Game.combo.max, resultShown: !document.getElementById('ui-result').hidden }));
-  const out = { name, difficulty, god, g, page, errors, r, res, rec, bs, title0, started, end, wall };
+  const roomCount = await page.evaluate(() => STAGES[0].rooms.length);
+  const out = { name, difficulty, god, g, page, errors, r, res, rec, bs, title0, started, end, wall, roomCount, roomsWant: Array.from({ length: roomCount }, (_, i) => i) };
   stat(name, `결과=${r.scene}${r.capped ? ' (캡 도달!)' : ''}  게임시간=${res ? fmtT(res.timeFrames) : '-'}  처치=${res?.kills}  쓰러짐=${res?.deaths}  최고콤보=${res?.maxCombo}  점수=${res?.score}  별=${res?.stars}  클리어=${res?.cleared}  맞은횟수=${bs?.hitsTaken}  (실제 ${(wall / 1000).toFixed(1)}초)`);
   if (!keep) await g.close();
   return out;
@@ -76,8 +82,8 @@ const A = await playRun({ name: 'easy', difficulty: 'easy', skill: 'kid', keep: 
   check('쉬움: cleared = true (god 없이 스스로 클리어)', res?.cleared === true);
   check('별 1~3개', res && res.stars >= 1 && res.stars <= 3, `stars=${res?.stars}`);
   check('점수 > 0', res && res.score > 0, `score=${res?.score}`);
-  check('5개 방을 전부 지남 (방 순서 0,1,2,3,4)', JSON.stringify(rec.rooms) === '[0,1,2,3,4]' && res?.rooms === 5, JSON.stringify(rec.rooms));
-  check('보스가 나왔고 처치함 (kills ≥ 28: 표의 적 수)', rec.bossSeen && res && res.kills >= 28, `kills=${res?.kills}`);
+  check('모든 방을 전부 지남 (방 순서 0..n-1, 방 수는 STAGES 데이터에서 = 7)', A.roomCount === 7 && JSON.stringify(rec.rooms) === JSON.stringify(A.roomsWant) && res?.rooms === A.roomCount, JSON.stringify(rec.rooms));
+  check('보스가 나왔고 처치함 (kills ≥ 90: 표의 적 92마리 + 보스 + 소환수)', rec.bossSeen && res && res.kills >= 90, `kills=${res?.kills}`);
   check('최고 콤보가 10 이상 (콤보 시스템이 실제로 이어짐)', res && res.maxCombo >= 10, `maxCombo=${res?.maxCombo}`);
   check('별점이 쓰러진 횟수와 맞음 (0번=3개, 1~2번=2개, 3번 이상=1개)', res && res.stars === (res.deaths === 0 ? 3 : res.deaths <= 2 ? 2 : 1), `deaths=${res?.deaths} stars=${res?.stars}`);
   const sec = res ? res.timeFrames / 60 : 0;
@@ -111,7 +117,7 @@ const A = await playRun({ name: 'easy', difficulty: 'easy', skill: 'kid', keep: 
   check('랭킹 목록에 내 닉네임 줄이 정확히 1개 있고 닉네임이 맞음', mine.length === 1 && mine[0].nick === '봇용사', JSON.stringify(mine));
   check('랭킹의 내 점수가 결과 점수와 같음', mine[0] && mine[0].score === fmtN(res.score), `${mine[0]?.score}`);
   check('결과 격려 문구가 비어 있지 않음', dom.msg.trim().length > 4, dom.msg);
-  check('걸린 시간·처치·콤보가 통계로 표시됨', dom.stats.length >= 4 && dom.stats.some(s => s.includes('처치')) && dom.stats.some(s => s.includes('콤보')), dom.stats.join(' | '));
+  check('걸린 시간·처치·콤보가 통계로 표시됨', dom.stats.length >= 4 && dom.stats.some(s => /처치|물리친/.test(s)) && dom.stats.some(s => s.includes('콤보')), dom.stats.join(' | '));
   const stored = await page.evaluate(() => { try { return JSON.parse(localStorage.getItem('jd:scores') || '[]'); } catch { return null; } });
   check('로컬 저장소(jd:scores)에 내 기록이 1개 저장됨', Array.isArray(stored) && stored.length === 1 && stored[0].nickname === '봇용사' && stored[0].score === res.score, JSON.stringify(stored));
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, 'result-easy.png') });
@@ -153,7 +159,7 @@ const A = await playRun({ name: 'easy', difficulty: 'easy', skill: 'kid', keep: 
   await page.click('#ui-pause').catch(() => {});                              // (버튼으로도 일시정지 가능)
   const viaBtn = await page.evaluate(() => Game.paused);
   check('일시정지 버튼(⏸)으로도 일시정지', viaBtn === true);
-  await page.click('#ui-home'); await page.click('#ui-home');                 // 두 번 눌러야 실행 (실수 방지)
+  await page.click('#ui-home'); await page.waitForTimeout(700); await page.click('#ui-home');     // 두 번 눌러야 실행 (실수 방지). 첫 클릭 직후(0.5초)의 두 번째 클릭은 더블클릭으로 보고 무시하므로 잠깐 기다림
   await page.waitForFunction(() => Game.scene === 'title', null, { timeout: 5000 });
   const t1 = await page.evaluate(() => ({ title: !document.getElementById('ui-title').hidden, ents: Entities.list.length, paused: Game.paused, nick: document.getElementById('ui-nick').value, diffSel: document.querySelector('.diff-card[aria-checked="true"]')?.dataset.diff }));
   check('처음으로 → 타이틀 복귀 (닉네임·난이도 기억, 일시정지 해제)', t1.title && !t1.paused && t1.nick === '봇용사' && t1.diffSel === 'easy', JSON.stringify(t1));
@@ -177,8 +183,8 @@ for (const difficulty of ['normal', 'hard']) {
   const R = await playRun({ name: `${difficulty}+god`, difficulty, god: true, skill: 'expert' });
   const { res, rec, errors, r } = R;
   check(`${difficulty}: 결과 씬 도착 (캡 안에)`, r.scene === 'result' && !r.capped);
-  check(`${difficulty}+god: 클리어 (cleared=true), 방 5개`, res?.cleared === true && res?.rooms === 5, JSON.stringify(res));
-  check(`${difficulty}+god: 방 순서 0→4 전부 지남`, JSON.stringify(rec.rooms) === '[0,1,2,3,4]', JSON.stringify(rec.rooms));
+  check(`${difficulty}+god: 클리어 (cleared=true), 방 ${R.roomCount}개`, res?.cleared === true && res?.rooms === R.roomCount && R.roomCount === 7, JSON.stringify(res));
+  check(`${difficulty}+god: 방 순서 0→${R.roomCount - 1} 전부 지남`, JSON.stringify(rec.rooms) === JSON.stringify(R.roomsWant), JSON.stringify(rec.rooms));
   check(`${difficulty}+god: 보스 3패턴(slam/summon/charge)을 전부 봄`, ['slam', 'summon', 'charge'].every(p => rec.patterns.includes(p)), JSON.stringify(rec.patterns));
   check(`${difficulty}+god: 보스 2페이즈(체력 50% 이하)까지 도달`, rec.phase2 === true);
   check(`${difficulty}+god: 화면의 적은 최대 6마리 + 보스 소환수 범위 (최대 ${rec.maxFoes}마리)`, rec.maxFoes <= 8, `maxFoes=${rec.maxFoes}`);
@@ -340,6 +346,68 @@ console.log('\n== 실시간 루프 (manual 끔) ==');
   check('실시간 루프: 봇이 실제로 싸우고 있음 (처치 또는 점수가 쌓임)', b.scene === 'play' && (b.kills > 0 || b.score > 0 || b.g > 150), JSON.stringify(b));
   check('(d) 실시간 루프 4초 동안 오류 없음', errors.length === 0, errors.slice(0, 3).join(' | '));
   await g.close();
+}
+
+// ---------------------------------------------------------------------------
+// g : 밸런스 — 난이도 × 봇 실력 × 여러 시드 (god 없음). 실제 UI 로 시작해서 결과 씬까지.
+//   (게임 난수·화면 그린 횟수 때문에 같은 시드여도 판이 조금씩 달라서, 시간은 구간으로, 이기는 비율은 넉넉한 범위로 검사)
+// ---------------------------------------------------------------------------
+console.log('\n== g. 밸런스: 난이도 × 실력 × 시드 ==');
+{
+  const min = f => f / 3600;
+  const jobs = [];
+  const add = (difficulty, skill, seeds) => { for (const seed of seeds) jobs.push({ name: `${difficulty}/${skill}#${seed}`, difficulty, skill, seed, nickname: '밸런스봇' }); };
+  add('easy', 'novice', [1, 2, 3]);
+  add('easy', 'kid', [1]);
+  add('normal', 'kid', [1, 2, 3, 4]);
+  add('normal', 'novice', [1, 2, 3, 4]);
+  add('normal', 'expert', [1]);
+  add('hard', 'expert', [1, 2, 3, 4, 5, 6, 7, 8]);
+  add('hard', 'kid', [1, 2]);
+  add('hard', 'mash', [1, 2, 3, 4, 5, 6]);
+  const results = [];
+  const queue = jobs.slice();
+  await Promise.all([0, 1, 2].map(async () => {                           // 3 판씩 동시에 (각자 따로 브라우저)
+    for (let j; (j = queue.shift());) { const o = await playRun(j); results.push({ ...j, res: o.res, bs: o.bs, errors: o.errors.length, capped: o.r.capped, wall: o.wall }); }
+  }));
+  const sel = (d, k) => results.filter(r => r.difficulty === d && r.skill === k).sort((a, b) => a.seed - b.seed);
+  const wins = a => a.filter(r => r.res && r.res.cleared);
+  const fmt = r => `${r.res && r.res.cleared ? '승' : '패'} ${r.res ? (min(r.res.timeFrames)).toFixed(1) : '-'}분 쓰러짐${r.res?.deaths} 맞음${r.bs?.hitsTaken}`;
+  console.log('  난이도/실력      시드별 결과 (승/패 시간 쓰러짐 맞은횟수)');
+  for (const [d, k] of [['easy', 'novice'], ['easy', 'kid'], ['normal', 'kid'], ['normal', 'novice'], ['normal', 'expert'], ['hard', 'expert'], ['hard', 'kid'], ['hard', 'mash']]) {
+    const a = sel(d, k); console.log(`  ${d.padEnd(6)} ${k.padEnd(7)} ${a.map(fmt).join(' | ')}`);
+  }
+  check('(d) 밸런스 판들 동안 오류 없음, 캡(14분)에 걸린 판 없음', results.every(r => r.errors === 0 && !r.capped && r.res), JSON.stringify(results.filter(r => r.errors || r.capped || !r.res).map(r => r.name)));
+
+  // 쉬움: 처음 해 보는 아이도 5~8분, 게임 오버 없음, 쓰러짐 드묾
+  const en = sel('easy', 'novice');
+  check('쉬움 + novice: 모든 판 클리어 (게임 오버가 없음)', en.length === 3 && en.every(r => r.res.cleared), en.map(fmt).join(' | '));
+  check('쉬움 + novice: 클리어 시간이 5~8분 사이 (4.5~8.5분까지 허용)', en.every(r => min(r.res.timeFrames) >= 4.5 && min(r.res.timeFrames) <= 8.5), en.map(r => min(r.res.timeFrames).toFixed(1)).join(', '));
+  check('쉬움 + novice: 쓰러짐은 드묾 (판당 1번 이하)', en.every(r => r.res.deaths <= 1), en.map(r => r.res.deaths).join(','));
+  const ek = sel('easy', 'kid');
+  check('쉬움 + kid: 클리어하고 쓰러지지 않음, 3~7분', ek.every(r => r.res.cleared && r.res.deaths === 0 && min(r.res.timeFrames) >= 3 && min(r.res.timeFrames) <= 7), ek.map(fmt).join(' | '));
+  // 보통: 사람 속도 아이 4~6분
+  const nk = sel('normal', 'kid');
+  check('보통 + kid: 모든 판 클리어, 쓰러짐 1번 이하', nk.length === 4 && nk.every(r => r.res.cleared && r.res.deaths <= 1), nk.map(fmt).join(' | '));
+  check('보통 + kid: 클리어 시간이 4~6분 사이 (3.5~6.5분까지 허용)', nk.every(r => min(r.res.timeFrames) >= 3.5 && min(r.res.timeFrames) <= 6.5), nk.map(r => min(r.res.timeFrames).toFixed(1)).join(', '));
+  const nn = sel('normal', 'novice');
+  check('보통 + novice(한 번도 안 피하는 아이): 쓰러짐은 있지만 드묾 (평균 2.5번 이하), 절반 이상은 클리어', nn.length === 4 && nn.reduce((a, r) => a + r.res.deaths, 0) / nn.length <= 2.5 && wins(nn).length >= 2, nn.map(fmt).join(' | '));
+  const ne = sel('normal', 'expert');
+  check('보통 + expert: 클리어하고 쓰러지지 않음, 3~6분', ne.every(r => r.res.cleared && r.res.deaths === 0 && min(r.res.timeFrames) >= 3 && min(r.res.timeFrames) <= 6), ne.map(fmt).join(' | '));
+  // 어려움: 숙련도 지는 판이 있고 이기는 판도 있음 (공짜 클리어가 아님), 이기면 3~5분
+  const he = sel('hard', 'expert'), hw = wins(he);
+  check(`어려움 + expert: ${he.length}판 중 ${hw.length}판 클리어 — 이기는 판도 지는 판도 있음 (무료 클리어 아님, 불가능도 아님)`, he.length === 8 && hw.length >= 1 && hw.length <= 7, he.map(fmt).join(' | '));
+  check('어려움 + expert: 이긴 판의 시간은 3~5분 (5.5분까지 허용)', hw.length >= 1 && hw.every(r => min(r.res.timeFrames) >= 3 && min(r.res.timeFrames) <= 5.5), hw.map(r => min(r.res.timeFrames).toFixed(1)).join(', '));
+  check('어려움: 진 판은 목숨 1개로 게임 오버 (쓰러짐 1, 별 0)', he.filter(r => !r.res.cleared).every(r => r.res.deaths === 1 && r.res.stars === 0));
+  const hk = sel('hard', 'kid');
+  check('어려움 + kid: 모두 이기지는 못함 (사람 속도로는 어려움)', hk.length === 2 && wins(hk).length <= 1, hk.map(fmt).join(' | '));
+  // Z 연타만 하는 봇: 어려움에서 절반 이상 못 깸 (예전에는 6/6 클리어, 쓰러짐 0)
+  const hm = sel('hard', 'mash');
+  check(`어려움 + Z 연타만 하는 봇(피하기·스킬·점프 없음): ${hm.length}판 중 ${wins(hm).length}판만 클리어 (절반 이하 — 무사망 클리어 불가)`, hm.length === 6 && wins(hm).length <= 3, hm.map(fmt).join(' | '));
+  // 점수: 서버 상한(99999) 한참 아래 (정직한 최고 점수)
+  const top = Math.max(...results.map(r => r.res.score));
+  console.log(`  정직한 플레이(봇)에서 관찰된 최고 점수: ${top}  (서버 상한 99999)`);
+  check('봇이 낸 최고 점수가 서버 상한(99999)보다 한참 낮음 (≤ 60000)', top <= 60000, String(top));
 }
 
 finish('playthrough');
