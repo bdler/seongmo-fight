@@ -96,12 +96,13 @@ const CFG = {
   comboWindow: 90,           // 콤보 유지 프레임
   breakReminderMinutes: 30,  // 휴식 알림
   difficulty: {
-    easy:   { label:'쉬움',   desc:'게임 오버가 없어요!',  dmgTaken:0.5, enemyHp:0.8, enemySpeed:0.9, windupMul:1.3, lives:Infinity, revivePenalty:0.1, maxAttackers:1 },
-    normal: { label:'보통',   desc:'목숨 3개',            dmgTaken:1.0, enemyHp:1.0, enemySpeed:1.0, windupMul:1.0, lives:3,        revivePenalty:0,   maxAttackers:2 },
-    hard:   { label:'어려움', desc:'목숨 1개, 도전!',      dmgTaken:1.5, enemyHp:1.3, enemySpeed:1.1, windupMul:0.8, lives:1,        revivePenalty:0,   maxAttackers:3 },
+    easy:   { label:'쉬움',   desc:'게임 오버가 없어요!',  dmgTaken:0.5, enemyHp:0.8, enemySpeed:0.9, windupMul:1.3, lives:Infinity, revivePenalty:0.1, maxAttackers:1, poise:0 },
+    normal: { label:'보통',   desc:'목숨 3개',            dmgTaken:1.0, enemyHp:1.0, enemySpeed:1.0, windupMul:1.0, lives:3,        revivePenalty:0,   maxAttackers:2, poise:0 },
+    hard:   { label:'어려움', desc:'목숨 1개, 도전!',      dmgTaken:1.7, enemyHp:1.0, enemySpeed:1.1, windupMul:0.8, lives:1,        revivePenalty:0,   maxAttackers:3, poise:0.5 },
   },
 };
 ```
+`poise`(0~1)는 **일반 적의 windup 후반 몇 %** 동안 경직을 무시(슈퍼아머)하는 비율입니다 — 어려움에서 Z 연타만으로 적을 계속 경직시켜 이기는 것을 막습니다. `Game.diff.poise` 는 항상 0~1 숫자(없거나 잘못된 값이면 0).
 
 ### 3-3. `Game` (전역 상태, 단일 객체)
 
@@ -312,7 +313,7 @@ PLAYER_DEF                // 데이터 테이블 (스탯/콤보/스킬 수치 �
 
 ```js
 ENEMY_DEFS                           // 데이터 테이블
-Enemies.spawn(type, x, y, opts?)     // 엔티티 생성 + Entities.add + 반환. opts: { drop:true(위에서 떨어지며 등장), hpMul, minion:true }
+Enemies.spawn(type, x, y, opts?)     // 엔티티 생성 + Entities.add + 반환. opts: { drop:true(위에서 떨어지며 등장), hpMul, minion:true, hunt:true(처음부터 추격) }
 Enemies.aliveCount()                 // 살아있는 적 수 (보스·소환수 포함)
 Enemies.clear()                      // 모든 적/마커 제거 + Game.boss = null
 ```
@@ -322,15 +323,17 @@ Enemies.clear()                      // 모든 적/마커 제거 + Game.boss = n
 - **AI 는 상태 머신** (`idle → chase → windup → attack → recover`), **예고(windup) 동작이 반드시 먼저 보여야 함**:
   머리 위 `!` 표시 + 몸이 움찔/번쩍. windup 프레임 = `def.windup × Game.diff.windupMul`, **어떤 난이도에서도 24프레임 미만 금지.**
 - **동시 공격자 제한:** `Game.diff.maxAttackers` 명을 넘어 동시에 `windup/attack` 상태가 되지 않게 한다 (나머지는 맴돌며 대기). 접촉만으로는 피해 없음.
+- **poise:** 일반 적은 windup 의 마지막 `Game.diff.poise` 비율 동안 `superArmor`(맞아도 피해는 받지만 경직·넉백 없음). 어려움(0.5)만 해당.
+- **피격 번쩍임 제한:** 한 적이 하얗게 번쩍이는 것은 20프레임에 1번(초당 3회 이하, WCAG 2.3.1). 큰 적(보스)은 흰 실루엣 대신 옅은 색조. `FX.reduceMotion` 이면 번쩍임 없음.
 - 맞으면(`stun`) 움찔·번쩍·넉백(커널 처리). 죽으면 `onDeath`: `FX.burst`(별+사탕)·효과음 `enemyDie`·`removeT≈22`, 죽음 연출 그림. **아이템 드롭은 모듈이 하지 않음** (stage 가 `enemyKilled` 로 처리).
 - 적끼리 겹치지 않게 약한 밀어내기, 플레이어가 죽어 있으면 배회/대기.
 
 | type | 이름 | HP | 공격력 | 속도 | windup | 행동 | 점수 |
 |------|------|----|--------|------|--------|------|------|
-| `slime` | 사탕 슬라임 | 20 | 5 | 1.2 | 30 | 천천히 다가와 짧은 박치기(작게 웅크렸다 튀어나감) | 100 |
-| `soldier` | 장난감 병정 | 35 | 8 | 1.6 | 36 | 사거리 안에서 창 찌르기(앞으로 길게). 가까이서 맴돌며 간격 유지 | 200 |
-| `cloud` | 심술 구름 | 25 | 8 | 1.0 | 50 | `noGravity`, 공중(z≈90)에 떠서 플레이어 위치로 이동 → **바닥에 번개 그림자 마커를 먼저 표시**(≥45f) → 낙뢰(원형 판정). 맞으면 살짝 아래로 내려옴 | 200 |
-| `jellyKing` | 젤리 대왕(보스) | 300 | 10~15 | 1.0 | 패턴별 | `boss:true, heavy:true`. 아래 3패턴을 순환 | 3000 |
+| `slime` | 사탕 슬라임 | 30 | 7 | 1.2 | 30 | 천천히 다가와 짧은 박치기(작게 웅크렸다 튀어나감) | 100 |
+| `soldier` | 장난감 병정 | 54 | 11 | 1.6 | 36 | 사거리 안에서 창 찌르기(앞으로 길게). 가까이서 맴돌며 간격 유지 | 200 |
+| `cloud` | 심술 구름 | 38 | 10 | 1.0 | 50 | `noGravity`, 공중(z≈90)에 떠서 플레이어 위치로 이동 → **바닥에 번개 그림자 마커를 먼저 표시**(≥45f) → 낙뢰(원형 판정). 맞으면 살짝 아래로 내려옴 | 200 |
+| `jellyKing` | 젤리 대왕(보스) | 760 | 12 (찍기 18, 돌진 ≈14) | 1.0 | 패턴별 | `boss:true, heavy:true`. 아래 3패턴을 순환 | 3000 |
 
 **보스 패턴** (패턴 사이 `recover` 60f 이상 — 반격 타이밍. 패턴 중에는 `superArmor`, 그 외 `stun` 가능):
 1. **점프 찍기:** 웅크림(예고) → 높이 점프 → 플레이어 위치에 **착지 마커(≥45f 전부터 표시)** → 착지 충격파(원형 판정, `shake`)
@@ -343,8 +346,8 @@ Enemies.clear()                      // 모든 적/마커 제거 + Game.boss = n
 
 ```js
 STAGES                                   // 데이터 테이블 (방 목록·웨이브)
-Stage.start({ difficulty, nickname, stageIndex=0 })   // 새 런 시작: Game.resetRun → Entities.clear → FX.clear → Enemies.clear → Player.create → 첫 방 → Game.setScene('play')
-Stage.dropPickup(x, y, type)             // type: 'candy'(HP 회복 20) | 'coin'(+50 점)
+Stage.start({ difficulty, nickname, stageIndex=0, roomIndex=0 })   // 새 런 시작(roomIndex 로 중간 방부터 시작 가능): Game.resetRun → Entities.clear → FX.clear → Enemies.clear → Player.create → 첫 방 → Game.setScene('play')
+Stage.dropPickup(x, y, type)             // type: 'candy'(HP 회복 40) | 'coin'(+50 점)
 Stage.drawBackground(ctx)                // 카메라 변환 안에서 호출됨
 Stage.drawOverlay(ctx)                   // 화면 좌표계: GO ▶, 방 이름 배너, 페이드, 튜토리얼 힌트, 보스 경고
 Stage.calcStars({cleared, deaths})       // 0~3
@@ -356,21 +359,25 @@ Scenes.play = { enter, exit, update, draw }
 - `Game.stage` (이름·방 번호·방 이름) 를 항상 최신으로 유지 (HUD 가 표시).
 - **스테이지 1 '사탕 숲'** (데이터로 정의, `STAGES[0]`) — 5분~8분 분량:
 
-| 방 | 이름 | 너비 | 웨이브 |
+| 방 | 이름 | 너비 | 웨이브 (모든 일반 방 클리어 시 사탕 보상) |
 |----|------|------|--------|
-| 1 | 숲 입구 | 960 | ① 슬라임×2 ② 슬라임×3 (+튜토리얼 힌트: 이동/공격/점프) |
-| 2 | 달콤한 오솔길 | 1920 | ① 슬라임×3 ② 슬라임×2 + 병정×1 · 클리어 보상 사탕 |
-| 3 | 초콜릿 시냇가 | 1920 | ① 병정×2 + 슬라임×2 ② 구름×2 + 슬라임×2 |
-| 4 | 젤리 동굴 입구 | 1920 | ① 구름×1 + 병정×2 ② 슬라임×3 + 병정×2 + 구름×1 · 클리어 보상 사탕 |
-| 5 | 젤리 대왕의 방 | 960 | 보스 (등장 연출 + "⚠ 보스 등장!" 경고, 보스 체력 50% 때 사탕 1개 드롭) |
+| 1 | 숲 입구 | 960 | ① 슬라임×3 ② 슬라임×4 (+튜토리얼 힌트: 이동/공격/점프) |
+| 2 | 달콤한 오솔길 | 1920 | ① 슬라임×4 ② 슬라임×3+병정×1 ③ 슬라임×2+병정×2 |
+| 3 | 초콜릿 시냇가 | 1920 | ① 병정×2+슬라임×3 ② 구름×2+슬라임×3 ③ 병정×2+구름×1+슬라임×2 |
+| 4 | 솜사탕 언덕 | 1920 | ① 슬라임×4+구름×1 ② 병정×3+슬라임×2 ③ 구름×2+병정×2+슬라임×2 |
+| 5 | 젤리 동굴 입구 | 1920 | ① 구름×1+병정×2+슬라임×2 ② 슬라임×3+병정×2+구름×1 ③ 병정×3+구름×2+슬라임×2 |
+| 6 | 반짝 수정 동굴 | 1920 | ① 병정×2+구름×2+슬라임×3 ② 슬라임×4+병정×3+구름×2 ③ 병정×3+구름×2+슬라임×3 |
+| 7 | 젤리 대왕의 방 | 960 | 보스 (등장 연출 + "⚠ 보스 등장!" 경고, 보스 체력 50% 때 사탕 1개 드롭) |
 
-- **튜토리얼 힌트:** 방 1 에서 월드 좌표에 떠 있는 안내 문구 — `Game.touch` 이면 "버튼" 표현, 아니면 키 이름 표현. 첫 적을 처음 때리면 사라지는 식으로.
-- **점수:** 처치 시 `e.score × (1 + min(Game.combo.count, 30) × 0.02)` 를 `Game.addScore`. 방 클리어 +300, 스테이지 클리어 +1000, 무사망 클리어 +500.
-- **드롭:** `enemyKilled` 에서 코인 35%, 사탕 12% (보스 제외). 픽업은 `kind:'pickup'` 엔티티(둥둥 떠다님), 플레이어가 가까이(|dx|<36, |dy|<30) 오면 획득 + `Events 'pickup'`. 일정 시간 후 사라짐(깜빡임 경고).
-- **플레이어 사망 처리 (`playerDied` 수신):** `Game.deaths++`, 90f 후 → `Game.lives` 가 남아 있으면(Infinity 포함) `lives--`(유한일 때만)·`Player.revive`·`Game.diff.revivePenalty` 만큼 점수 차감(`score × penalty`), 아니면 게임 오버 → `Game.result` (`cleared:false`) 채우고 `Game.setScene('result')`. 이벤트 `playerRevived`/`gameOver`.
+일반 몬스터는 모두 92마리. 방 진행도(HUD 점)는 `STAGES[0].rooms.length` 에서 가져오므로 방을 늘려도 UI 는 수정할 필요가 없습니다. 방 목록은 `STAGES` 데이터만 고치면 됩니다.
+
+- **튜토리얼 힌트:** 방 1 에서 월드 좌표에 떠 있는 안내 카드(이동/공격/점프) — `Game.touch` 이면 "버튼" 표현, 아니면 키 이름 표현. **카드마다 그 행동을 실제로 해 봐야 사라진다.** 방 2 이후 첫 스킬이 준비되면 "A 를 눌러 보세요" 팁을 한 번 보여준다.
+- **점수:** 처치 시 `e.score × (1 + min(Game.combo.count, 30) × 0.02)` 를 `Game.addScore`. 방 클리어 +300, 스테이지 클리어 +1000, 무사망 클리어 +500. 정직한 플레이의 최고 점수는 약 3만 점(서버 상한 99999).
+- **드롭:** `enemyKilled` 에서 코인 35%, 사탕 15% (보스 제외). 사탕은 HP 가 가득이면 먹지 않고 그대로 남는다(가득일 때는 사라지는 시간도 멈춤). 픽업은 `kind:'pickup'` 엔티티(둥둥 떠다님), 플레이어가 가까이(|dx|<36, |dy|<30) 오면 획득 + `Events 'pickup'`. 일정 시간 후 사라짐(깜빡임 경고).
+- **플레이어 사망 처리 (`playerDied` 수신):** `Game.deaths++`, 90f 후 → `Game.lives` 가 남아 있으면(Infinity 포함) `Player.revive` (목숨 차감은 **사망한 순간** `lives--`, 유한일 때만)·`Game.diff.revivePenalty` 만큼 점수 차감(`score × penalty`), 아니면 게임 오버 → `Game.result` (`cleared:false`) 채우고 `Game.setScene('result')`. 이벤트 `playerRevived`/`gameOver`.
 - **결과(`Game.result`):**
 ```js
-{ cleared: bool, score, stars: 0~3, timeFrames, kills, deaths, maxCombo, difficulty, stageId, stageName, rooms: 클리어한 방 수 }
+{ cleared: bool, score, stars: 0~3, timeFrames, kills, deaths, maxCombo, difficulty, stageId, stageName, rooms: 클리어한 방 수(중간 방 시작 시 건너뛴 방은 제외) }
 ```
   별: 클리어 시 1개 + 사망 ≤2회면 +1 + 사망 0회면 +1 (게임 오버면 0개).
 - **배경:** 이미지 없이 Canvas 로 '사탕 숲' (하늘 그라디언트, 멀리 산/구름 패럴랙스, 막대사탕 나무·젤리 바위·솜사탕 덤불 — 고정 시드로 위치 고정, 바닥 타일). 보스방은 어둡고 붉은 분위기로.
@@ -387,8 +394,8 @@ UI.showRanking()  UI.hideRanking()
 
 - DOM 오버레이는 `#ui`(타이틀/결과/일시정지/랭킹/토스트), 터치 컨트롤은 `#touch` 안에 JS 로 생성. (index.html 은 수정하지 않음)
 - **화면 크기:** `#app` 은 16:9 레터박스. CSS 변수 `--u`(= 캔버스 실제 폭/960 px)를 `resize` 때 갱신해 오버레이 글자/버튼 크기를 비례 조정. 화면이 작아도 버튼은 **최소 44px**.
-- **타이틀:** 게임 제목, 닉네임 입력(2~8자, 마지막 값 `Store` 에 기억, `Server.validateNickname` 으로 검증·오류 문구 표시), 난이도 3버튼(라벨+설명, `CFG.difficulty`), **「시작!」 버튼**(`SFX.init()` + `Music.play` + `Stage.start`), 「조작법」 패널, 「랭킹」 버튼, 음소거 토글. 캔버스에는 귀여운 애니메이션 배경(`Scenes.title.update/draw`).
-- **HUD(캔버스):** 좌상단 HP바(숫자 포함)+목숨(하트, 쉬움은 ∞), 하단 좌측 스킬 3개 아이콘(키 표시 + 쿨타임 부채꼴/숫자, 준비되면 반짝), 우상단 점수, 콤보(`3 HIT!` 크게, 콤보가 쌓일수록 커짐), 상단 중앙 `Game.stage.roomName`+방 진행도(●○○○○), 하단 중앙 보스 체력바(`Game.boss`, 이름 `젤리 대왕`), 우상단 작은 일시정지/음소거 버튼(DOM).
+- **타이틀:** 게임 제목, 닉네임 입력(2~8자, 마지막 값 `Store` 에 기억, `Server.validateNickname` 으로 검증·오류 문구 표시), 난이도 3버튼(라벨+설명, `CFG.difficulty`), **「시작!」 버튼**(`SFX.init()` + `Music.play` + `Stage.start`). 닉네임 라벨은 **「별명」**, 🎲 버튼이 `Server.randomNickname()` 으로 안전한 별명을 채우고, 저장된 별명이 없으면 미리 채워 둔다(바로 시작 가능), 「조작법」 패널, 「랭킹」 버튼, 음소거 토글. 캔버스에는 귀여운 애니메이션 배경(`Scenes.title.update/draw`).
+- **HUD(캔버스):** 좌상단 HP바(숫자 포함)+목숨(하트, 쉬움은 ∞), **그 아래 스킬 3개 아이콘**(키 표시 + 쿨타임 부채꼴/숫자, 준비되면 반짝), 우상단 점수, 콤보(`3 HIT!` 크게, 콤보가 쌓일수록 커짐), 상단 중앙 `Game.stage.roomName`+방 진행도 점(`roomCount` 개), **상단 중앙 보스 체력바**(`Game.boss`, 이름 `젤리 대왕`, 점수 패널과 겹치지 않음, 보스 경고 배너가 뜨는 동안은 숨김), 우상단 작은 일시정지/음소거 버튼(DOM). **캐릭터가 서는 바닥 띠(y 330~500)는 HUD 로 가리지 않는다** — 불투명 HUD 픽셀이 이 구간에 없다는 것을 테스트가 확인.
 - **일시정지:** `Escape`/`KeyP`/버튼 → `Game.pause(true)`, DOM 오버레이(계속하기/다시 시작/처음으로). `windowBlur` 이벤트 시 play 씬이면 자동 일시정지.
 - **결과 화면:** 별 1~3개 순서대로 팝(효과음 `star`), 점수 내역(처치/콤보/클리어 보너스는 `Game.result` 필드 기준으로 표시), 게임 오버면 "아쉬워요! 다시 도전!" 처럼 **격려 문구**. 열리자마자 `Server.saveScore` 호출 → 상태 문구("저장 중…" → "저장됐어요!" / "내 기기에만 저장됐어요" / "저장 실패 — 다시 시도" 버튼), 이어서 `Server.getTopScores(10)` 로 랭킹 표시(내 닉네임 강조). 버튼: 「다시 하기」(같은 난이도로 `Stage.start`), 「처음으로」.
 - **휴식 알림:** `Game.frame` 이 아닌 *실제 play 씬 진행 시간* 이 `CFG.breakReminderMinutes` 를 넘으면 `UI.toast('잠깐 쉬어요! 눈과 손을 풀어 볼까요? 🙆')` (런당 1회 반복 가능).
@@ -399,17 +406,18 @@ UI.showRanking()  UI.hideRanking()
 
 ```js
 Server.available                         // google.script.run 사용 가능 여부
-Server.validateNickname(raw)             // → { ok:true, value } | { ok:false, error:'한글 문구' }   (2~8자, 한글/영문/숫자/공백, 금칙어 포함 여부)
-Server.saveScore({ nickname, score, stageId, difficulty, stars, cleared, timeSec })   // → Promise<{ ok:true, source:'server'|'local', rank? }>  (절대 reject 하지 않고, 서버 실패 시 local 폴백 + warning)
-Server.getTopScores(n=10, difficulty?)   // → Promise<Array<{ rank, nickname, score, stars, difficulty }>>  (실패 시 로컬 랭킹)
+Server.validateNickname(raw)             // → { ok:true, value } | { ok:false, error:'한글 문구' }   (2~8자, 한글/영문/숫자/공백, 보이지 않는 문자 제거·정규화 후 금칙어 검사. 호출자는 정리된 r.value 를 써야 함)
+Server.randomNickname()                  // → '말랑젤리37' 처럼 항상 validateNickname 을 통과하는 안전한 별명 (타이틀 화면에서만 호출 — 게임 난수열을 소비함)
+Server.saveScore({ nickname, score, stageId, difficulty, stars, cleared, timeSec })   // → Promise<{ ok:true, source:'server'|'local', rank? }>  (절대 reject 하지 않음. 서버 실패 시 `{ ok:true, source:'local', warning:'server_failed', retryable, error }` 로 로컬 폴백 — `retryable:false` 는 서버가 기록 자체를 거부한 경우(재시도 무의미). 서버가 아예 없으면 `warning:'no_server'`)
+Server.getTopScores(n=10, difficulty?)   // → Promise<Array<{ rank, nickname, score, stars, difficulty }>>  (실패 시 로컬 랭킹. 배열의 비열거 속성 `rows.source` 가 'server'|'local' — slice/map 하면 사라지므로 받은 배열에서 바로 읽을 것)
 Server.call(fn, ...args)                 // google.script.run → Promise (10초 타임아웃). 서버 없으면 reject
 ```
 
 - **로컬 폴백:** `Store` 의 `'scores'` 키에 상위 50개를 보관. 서버가 없거나 실패하면 거기에 저장/조회.
 - **`Code.gs`:** `doGet`, `include`, `saveScore(payload)`, `getTopScores(n, difficulty)`.
   - 스프레드시트 자동 준비: 스크립트 속성 `SHEET_ID` → 없으면 컨테이너 바인딩 시트 → 없으면 새로 만들어 ID 저장. `Scores` 시트가 없으면 만들고 헤더(`시간|닉네임|점수|별|난이도|스테이지|시간(초)`) 작성.
-  - **검증:** 닉네임 정리(공백/길이/허용문자/금칙어/**앞의 `= + - @` 제거 — 시트 수식 주입 방지**), 점수 `0~999999` 정수, 별 `0~3`, 난이도 화이트리스트, `timeSec` 범위. 잘못되면 한글 메시지로 throw.
-  - `LockService` 로 동시 쓰기 보호, `CacheService` 로 같은 닉네임·점수 10초 내 중복 저장 차단, 랭킹 조회 결과는 30초 캐시(저장 시 무효화).
+  - **검증:** 닉네임 정리(공백/길이/허용문자/금칙어/**앞의 `= + - @` 제거 — 시트 수식 주입 방지**), 점수 `0~99999` 정수, 별 `0~3`(**별>0 이면 cleared 여야 함, cleared 면 `timeSec ≥ 45`**), 난이도·`stageId` 화이트리스트, `timeSec` 범위. 잘못되면 한글 메시지로 throw. **닉네임 정규화·금칙어 목록은 `Code.gs` 와 `js_server.html` 이 글자 그대로 같아야 하며(테스트가 비교)**, 보이지 않는 한글 채움 문자(U+3164)·제로폭 문자 제거, 자모 분해·반복 글자 압축 후 비교, 짧고 모호한 단어는 이름 전체가 일치할 때만 차단.
+  - `LockService` 로 동시 쓰기 보호(락 보유 시간을 줄이려고 순위 계산은 락 밖), `CacheService` 로 같은 닉네임·점수 10초 내 중복 저장 차단, 분당 저장 횟수 상한(버스트 가드, 약 300회), 랭킹 조회 결과는 30초 캐시(저장 시 무효화). 시트는 닉네임/스테이지 열을 텍스트 서식으로 미리 3000줄 확보.
   - `google.script.run` 으로 `Date` 를 돌려주지 않는다. 닉네임별 최고 점수만 랭킹에 표시.
   - **개인정보:** 닉네임 외에는 수집하지 않는다. `Session.getActiveUser()` 등 사용자 식별 API 금지.
 - `src/appsscript.json`: `timeZone Asia/Seoul`, `runtimeVersion V8`, `webapp {executeAs: USER_DEPLOYING, access: ANYONE_ANONYMOUS}`.
@@ -458,9 +466,13 @@ STAGES = [{ id:'stage1', name:'사탕 숲', theme:'candy',
 
 ## 9. 밸런스 기준 (어린이 눈높이)
 
-- 플레이어 HP 100. 보통 난이도에서 **3~4번 맞으면 위험**, 몬스터 하나에 **기본 공격 3~5번**.
-- 기본 콤보 한 바퀴(1·1·1.5 배)로 슬라임(20)은 약 1바퀴, 병정(35)은 약 2바퀴.
-- 한 방 20~40초, 던전 전체 5~8분. 쉬움 난이도는 **죽어도 즉시 부활**(게임 오버 없음).
+실제 봇(숙련/보통/초보 프로파일)으로 측정해 맞춘 값입니다. 숫자는 `src/js_enemies.html`(`ENEMY_DEFS`), `src/js_stage.html`(`STAGES`, `STAGE_TUNE`), `src/js_core.html`(`CFG.difficulty`)에서 바꿉니다.
+
+- 플레이어 HP 100. 보통 난이도에서 봇이 한 판에 맞는 횟수는 **약 8~20번** (사람은 봇보다 회피가 서툴 수 있으니 실제로는 더 많이 맞을 수 있음).
+- 던전 전체 **4~7분**: 쉬움/초보 봇 약 6~7분, 보통/보통 봇 약 4.5분, 어려움/숙련 봇 약 4.5분. 사람 아이는 봇보다 느리므로 더 길어질 수 있음.
+- **쉬움**은 게임 오버가 없고 사실상 실패하지 않음. **보통**은 초보 봇이 가끔 쓰러짐(약 1.2회). **어려움**은 숙련 봇도 약 35% 질 정도로 어렵고, Z 연타만 하는 봇은 이기지 못함.
+- 쉬움 첫 판이 기본값(저장된 선택이 없을 때)이라 처음 하는 아이가 게임 오버를 겪지 않음.
+- 방 하나 약 30~60초, 보스전 약 55~65초.
 
 ## 10. 테스트 규약
 
@@ -507,3 +519,14 @@ core 구현 결과, 계약과 달라지거나 **추가된** 부분입니다. 다
 2. **ui:** `#game` 에 명시적 CSS 크기 부여(`#app` 16:9 레터박스 안에서 `width:100%; height:auto; display:block`), `--u` 는 CSS 폭 기준으로 계산.
 3. **ui:** `KeyM` 음소거 토글은 **UI 에서 한 곳에서만** 처리. 터치 컨트롤은 `touchDetected` 이벤트(또는 `Game.touch` 폴링)로 표시.
 4. **ui:** 시작 시 포커스가 남은 DOM 버튼을 `blur()` 하거나 숨김 (커널은 Space 의 `preventDefault` 를 INPUT/TEXTAREA/SELECT 외 모든 대상에 적용하므로, 포커스된 `<button>` 이 Space 에 반응하지 않게).
+
+**QA 수정 후 추가된 구현 노트**
+- `Loop.dpr` 는 이제 `window.devicePixelRatio` 가 아니라 **캔버스 백버퍼 배율** `clamp(캔버스 CSS 폭×dpr / 960, 1, 2)` (1/60 단위로 반올림)입니다. 소수일 수 있으므로 픽셀을 직접 읽을 때는 `x * Loop.dpr` 을 쓰세요(1280×720 에서 1.333). 1920×1080 창도 선명하게 그려집니다.
+- `Loop.draw` 는 매 프레임 시작에 `ctx.reset()`(없으면 `canvas.width = canvas.width`)으로 그리기 상태를 초기화합니다 — HUD/배경 그리기에서 예외가 나도 clip/save 가 새서 화면이 굳는 일이 없습니다.
+- 고정 타임스텝은 1.2ms 지터 스냅을 유지하되 **누적 오차(drift)** 를 갚아서 56~64Hz 화면에서도 초당 틱이 60±1% 입니다. (144Hz 처럼 60의 배수가 아닌 화면에서는 프레임당 틱 수가 고르지 않음 — 렌더 보간은 없음)
+- `Input`: **Ctrl/Cmd/Alt 가 눌린 keydown 은 방향키 외에는 기록하지 않습니다**(Ctrl+D 가 궁극기로 발동하던 문제). 그 순간 눌려 있던 일반 키는 해제됩니다.
+- `FX.reduceMotion` 기본값은 OS 의 `prefers-reduced-motion` 이고, `Store 'reduceMotion'` 에 저장된 값이 있으면 그것이 우선합니다(UI 토글이 `Store.set` + `FX.reduceMotion = v`). 켜지면 화면 흔들림·번쩍임·흰 실루엣이 꺼집니다.
+- `Events.emit` 의 핸들러 예외는 `Debug.logOnce` 로 (이벤트 이름+메시지당 1번) 기록됩니다.
+- 빌드 도구(`tools/build-local.mjs`)는 파일 간 최상위 이름 중복, 속성이 붙은 `<script>`, 빠지거나 중복된 include, `js_core` 가 처음·`js_main` 이 마지막이 아닌 경우를 모두 실패로 처리합니다. `--check` 는 `dist/index.html` 이 `src/` 를 새로 빌드한 것과 같은지 확인하고, `tools/test-all.mjs` 는 이 검사를 먼저 해서 낡았으면 `npm run build` 를 안내하고 멈춥니다. **`src/` 를 고친 뒤에는 `npm run build` 로 `dist/index.html` 도 다시 만들어 커밋하세요.**
+- 시각 접근성: `<canvas>` 에 `role="img"` + `aria-label`, 스킬/음소거 버튼은 `aria-label`/`aria-pressed`, 상태 안내용 `#ui-live`(aria-live polite)가 있습니다.
+- 알려진 한계: 144Hz 에서의 미세한 끊김, 소프트웨어 렌더링(GPU 없음)에서 1080p 는 약 33fps, 소리는 사람이 직접 들어 보지 못함, 실제 Apps Script/실기기 터치는 미검증.
