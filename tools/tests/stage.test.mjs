@@ -244,7 +244,7 @@ await section('웨이브', async () => {
   await step(page, 3);
   q = await snapOf();
   check('웨이브 갭 뒤에 웨이브 2 가 시작됨 (waveIndex 1, 슬라임 4마리 대기열)', q.waveIndex === 1 && q.queue >= 3 && q.state === 'fight', JSON.stringify(q));
-  check("'다음 물결!' 안내가 뜸", (await snapOf()).banner === '다음 물결!');
+  check("'또 나타났어요!' 안내가 뜸 (예전 '다음 물결!' 의 '물결' 은 글을 막 배우는 친구에게 어려운 낱말)", (await snapOf()).banner === '또 나타났어요!');
   await step(page, 200);
   const types2 = await ev(() => T.spawns.map(s => s.type));
   check('웨이브 2 까지 슬라임 7마리 (3 + 4)', eq(types2, ['slime', 'slime', 'slime', 'slime', 'slime', 'slime', 'slime']), JSON.stringify(types2));
@@ -356,7 +356,7 @@ await section('클리어와 전환', async () => {
   await step(page, 95 + 40);                              // fight 중 오른쪽 끝에 서 보기
   let q = await snapOf();
   check('클리어 전에는 오른쪽 끝에 서도 안 넘어감 (부정)', q.state === 'fight' && q.roomIndex === 0, JSON.stringify(q));
-  check('오른쪽 끝에서 "먼저 친구들을 물리쳐요!" 안내', await ev(() => FX.popups.some(p => p.text.includes('먼저'))));
+  check('오른쪽 끝에서 "몬스터를 다 물리쳐야 가요!" 안내 (예전 "먼저 친구들을 물리쳐요!")', await ev(() => FX.popups.some(p => p.text === '몬스터를 다 물리쳐야 가요!')));
   check('아직 방이 안 깨졌으니 roomCleared 이벤트 없음', (await ev(() => T.events.filter(e => e.n === 'roomCleared').length)) === 0);
   await ev(() => { Game.player.x = 200; T.sfx.length = 0; Game.score = 0; });
   const f = await ev(() => T.clearRoom());
@@ -522,7 +522,7 @@ await section('보스와 승리', async () => {
   const r = await ev(() => ({ scene: Game.scene, res: Game.result, st: Stage.state, evs: T.events.filter(e => e.n === 'stageCleared').length, go: T.events.filter(e => e.n === 'gameOver').length, same: T.events.find(e => e.n === 'stageCleared')?.d === Game.result, active: Stage.snapshot().active, frame: Game.frame, kills: Game.kills, score: Game.score, combo: Game.combo.max }));
   check('180프레임째에 result 씬으로 전환, stageCleared 이벤트 한 번(게임오버 아님)', r.scene === 'result' && r.evs === 1 && r.go === 0 && r.same, JSON.stringify({ scene: r.scene, evs: r.evs, go: r.go }));
   const keys = Object.keys(r.res || {}).sort();
-  check('Game.result 모양: 계약서의 키 11개 그대로', eq(keys, ['cleared', 'deaths', 'difficulty', 'kills', 'maxCombo', 'rooms', 'score', 'stageId', 'stageName', 'stars', 'timeFrames']), keys.join(','));
+  check('Game.result 모양: 계약서의 키 11개 + startRoom(이 판을 시작한 방, 처음부터 한 판은 0)', eq(keys, ['cleared', 'deaths', 'difficulty', 'kills', 'maxCombo', 'rooms', 'score', 'stageId', 'stageName', 'stars', 'startRoom', 'timeFrames']) && r.res.startRoom === 0, keys.join(','));
   const x = r.res;
   check('결과 값: cleared / 별 3 / 사망 0 / 방 7 / 난이도·스테이지 / 점수·처치·콤보가 Game 과 같음',
     x.cleared === true && x.stars === 3 && x.deaths === 0 && x.rooms === 7 && x.difficulty === 'normal' && x.stageId === 'stage1' && x.stageName === '사탕 숲' &&
@@ -747,7 +747,7 @@ await section('보통 난이도 죽음', async () => {
   check('게임 오버 결과: cleared:false, 별 0, 사망 3, 방 0, 점수/처치 반영', go.res && go.res.cleared === false && go.res.stars === 0 && go.res.deaths === 3 && go.res.rooms === 0 && go.res.score === 1000 && go.res.stageId === 'stage1' && go.res.difficulty === 'normal', JSON.stringify(go.res));
   check('게임오버 때 목숨 0, 판 음악(stage/boss)이 멈춤 (결과 화면이 다른 곡을 틀 수는 있음)', go.lives === 0 && go.music !== 'stage' && go.music !== 'boss', JSON.stringify({ lives: go.lives, music: go.music }));
   const keys = Object.keys(go.res || {}).sort();
-  check('게임오버 결과도 같은 11개 키', eq(keys, ['cleared', 'deaths', 'difficulty', 'kills', 'maxCombo', 'rooms', 'score', 'stageId', 'stageName', 'stars', 'timeFrames']));
+  check('게임오버 결과도 같은 키 (11개 + startRoom 0)', eq(keys, ['cleared', 'deaths', 'difficulty', 'kills', 'maxCombo', 'rooms', 'score', 'stageId', 'stageName', 'stars', 'startRoom', 'timeFrames']) && go.res.startRoom === 0);
   // 결과 씬 이후에 늦게 온 playerDied 는 무시 (부정)
   const late = await ev(() => { Events.emit('playerDied', Game.player); Events.emit('enemyKilled', { score: 100, type: 'slime', x: 1, y: 400 }); Loop.step(5); return { d: Game.deaths, s: Game.score, r: Game.result.deaths }; });
   check('런이 끝난 뒤 늦게 도착한 playerDied/enemyKilled 는 무시', late.d === 3 && late.s === 1000 && late.r === 3, JSON.stringify(late));
@@ -1298,6 +1298,145 @@ await section('첫 스킬·첫 ! 팁 (KIDS-12)', async () => {
   await step(page, 500);
   const again = await ev(() => { let n = 0; for (let i = 0; i < 400; i++) { Loop.step(1); if (Stage.snapshot().tip === 'bang') n++; } return n; });
   check("'!' 팁은 한 번만 (끝난 뒤 다시 안 뜸)", again === 0);
+});
+
+// ===========================================================================
+// 폴리시 라운드: 이 방부터 다시 (결과 표시) · 보스방 팁 · 말 · HUD 이름표와 안 겹침
+// ===========================================================================
+await section('게임 오버 결과: rooms(깬 방 수) + startRoom 이 "이 방부터 다시" 의 방 번호와 맞음 (POLISH-2)', async () => {
+  for (const k of [0, 1, 3, 6]) {
+    await NEWGAME('hard', 90 + k);
+    const at = await ev(k => {
+      T.toRoom(k); T.run(() => Stage.state === 'fight', 400, false);
+      const r = { room: Stage.roomIndex, state: Stage.state };
+      T.die(); Loop.step(100);
+      r.scene = Game.scene; r.res = Game.result && JSON.parse(JSON.stringify(Game.result));
+      return r;
+    }, k);
+    check(`방 ${k} 의 싸움에서 쓰러져 게임 오버: rooms(깬 방 수) = ${k} = 쓰러진 방 번호, startRoom 0, cleared false`, at.state === 'fight' && at.room === k && at.scene === 'result' && at.res && at.res.rooms === k && at.res.startRoom === 0 && at.res.cleared === false, JSON.stringify(at));
+    // 그 값(시작한 방 + 깬 방 수)으로 이 방부터 다시 시작하면: 같은 방, 목숨 가득, 점수·처치·쓰러짐 0, 결과는 비어 있음
+    const back = await ev(r => {
+      Stage.start({ difficulty: 'hard', nickname: '시험', roomIndex: r.startRoom + r.rooms });
+      const sn = Stage.snapshot(), p = Game.player;
+      return { room: sn.roomIndex, start: sn.startRoom, cleared: sn.roomsCleared, state: sn.state, gs: Game.stage.roomIndex, name: Game.stage.roomName, lives: Game.lives, score: Game.score, kills: Game.kills, deaths: Game.deaths, combo: Game.combo.max, hp: p.hp, max: p.maxHp, dead: p.dead, res: Game.result, scene: Game.scene };
+    }, at.res);
+    check(`그 값으로 Stage.start({roomIndex:${k}}) → 방 ${k} intro 에서 시작, 목숨 1(어려움) 가득·점수/처치/쓰러짐/콤보 0·체력 가득·결과 비어 있음`, back.room === k && back.start === k && back.state === 'intro' && back.gs === k && back.lives === 1 && back.score === 0 && back.kills === 0 && back.deaths === 0 && back.combo === 0 && back.hp === back.max && !back.dead && back.res === null && back.scene === 'play' && back.cleared === 0, JSON.stringify(back));
+  }
+  // 방을 막 깬 뒤(clear 상태, 문 앞) 쓰러지면: 그 방은 깬 방이라 rooms = k+1 → "이 방부터" 는 다음 방 (쓰러진 방 번호 + 1)
+  await NEWGAME('hard', 99);
+  const cl = await ev(() => {
+    T.toRoom(2); T.clearRoom();
+    const r = { room: Stage.roomIndex, state: Stage.state };
+    T.die(); Loop.step(100);
+    r.scene = Game.scene; r.res = Game.result && JSON.parse(JSON.stringify(Game.result));
+    Stage.start({ difficulty: 'hard', nickname: '시험', roomIndex: r.res.startRoom + r.res.rooms }); r.after = Stage.roomIndex;
+    return r;
+  });
+  check('방 2 를 막 깬(clear) 문 앞에서 쓰러지면: rooms = 3 (깬 방), "이 방부터" 는 다음 방(번호 3) — 이미 깬 방을 또 하지 않음', cl.state === 'clear' && cl.room === 2 && cl.res.rooms === 3 && cl.res.startRoom === 0 && cl.after === 3, JSON.stringify(cl));
+});
+
+await section('이어서 한 판(roomIndex>0)의 결과는 startRoom 으로 표시됨 · 처음부터 한 판은 늘 0 (POLISH-2)', async () => {
+  // 보통: 방 4 부터 → 쓰러져 게임 오버(목숨 3개)
+  await NEWGAME('normal', 95, { roomIndex: 4 });
+  const a = await ev(() => ({ snap: Stage.snapshot(), lives: Game.lives, score: Game.score, deaths: Game.deaths, res: Game.result }));
+  check('roomIndex:4 로 시작: 목숨 3 가득, 점수 0, 결과 비어 있음, 시작한 방(startRoom) 4', a.snap.roomIndex === 4 && a.snap.startRoom === 4 && a.lives === 3 && a.score === 0 && a.deaths === 0 && a.res === null, JSON.stringify(a));
+  const g = await ev(() => {
+    T.run(() => Stage.state === 'fight', 400, false);
+    for (let i = 0; i < 3; i++) { T.die(); Loop.step(95); }
+    return { scene: Game.scene, res: Game.result && JSON.parse(JSON.stringify(Game.result)), evs: T.events.filter(e => e.n === 'gameOver').length };
+  });
+  check('이어서 한 판의 게임 오버 결과: startRoom 4, rooms 0 (이 판에서 깬 방), cleared false, gameOver 이벤트 1번', g.scene === 'result' && g.res.startRoom === 4 && g.res.rooms === 0 && g.res.cleared === false && g.res.deaths === 3 && g.evs === 1, JSON.stringify(g));
+  check('결과 키는 12개(startRoom 포함)이고 gameOver 이벤트의 데이터도 같은 결과', eq(Object.keys(g.res).sort(), ['cleared', 'deaths', 'difficulty', 'kills', 'maxCombo', 'rooms', 'score', 'stageId', 'stageName', 'stars', 'startRoom', 'timeFrames']) && await ev(() => T.events.find(e => e.n === 'gameOver').d === Game.result));
+  // 보스방부터 시작해 클리어: startRoom 6, rooms 1
+  await NEWGAME('normal', 83, { roomIndex: 6 });
+  const c = await ev(() => { T.run(() => !!Game.boss && !Game.boss.untargetable && Stage.state === 'fight', 600, false); T.hit(Game.boss); Loop.step(STAGE_TUNE.victory.total + 5); return Game.result && JSON.parse(JSON.stringify(Game.result)); });
+  check('이어서 한 판(보스방부터)을 클리어한 결과도 startRoom 6 으로 표시됨 (rooms 1)', c && c.cleared === true && c.startRoom === 6 && c.rooms === 1, JSON.stringify(c));
+  // 처음부터 한 판은 늘 startRoom 0: 클리어도, 직전에 이어서 한 판을 했어도
+  await NEWGAME('normal', 84);
+  check('이어서 한 판 바로 뒤의 처음부터 새 판은 startRoom 0 (이전 판 값이 남지 않음)', (await snapOf()).startRoom === 0 && (await snapOf()).roomIndex === 0);
+  await NEWGAME('normal', 85, { roomIndex: 0 });
+  check('roomIndex:0 을 직접 줘도 처음부터 한 판 (startRoom 0)', (await snapOf()).startRoom === 0);
+  const full = await ev(() => { T.toBossFight(); T.hit(Game.boss); Loop.step(STAGE_TUNE.victory.total + 5); return Game.result && JSON.parse(JSON.stringify(Game.result)); });
+  check('처음부터 끝까지 한 판의 클리어 결과는 startRoom 0, rooms 7 (랭킹에 올라감)', full && full.cleared === true && full.startRoom === 0 && full.rooms === 7, JSON.stringify(full));
+});
+
+await section('보스방에서 바로 시작해도 스킬 팁이 보스 체력바 위에 안 뜸 — 체력바가 보이는 동안 숨김 (POLISH-2)', async () => {
+  for (const touch of [false, true]) {
+    await NEWGAME('normal', 97, { roomIndex: 6 });
+    await ev(t => { Game.touch = t; }, touch);
+    const wait0 = await ev(() => T.run(() => Stage.state === 'fight' && !!Game.boss && !Game.boss.untargetable, 800, false));
+    const seen = await ev(() => {
+      let tip = 0, said = 0, bar = 0;
+      for (let i = 0; i < 450; i++) {
+        Loop.step(1);
+        if (Stage.snapshot().tip) tip++;
+        if (i % 15 === 0) { if (T.overlayTexts().some(x => x.includes('회오리'))) said++; }
+        if (Game.boss && Game.boss.maxHp > 0 && Stage.state !== 'intro') bar++;
+      }
+      const sk = Game.player.skills[0];
+      return { tip, said, bar, state: Stage.state, ready: sk.cd <= 0 || sk.cd };
+    });
+    check(`(${touch ? '터치' : '키보드'}) 보스방부터 시작해 싸우는 450프레임 동안 (보스 체력바가 보이는데) 스킬 팁이 안 뜨고 문구도 안 그려짐`, wait0 >= 0 && seen.bar >= 440 && seen.tip === 0 && seen.said === 0 && seen.state === 'fight', JSON.stringify(seen));
+  }
+  // 대조: 일반 방에서는 팁이 뜸 → 보스 체력바가 나타나는 동안엔 안 그려지고 사라지면 다시 그려짐 (동적)
+  await NEWGAME('normal', 98);
+  await ev(() => { Game.touch = false; T.toRoom(1); T.run(() => Stage.state === 'fight', 300, false); });
+  await step(page, 20);
+  check('(대조) 일반 방 2 의 싸움에서는 스킬 팁이 뜸', (await snapOf()).tip === 'skill' && (await ev(() => T.overlayTexts())).includes('를 눌러 회오리!'));
+  const dyn = await ev(() => {
+    Game.boss = { name: '젤리 대왕', hp: 300, maxHp: 300, boss: true };                  // 보스 체력바가 떠 있는 조건 (보스가 있고 intro 가 아님)
+    const hidden = !T.overlayTexts().some(x => x.includes('회오리')), stillSet = Stage.snapshot().tip === 'skill';
+    Game.boss = null;
+    const back = T.overlayTexts().includes('를 눌러 회오리!');
+    return { hidden, stillSet, back };
+  });
+  check('체력바가 떠 있는 동안에는 그려지지 않고(숨김, 시간은 계속 흐름) 체력바가 사라지면 다시 그려짐', dyn.hidden && dyn.stillSet && dyn.back, JSON.stringify(dyn));
+});
+
+await section('몬스터 안내 글과 쉬운 말 (POLISH-4)', async () => {
+  // 오른쪽 끝 안내: 화면 끝에서 잘리지 않음 (좁은 방 960 / 넓은 방 1920)
+  for (const [room, label] of [[0, '좁은 방(960)'], [1, '넓은 방(1920)']]) {
+    await NEWGAME('normal', 100 + room);
+    const m = await ev(room => {
+      T.toRoom(room); T.run(() => Stage.state === 'fight', 400, false);
+      const p = Game.player; p.x = Game.world.width - 20; Cam.snap(p);
+      T.run(() => FX.popups.some(q => q.text === '몬스터를 다 물리쳐야 가요!'), 20, false);
+      const pop = FX.popups.find(q => q.text === '몬스터를 다 물리쳐야 가요!');
+      if (!pop) return { found: false };
+      const c = document.createElement('canvas').getContext('2d'); c.font = 'bold ' + pop.size + 'px ' + CFG.font; const w = c.measureText(pop.text).width;
+      return { found: true, left: pop.x - w / 2 - Cam.x, right: pop.x + w / 2 - Cam.x, w, size: pop.size };
+    }, room);
+    check(`${label}: 오른쪽 끝에서 "몬스터를 다 물리쳐야 가요!" 가 뜨고 글자 전체(좌우)가 화면(0~960) 안에 있음`, m.found && m.left >= 0 && m.right <= 960, JSON.stringify(m));
+  }
+  // 말 바꾸기: 다음 웨이브 안내
+  await NEWGAME('normal', 103);
+  await ev(() => { T.run(() => Stage.snapshot().waveIndex === 1, 1500); });
+  check('다음 웨이브 안내는 "또 나타났어요!" + 몇 번째 웨이브인지(2 / 2)', (await snapOf()).banner === '또 나타났어요!' && (await ev(() => T.overlayTexts())).includes('2 / 2'));
+});
+
+await section('HUD 스킬 이름표와 튜토리얼 카드·스킬 팁이 겹치지 않음 (POLISH-3)', async () => {
+  // HUD(이름표)만 그린 그림과 Stage 오버레이(카드/팁)만 그린 그림을 따로 만들어, 왼쪽 위 영역에서 같은 자리를 칠하는 픽셀이 있는지 본다
+  const overlap = () => ev(() => {
+    const d = 1, x0 = 0, y0 = 160, w = 330, h = 120;
+    const mask = draw => { const c = T.ctx(); draw(c); const im = c.getImageData(x0, y0, w, h).data; const m = new Uint8Array(w * h); for (let i = 0; i < m.length; i++) m[i] = im[i * 4 + 3] > 40 ? 1 : 0; return m; };
+    const hud = mask(c => UI.drawHUD(c)), ov = mask(c => Stage.drawOverlay(c));
+    let both = 0, nh = 0, no = 0;
+    for (let i = 0; i < hud.length; i++) { if (hud[i]) nh++; if (ov[i]) no++; if (hud[i] && ov[i]) both++; }
+    return { both, nh, no };
+  });
+  // (1) 방 1: 튜토리얼 카드 세 장 (카드가 위아래로 살랑이는 여러 프레임에서)
+  await NEWGAME('normal', 104);
+  await ev(() => { Game.touch = false; });
+  await step(page, 100);
+  let worst = { both: 0, nh: 0, no: 0 };
+  for (let i = 0; i < 8; i++) { await step(page, 5); const o = await overlap(); if (o.both > worst.both) worst = o; worst.nh = o.nh; worst.no = Math.max(worst.no, o.no); }
+  check('방 1 튜토리얼 카드(걸어가요/때려요/폴짝)와 HUD 스킬 이름표가 한 픽셀도 겹치지 않음 (측정 확인: 둘 다 그 영역에 그려짐)', worst.nh > 800 && worst.no > 800 && worst.both === 0, JSON.stringify(worst));
+  // (2) 방 2: 키보드 스킬 팁 ("A 를 눌러 회오리!" + 위를 가리키는 꼬리)
+  await NEWGAME('normal', 105);
+  await ev(() => { Game.touch = false; T.toRoom(1); T.run(() => Stage.state === 'fight', 300, false); });
+  await step(page, 25);
+  const o2 = await overlap();
+  check('방 2 의 스킬 팁("A 를 눌러 회오리!", 키보드)이 HUD 스킬 이름표와 겹치지 않음', (await snapOf()).tip === 'skill' && o2.nh > 800 && o2.no > 800 && o2.both === 0, JSON.stringify(o2));
 });
 
 // ===========================================================================

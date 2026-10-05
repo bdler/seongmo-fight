@@ -40,8 +40,8 @@ const STAGE_TUNE = {
     max: 14,                                         // 바닥에 동시에 있을 수 있는 개수
   },
   victory: { slowFrames: 80, bannerAt: 30, total: 180 },   // 보스를 잡은 뒤: 슬로모션 / CLEAR! 글자가 나오는 때 / 결과 화면으로 넘어가는 때
-  hint: { fadeDelay: 20, fadeFrames: 40, giveUp: 1800 },   // 튜토리얼 힌트: 카드마다 "해냈다"고 확인된 뒤 사라지기까지 (끝내 안 해도 giveUp 프레임(30초)이 지나면 모두 접어요)
-  tip: { life: 300, fade: 14 },                      // 한 번만 보여 주는 팁 ('A 로 회오리!' · '! 가 뜨면 피해요'): 떠 있는 시간 / 나타나고 사라지는 시간
+  hint: { fadeDelay: 20, fadeFrames: 40, giveUp: 1800, cardY: 224 },   // 튜토리얼 힌트: 카드마다 "해냈다"고 확인된 뒤 사라지기까지 (끝내 안 해도 giveUp 프레임(30초)이 지나면 모두 접어요). cardY: 카드의 위쪽 y (HUD 스킬 칸 아래 이름표가 y~213 까지라서 그 밑)
+  tip: { life: 300, fade: 14, skillY: 228 },         // 한 번만 보여 주는 팁 ('A 로 회오리!' · '! 가 뜨면 피해요'): 떠 있는 시간 / 나타나고 사라지는 시간 / (키보드) 스킬 팁의 위쪽 y — HUD 스킬 이름표 바로 아래
   clearMin: 45,            // 방을 깬 뒤 이 프레임(0.75초)이 지나야 오른쪽 끝으로 나가며 다음 방으로 넘어감 (보상·'방 클리어' 를 볼 시간)
   bossCandySayDelay: 90,   // 보스 체력 절반 사탕: '사탕이 나왔어요!' 글자는 보스의 '화났다!' 글자(80프레임)가 사라진 뒤에
 
@@ -181,6 +181,8 @@ const Stage = (() => {
   }
   const pickupsOnField = () => Entities.list.filter(e => e.kind === 'pickup' && !e._removed);
   const isLastRoom = () => !!S.stage && api.roomIndex >= S.stage.rooms.length - 1;
+  // 화면 위쪽에 보스 체력바가 떠 있나 (UI.drawHUD 의 hudBoss 와 같은 조건: 보스가 있고 경고 배너(intro)가 끝난 뒤). 떠 있는 동안엔 말풍선 팁을 숨겨요 — 터치 화면의 팁 자리가 체력바와 겹쳐요
+  const bossBarUp = () => !!Game.boss && Game.boss.maxHp > 0 && api.state !== 'intro';
 
   function syncGameStage() {
     const st = S.stage, gs = Game.stage;
@@ -211,6 +213,7 @@ const Stage = (() => {
       cleared: !!cleared, score: Game.score, stars: calcStars({ cleared, deaths: Game.deaths }),
       timeFrames: Game.frame, kills: Game.kills, deaths: Game.deaths, maxCombo: Game.combo.max,
       difficulty: Game.difficulty, stageId: st.id, stageName: st.name, rooms: S.roomsCleared,
+      startRoom: S.startRoom,                             // 이 판을 시작한 방 번호 (0 = 처음부터 한 판). 1 이상이면 "이 방부터 다시" 로 이어서 한 판이라서 랭킹에 올리지 않아요 (UI 가 이 값을 봐요)
     };
     S.active = false;
     api.state = cleared ? 'victory' : 'over';
@@ -329,7 +332,7 @@ const Stage = (() => {
     S.queue = expandWave(S.room.waves[i]);
     S.spawnCd = i === 0 ? 12 : 0;
     S.waveWait = 0;
-    if (i > 0) say('다음 물결!', (i + 1) + ' / ' + S.room.waves.length, COLORS.sky, 60);
+    if (i > 0) say('또 나타났어요!', (i + 1) + ' / ' + S.room.waves.length, COLORS.sky, 60);
   }
 
   // 큐에서 한 마리 꺼내 소환. 좁은 방은 위에서 떨어지고, 넓은 방은 화면 바깥(오른쪽 → 안 되면 왼쪽)에서 걸어 들어옴
@@ -449,6 +452,7 @@ const Stage = (() => {
     if (p && p.skills && p.skills.some(k => k && k.cd > 0)) { S.skillUsed = true; if (S.tip && S.tip.kind === 'skill') S.tip = null; }   // 스킬을 써 봤으면 팁은 이제 필요 없어요
     if (S.tip) { if (st === 'fight' || st === 'clear') S.tip.t++; if (S.tip.t >= S.tip.life) S.tip = null; return; }
     if (st !== 'fight' || !S.room || !p || p.dead) return;
+    if (bossBarUp()) return;                                                         // 보스방에서 바로 시작해도(이 방부터 다시) 보스 체력바 위에 팁이 뜨지 않게
     const tp = S.tipSeen;
     if (!tp.bang && S.room.tutorial) {
       for (const e of Entities.list) if (e.kind === 'enemy' && !e.dead && !e._removed && e.state === 'windup') { tp.bang = true; S.tip = { kind: 'bang', t: 0, life: T.tip.life }; return; }
@@ -507,7 +511,7 @@ const Stage = (() => {
     if (S.edgeHintCd > 0) S.edgeHintCd--;                 // 아직 못 나가는데 오른쪽 끝으로 가면 알려 줌
     if (p && !p.dead && S.edgeHintCd <= 0 && p.x >= Game.world.width - T.exitMargin) {
       S.edgeHintCd = 150;
-      FX.popup(clamp(p.x, Cam.x + 140, Cam.x + W - 140), p.y - p.h - 30, '먼저 친구들을 물리쳐요!', { color: COLORS.cream, size: 22, life: 70, vy: -0.4 });   // 화면 끝에서 글자가 잘리지 않게
+      FX.popup(clamp(p.x, Cam.x + 170, Cam.x + W - 170), p.y - p.h - 30, '몬스터를 다 물리쳐야 가요!', { color: COLORS.cream, size: 22, life: 70, vy: -0.4 });   // 화면 끝에서 글자가 잘리지 않게 (글자 폭의 반(~160)만큼 안쪽으로)
     }
   }
 
@@ -1125,7 +1129,7 @@ const Stage = (() => {
       if (cd.fade >= 1) return;                              // 이 카드는 해냈고 이미 사라짐 (나머지 카드는 해낼 때까지 남아요)
       ctx.save();
       ctx.globalAlpha = (1 - cd.fade) * appear;
-      const bob = Math.sin(S.clock * 0.06 + i * 1.3) * 3, x = cd.x, y = 180 + bob, w = 172, h = 74;      // 180: 왼쪽 위 스킬 칸(y 106~168)과 겹치지 않게
+      const bob = Math.sin(S.clock * 0.06 + i * 1.3) * 3, x = cd.x, y = T.hint.cardY + bob, w = 172, h = 74;      // cardY: 왼쪽 위 스킬 칸 + 스킬 이름표(y 106~213)와 겹치지 않게
       Draw.roundRect(ctx, x - w / 2, y, w, h, 16);
       ctx.fillStyle = 'rgba(255,244,224,.94)'; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = COLORS.ink; ctx.stroke();
       const ky = y + 27;
@@ -1149,14 +1153,14 @@ const Stage = (() => {
   // 한 번만 뜨는 작은 팁 (알약 모양): 'A 를 눌러 회오리!' / '머리 위 ! 가 뜨면 피해요!'. 터치 기기면 키 이름 대신 버튼 표현.
   function drawTip(ctx) {
     const tip = S.tip;
-    if (!tip || !S.active || api.state === 'transition' || api.state === 'victory' || api.state === 'over' || api.state === 'dead') return;
+    if (!tip || !S.active || api.state === 'transition' || api.state === 'victory' || api.state === 'over' || api.state === 'dead' || bossBarUp()) return;
     const F = T.tip.fade, k = Math.min(ease(tip.t / F), ease((tip.life - tip.t) / F));
     if (k <= 0) return;
     const touch = !!Game.touch;
     ctx.save();
     ctx.globalAlpha = k;
     if (tip.kind === 'skill') {
-      const w = touch ? 330 : 250, h = 44, x = touch ? W / 2 - w / 2 : 18, y = touch ? 84 : 178;
+      const w = touch ? 330 : 250, h = 44, x = touch ? W / 2 - w / 2 : 18, y = touch ? 84 : T.tip.skillY;
       if (!touch) { ctx.beginPath(); ctx.moveTo(x + 36, y - 9); ctx.lineTo(x + 24, y + 2); ctx.lineTo(x + 48, y + 2); ctx.closePath(); ctx.fillStyle = 'rgba(255,244,224,.96)'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = COLORS.ink; ctx.stroke(); }   // 위 스킬 칸을 가리키는 꼬리
       Draw.roundRect(ctx, x, y, w, h, 20); ctx.fillStyle = 'rgba(255,244,224,.96)'; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = COLORS.ink; ctx.stroke();
       if (touch) Draw.text(ctx, '🌪️ 스킬 버튼을 눌러 회오리!', x + w / 2, y + 29, { size: 22, color: '#4a2d6b', stroke: null });

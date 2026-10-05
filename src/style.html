@@ -238,8 +238,18 @@ kbd {
 .save-text { background: var(--cream); border: var(--bw) solid var(--ink); border-radius: 999px; padding: .05em .9em; }
 .save[data-state="failed"] .save-text { background: #ffe1e1; }
 .save[data-state="saved"] .save-text { background: #e1ffe6; }
+.save[data-state="skipped"] .save-text { background: #fff2a8; white-space: normal; overflow: visible; text-overflow: clip; text-align: center; line-height: 1.2; border-radius: calc(14 * var(--u)); }   /* 이어서 한 판 안내: 낮은 화면에서도 끝(「…않아요」)이 잘리지 않게 두 줄로 */
 .save .btn { margin-bottom: 0; }
 .res-btns { display: flex; gap: var(--gap); justify-content: center; flex-wrap: wrap; }
+/* 게임 오버의 「이 방부터 다시 하기」: 한 줄을 다 쓰는 큰 버튼 + 그 아래 줄에 「다시 하기」「처음으로」. 별은 어차피 0개라 작게 해서 세로 자리를 아껴요 */
+#ui-retry-room { flex: 1 0 100%; white-space: nowrap; }
+.rr-ico { flex: none; }
+.result[data-rr="1"] .res-btns { flex-wrap: wrap; row-gap: 0; width: 100%; padding: 0 max(8px, calc(10 * var(--u))); }   /* (좌우 여백: 큰 버튼의 포커스 링이 칸 밖으로 잘리지 않게) */
+.result[data-rr="1"] .res-btns .btn:not(#ui-retry-room) { font-size: var(--fs-s); white-space: nowrap; min-height: max(44px, calc(40 * var(--u))); }
+.result[data-over="1"] .star { width: max(36px, calc(56 * var(--u))); height: max(36px, calc(56 * var(--u))); }
+/* 「이 방부터 다시 하기」 가 보일 땐 버튼이 한 줄 더 늘어나서 통계 상자가 잘리기 쉬워요 (1280x720 에서 29px 모자랐음) → 격려 문구를 한 줄에 들어가게 줄이고, 어차피 비어 있는 별도 조금 더 작게 */
+.result[data-rr="1"] .res-msg { font-size: max(14px, calc(17 * var(--u))); }
+.result[data-rr="1"] .star { width: max(28px, calc(40 * var(--u))); height: max(28px, calc(40 * var(--u))); }
 .res-right { padding-top: calc(50 * var(--u)); min-height: 0; display: flex; align-items: flex-start; }
 
 /* 낮은 화면(가로 폰): 간격과 별을 조금 줄여 한 화면에 */
@@ -250,6 +260,10 @@ kbd {
   .result { padding-top: 6px; }
   .res-left { gap: 3px; }
   .star { width: 48px; height: 48px; }
+  .star:nth-child(2) { margin-bottom: 3px; }
+  .stars { padding: 5px 0 4px; }                 /* 별이 위 제목·아래 점수 알약에 닿지 않게 숨 쉴 틈 (가운데 별은 낮춰서) */
+  /* 게임 오버는 별이 하나도 안 켜지니, 낮은 화면에서는 빈 별 줄을 눈에서만 접어요 (그 자리를 「이 방부터 다시 하기」 줄이 써요). 화면 읽기 도구에는 「별 0개」가 그대로 남아요 */
+  .result[data-over="1"] .stars { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); }
   /* 점수 칸(통계)은 한 줄짜리 작은 알약으로: 칸이 낮아도 낱말이 쪼개지거나 잘리지 않게 (UI-04) */
   .stat-grid li { flex: 0 1 auto; flex-direction: row; align-items: baseline; gap: .35em; padding: 0 .6em; white-space: nowrap; }
   .res-btns { flex-wrap: nowrap; }
@@ -275,7 +289,8 @@ kbd {
 @media (max-height: 340px) {
   .res-title { font-size: 24px; }
   .star { width: 38px; height: 38px; }
-  .star:nth-child(2) { margin-bottom: 6px; }
+  .star:nth-child(2) { margin-bottom: 3px; }
+  .stars { padding: 3px 0 2px; }
   .total { font-size: 15px; } .total b { font-size: 21px; }
   .save-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }   /* 아주 좁으면 저장 문구를 줄여서(…) 「다시」 버튼이 밀려나지 않게 */
   .rank-tab { font-size: 13px; }
@@ -284,6 +299,7 @@ kbd {
   .stat-grid li { font-size: 14px; }
   .stat-k { font-size: 13px; }
   .res-btns .btn { font-size: 16px; }
+  .result[data-rr="1"] #ui-retry-room { margin-bottom: 1px; }   /* 두 줄 버튼 사이 간격을 조금 줄여요 (아래 줄 버튼이 큰 버튼의 그림자 끝을 덮어요) */
   .res-right { padding-top: 34px; }
   .modal h2 { font-size: 20px; margin-bottom: 2px; }
   .modal { width: min(96%, 540px); padding-top: 8px; padding-bottom: 8px; }
@@ -382,6 +398,13 @@ html[data-portrait="1"] .rotate { display: flex; }
 .tc-key { position: absolute; left: 4%; top: 4%; min-width: 1.6em; font-size: max(12px, calc(14 * var(--u))); line-height: 1.5; background: var(--ink); color: #fff; border-radius: 999px; text-align: center; padding: 0 .2em; }
 .tc-cd { position: absolute; inset: 0; border-radius: 50%; pointer-events: none; background: conic-gradient(from 0deg, transparent calc((100 - var(--cd, 0)) * 1%), rgba(30, 14, 44, .72) 0); }
 .tc-sec { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: max(20px, calc(26 * var(--u))); color: #fff; text-shadow: 0 0 3px var(--ink), 0 0 3px var(--ink), 0 0 3px var(--ink); pointer-events: none; }
+.tc-skill { overflow: visible; }      /* 이름표(.tc-lbl)가 동그란 버튼 아래로 삐져나와요 (쿨타임 부채꼴 .tc-cd 는 스스로 동그라미라 안 넘쳐요) */
+/* 스킬 이름표: 버튼 바로 아래 윤곽선 글자 (논리 15px 이상: 14 * --u 보다 크게, 아주 작은 화면에서도 12px 아래로는 안 줄어요). 두 줄(회오리/베기)이라 이웃 버튼 이름표와 붙지 않아요 */
+.tc-lbl {
+  position: absolute; top: calc(100% + var(--sh) + 1px); left: 50%; transform: translateX(-50%); width: max-content; max-width: 7em;
+  font-size: max(12px, calc(15 * var(--u))); line-height: 1.08; text-align: center; white-space: pre-line; pointer-events: none;
+  color: #fff; -webkit-text-stroke: max(3px, calc(4 * var(--u))) var(--ink); paint-order: stroke fill; text-shadow: 0 1px 0 var(--ink);
+}
 .tc-skill[data-ready="1"] { box-shadow: 0 var(--sh) 0 rgba(43,27,58,.7), 0 0 0 max(3px, calc(4 * var(--u))) #fff6a8; }
 .tc-skill[data-ready="1"] .tc-key::after { content: "\2726"; margin-left: .15em; }   /* ✦ 준비됨 표시 (색 말고도) */
 .tc-skill[data-ready="0"] .tc-ico { opacity: .55; }

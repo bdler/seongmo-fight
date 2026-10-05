@@ -109,7 +109,7 @@ await section('타이틀', async () => {
     const cards = [...document.querySelectorAll('.diff-card')];
     return cards.length === Object.keys(CFG.difficulty).length && cards.every(c => { const d = CFG.difficulty[c.dataset.diff]; return c.textContent.includes(d.label) && c.textContent.includes(d.desc); });
   }));
-  check('난이도: 처음엔 딱 하나(보통)만 선택됨', await g.ev(() => { const on = [...document.querySelectorAll('.diff-card[aria-checked="true"]')]; return on.length === 1 && on[0].dataset.diff === 'normal'; }));
+  check('난이도: 처음엔(저장된 선택이 없으면) 딱 하나, 쉬움만 선택됨 (처음 하는 친구가 게임 오버로 끝나지 않게 — 예전엔 보통)', await g.ev(() => { const on = [...document.querySelectorAll('.diff-card[aria-checked="true"]')]; return on.length === 1 && on[0].dataset.diff === 'easy' && UI.state().difficulty === 'easy'; }));
   check('캔버스에 제목이 그려짐 (타이틀 배경이 투명이 아님)', await g.ev(() => { Loop.draw(); const c = Loop.canvas, d = c.getContext('2d').getImageData(c.width / 2 | 0, 100 * Loop.dpr | 0, 1, 1).data; return d[3] === 255; }));
 
   // --- 닉네임 검사: 막히고, 안 시작하고, 친절한 문구 ---
@@ -318,6 +318,9 @@ await section('일시정지', async () => {
 // ===========================================================================
 const RES = (o = {}) => ({ cleared: true, score: 52340, stars: 3, timeFrames: 11000, kills: 24, deaths: 0, maxCombo: 23, difficulty: 'normal', stageId: 'stage1', stageName: '사탕 숲', rooms: 5, ...o });
 const toResult = (g, res) => g.ev(res => { Game.nickname = '하늘'; Game.difficulty = res.difficulty || 'normal'; Game.result = res; Game.setScene('result'); }, res);
+// 게임 오버 문구 "틀"({n} = 몇 번째 방까지 왔는지)과 화면에 뜬 문구를 맞춰 봐요. 맞으면 그 n (틀에 {n} 이 없으면 -1), 어느 틀에도 안 맞으면 null
+const escapeRe = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const overFit = (list, msg) => { for (const t of list) { const m = new RegExp('^' + escapeRe(t).replace('\\{n\\}', '(\\d+)') + '$').exec(msg); if (m) return m[1] === undefined ? -1 : Number(m[1]); } return null; };
 const resInfo = g => g.ev(() => ({
   title: document.querySelector('.res-title').textContent, msg: document.querySelector('.res-msg').textContent,
   on: document.querySelectorAll('.star.on').length, stars: document.querySelectorAll('.star').length,
@@ -394,7 +397,7 @@ await section('결과: 막 떴을 때 Space/Enter 연타로 버튼이 눌리지 
   await g.ev(() => { UI_TUNE.result.keyLockMs = 500; });
   await toPlay(g);
   await toResult(g, RES({ cleared: false, stars: 0, deaths: 3 }));
-  check('(전제) 결과 화면이 열리고 「다시 하기」에 포커스', (await g.state()).resultVisible && (await g.ev(() => document.activeElement.id)) === 'ui-again');
+  check('(전제) 결과 화면이 열리고 첫 선택(포커스)은 「이 방부터 다시 하기」 (방을 깨고 온 게임 오버라서 — 예전엔 「다시 하기」였음)', (await g.state()).resultVisible && (await g.ev(() => document.activeElement.id)) === 'ui-retry-room');
   await page.keyboard.press('Space'); await page.keyboard.press('Enter'); await page.keyboard.press('Space');
   await step(page, 3);
   check('결과가 뜬 직후의 Space/Enter(공격 연타)는 「다시 하기」를 누르지 않음 → 아직 결과 화면', (await g.state()).scene === 'result' && (await g.ev(() => T.started.length)) === 0);
@@ -439,7 +442,9 @@ await section('결과: 2별 / 1별 / 게임 오버', async () => {
   r = await resInfo(g);
   check('게임 오버: 제목이 "아쉬워요!"', r.title.includes('아쉬워요') && !r.title.includes('클리어'), r.title);
   check('게임 오버: 별이 하나도 켜지지 않고 star 소리도 없음', r.on === 0 && !r.sfx.includes('star'));
-  check('게임 오버: 격려 문구 (overMsgs 중 하나, 비난 아님)', await g.ev(() => UI_TUNE.overMsgs.includes(document.querySelector('.res-msg').textContent)), r.msg);
+  const tpl0 = await g.ev(() => UI_TUNE.overMsgs);
+  check('게임 오버: 격려 문구 (overMsgs 틀 중 하나, 비난 아님) + 방 2개를 깨고 쓰러졌으니 "3번째 방까지"', overFit(tpl0, r.msg) === 3 && r.msg.includes('3번째 방까지'), r.msg);
+  check('게임 오버 문구가 제목(「아쉬워요!」)을 되풀이하지 않음 (예전엔 문구도 "아쉬워요!" 로 시작했음)', !r.msg.includes('아쉬워요') && r.title === '아쉬워요!' && tpl0.every(t => !t.includes('아쉬워요')), r.msg);
   check('게임 오버 효과음(gameover) 이 한 번 나고 clear 는 아님', r.sfx.filter(x => x === 'gameover').length === 1 && !r.sfx.includes('clear'));
   check('게임 오버: 무사망 뱃지 없음, 다시 하기/처음으로 버튼이 보임', !r.badge && await g.ev(() => !!document.getElementById('ui-again').offsetWidth && !!document.getElementById('ui-toTitle').offsetWidth));
   check('게임 오버에서도 점수는 저장 요청됨 (cleared:false, stars:0)', await g.ev(() => { const p = T.saves[T.saves.length - 1]; return p.cleared === false && p.stars === 0 && p.score === 8120; }));
@@ -1887,14 +1892,17 @@ await section('결과: 게임 오버 문구는 어디까지 왔는지에 맞춤 
   const G = { cleared: false, stars: 0, difficulty: 'normal', stageId: 'stage1', stageName: '사탕 숲', timeFrames: 3000, maxCombo: 3 };
   // QA 가 보고한 경우: 첫 방에서 3번 쓰러진 판(점수 100, 처치 1, 쓰러짐 3) 이 "거의 다 왔어요!" 였음
   let r = await over({ ...G, score: 100, kills: 1, deaths: 3, rooms: 0 });
-  check('첫 방에서 쓰러졌으면 "거의 다 왔어요" 가 아니라 처음 방용 격려 문구', r.groups.early.includes(r.msg) && !/거의 다/.test(r.msg), r.msg);
+  check('첫 방에서 쓰러졌으면 "거의 다 왔어요" 가 아니라 처음 방용 격려 문구 ("1번째 방까지")', overFit(r.groups.early, r.msg) === 1 && !/거의 다/.test(r.msg), r.msg);
   r = await over({ ...G, score: 900, kills: 5, deaths: 1, rooms: 1 });
-  check('방 1개를 깨고 쓰러졌어도 처음 방용 문구', r.groups.early.includes(r.msg), r.msg);
-  for (const rooms of [2, 3]) { r = await over({ ...G, score: 4000, kills: 12, deaths: 1, rooms }); check(`방 ${rooms}개를 깨고 쓰러지면 중간 방용 문구 (몬스터 머리의 "!" / 점프·스킬 알려줌)`, r.groups.mid.includes(r.msg), r.msg); }
+  check('방 1개를 깨고 쓰러졌어도 처음 방용 문구 ("2번째 방까지")', overFit(r.groups.early, r.msg) === 2, r.msg);
+  for (const rooms of [2, 3]) { r = await over({ ...G, score: 4000, kills: 12, deaths: 1, rooms }); check(`방 ${rooms}개를 깨고 쓰러지면 중간 방용 문구 ("${rooms + 1}번째 방까지", 머리 위 "!" / 점프·스킬 알려줌)`, overFit(r.groups.mid, r.msg) === rooms + 1, r.msg); }
   r = await over({ ...G, score: 9000, kills: 20, deaths: 1, rooms: 4 });
   check('대왕의 방(마지막 방)까지 왔으면 "거의 다 왔어요" 류 문구', r.groups.boss.includes(r.msg) && /거의 다|대왕/.test(r.msg), r.msg);
   r = await over({ ...G, score: 9000, kills: 20, deaths: 1, rooms: 4, roomCount: 7 });
-  check('방 수는 res.roomCount 가 있으면 그걸 따름 (7방 중 4개를 깼으면 아직 대왕 전 → 중간 문구)', r.groups.mid.includes(r.msg), r.msg);
+  check('방 수는 res.roomCount 가 있으면 그걸 따름 (7방 중 4개를 깼으면 아직 대왕 전 → 중간 문구 "5번째 방까지")', overFit(r.groups.mid, r.msg) === 5, r.msg);
+  // 이어서 한 판(startRoom 4)에서 1개를 깨고 쓰러지면: 시작한 방 4 + 깬 방 1 = 5 → "6번째 방까지" (이 판에서 깬 방 수가 아니라 스테이지 전체 기준)
+  r = await over({ ...G, score: 3000, kills: 8, deaths: 1, rooms: 1, roomCount: 7, startRoom: 4 });
+  check('이어서 한 판의 게임 오버 문구는 스테이지 전체 기준의 방 번호 (시작 방 4 + 깬 방 1 → "6번째 방까지")', overFit(r.groups.mid, r.msg) === 6, r.msg);
   await g.ev(() => { Game.stage.roomCount = 7; });
   r = await g.ev(() => { Game.stage = { id: 's', name: 'x', roomIndex: 6, roomCount: 7, roomName: 'x' }; Game.result = { cleared: false, score: 9000, stars: 0, timeFrames: 3000, kills: 20, deaths: 1, maxCombo: 3, difficulty: 'normal', stageId: 'stage1', stageName: '사탕 숲', rooms: 6 }; Game.setScene('title'); Game.setScene('result'); return { msg: document.querySelector('.res-msg').textContent, groups: UI_TUNE.overGroups }; });
   check('방이 7개인 스테이지(Game.stage.roomCount=7)에서 6방을 깨면 대왕 문구 (방 수를 5 로 굳히지 않음)', r.groups.boss.includes(r.msg), r.msg);
@@ -2011,6 +2019,290 @@ await section('터치+키보드 노트북: 처음부터 포커스·Enter 로 시
   await step(page, 2);
   check('조작법 창이 열려 있을 때는 포커스가 비어도 Enter 로 시작되지 않음', await g.ev(() => Game.scene === 'title' && T.started.length === 0));
   await g.done('터치+키보드');
+});
+
+// ===========================================================================
+// 폴리시 라운드 (어린이 경험 마무리): 처음 실행 난이도 / 이 방부터 다시 하기 / 스킬 이름표
+// ===========================================================================
+await section('타이틀: 처음 실행은 쉬움 · 저장된 난이도가 있으면 늘 그것이 먼저 (POLISH-1)', async () => {
+  const g = await fresh();
+  const { page } = g;
+  const sel = () => g.ev(() => [...document.querySelectorAll('.diff-card[aria-checked="true"]')].map(c => c.dataset.diff).join());
+  const reload = async () => { await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForFunction(() => typeof Loop !== 'undefined' && Loop.started === true && typeof UI !== 'undefined', null, { timeout: 8000, polling: 50 }); };
+  check('(전제) 저장된 난이도가 없음 + 기본값은 쉬움이고 쉬움은 목숨이 끝없는(게임 오버가 없는) 난이도', await g.ev(() => Store.get('difficulty', null) === null && UI_TUNE.defaultDiff === 'easy' && CFG.difficulty.easy.lives === Infinity));
+  check('저장된 선택이 없는 처음 실행: 쉬움 카드 하나만 선택됨 (처음 한 판이 게임 오버로 끝날 수 없게)', (await sel()) === 'easy' && (await g.state()).difficulty === 'easy');
+  await g.ev(() => { Game.nickname = ''; Game.setScene('play'); Game.setScene('title'); });
+  check('저장 없이 타이틀에 다시 들어와도 쉬움', (await sel()) === 'easy');
+  for (const d of ['normal', 'hard', 'easy']) {
+    await g.ev(d => { Store.set('difficulty', d); Game.nickname = ''; Game.setScene('play'); Game.setScene('title'); }, d);
+    check(`저장된 난이도(${d})가 있으면 타이틀에 들어올 때 그것이 선택됨 (기본값이 덮어쓰지 않음)`, (await sel()) === d && (await g.state()).difficulty === d);
+  }
+  for (const d of ['normal', 'hard']) {
+    await g.ev(d => Store.set('difficulty', d), d);
+    await reload();
+    check(`저장된 난이도(${d})는 앱을 새로 열어도 그대로 선택됨`, (await sel()) === d && (await g.state()).difficulty === d, await sel());
+  }
+  await g.ev(() => Store.set('difficulty', 'zzz'));
+  await reload();
+  check('저장된 값이 이상하면(없는 난이도) 무시하고 쉬움', (await sel()) === 'easy');
+  await g.done('기본 난이도');
+});
+
+await section('결과: 게임 오버 「이 방부터 다시 하기」 — 보통/어려움만, 도착한 방부터 새 판 (POLISH-2)', async () => {
+  const g = await fresh();
+  const { page } = g;
+  const over = (o = {}) => RES({ cleared: false, stars: 0, deaths: 3, score: 8120, kills: 6, maxCombo: 5, rooms: 4, startRoom: 0, roomCount: 7, ...o });
+  const vis = () => g.ev(() => { const b = document.getElementById('ui-retry-room'); return { shown: !b.hidden && !!b.offsetWidth, text: b.textContent, aria: b.getAttribute('aria-label'), room: UI.state().retryRoom, focus: document.activeElement.id, msg: document.querySelector('.res-msg').textContent }; });
+  await toResult(g, over());
+  let v = await vis();
+  check('보통 게임 오버(방 4개를 깨고 5번째 방에서): 「이 방부터 다시 하기」가 보이고, 문구의 "5번째 방"과 같은 방(번호 4)', v.shown && v.text.includes('이 방부터 다시 하기') && v.aria === '5번째 방부터 다시 하기' && v.room === 4 && v.msg.includes('5번째 방까지'), JSON.stringify(v));
+  check('그 버튼이 첫 선택(포커스)이고 「다시 하기」「처음으로」도 그대로 보임', v.focus === 'ui-retry-room' && await g.ev(() => !!document.getElementById('ui-again').offsetWidth && !!document.getElementById('ui-toTitle').offsetWidth));
+  await toResult(g, over({ difficulty: 'hard' }));
+  v = await vis();
+  check('어려움 게임 오버에도 보임', v.shown && v.room === 4, JSON.stringify(v));
+  await toResult(g, RES());
+  check('클리어 결과에는 없음 (부정)', !(await vis()).shown);
+  await toResult(g, over({ difficulty: 'easy' }));
+  check('쉬움은 게임 오버가 없는 난이도라 (가짜 결과가 와도) 버튼 없음 (부정)', !(await vis()).shown);
+  await toResult(g, over({ rooms: 0 }));
+  v = await vis();
+  check('첫 방에서 쓰러졌으면 「다시 하기」와 같으니 버튼 없음, 첫 선택은 「다시 하기」 (부정)', !v.shown && v.focus === 'ui-again' && v.room === -1, JSON.stringify(v));
+  await toResult(g, over({ startRoom: 4, rooms: 1 }));
+  v = await vis();
+  check('이어서 한 판(startRoom 4)의 게임 오버에는 또 이어하기 버튼이 없음 — 되풀이로 점수를 키울 수 없게 (부정)', !v.shown && v.focus === 'ui-again', JSON.stringify(v));
+  await toResult(g, over({ rooms: 9 }));
+  v = await vis();
+  check('방 번호가 방 수를 넘어도 마지막 방(대왕의 방, 번호 6)까지만', v.shown && v.room === 6, JSON.stringify(v));
+  await toResult(g, over({ rooms: 4, roomCount: undefined }));
+  check('res.roomCount 가 없으면 Game.stage.roomCount(없으면 자르지 않음)를 따름 — 방 4개 깸 → 방 번호 4', (await vis()).room === 4);
+
+  // 눌렀을 때: Stage.start({difficulty, nickname, roomIndex}) 한 번 + 결과 화면이 닫히고 play
+  await toResult(g, over({ difficulty: 'hard' }));
+  await g.ev(() => { T.started.length = 0; });
+  await page.click('#ui-retry-room');
+  let st = await g.ev(() => ({ a: T.started.slice(), scene: Game.scene, resultHidden: document.getElementById('ui-result').hidden, music: T.music.slice(-1)[0] }));
+  check('누르면 같은 난이도(hard)·닉네임으로 Stage.start({roomIndex:4}) 한 번 → play 씬, 결과 화면 닫힘', st.a.length === 1 && st.a[0].difficulty === 'hard' && st.a[0].nickname === '하늘' && st.a[0].roomIndex === 4 && st.scene === 'play' && st.resultHidden, JSON.stringify(st));
+  await toResult(g, over());
+  await g.ev(() => { T.started.length = 0; });
+  await page.click('#ui-again');
+  st = await g.ev(() => ({ a: T.started.slice() }));
+  check('「다시 하기」는 그대로 처음부터 (roomIndex 를 주지 않음)', st.a.length === 1 && !('roomIndex' in st.a[0]), JSON.stringify(st));
+  // 게임 오버가 아닌 곳에서 부르는 UI.retryFromRoom() 은 아무 일도 안 함
+  await toResult(g, RES());
+  await g.ev(() => { T.started.length = 0; });
+  check('클리어 결과에서 UI.retryFromRoom() 을 불러도 시작하지 않음 (부정)', await g.ev(() => UI.retryFromRoom() === false && T.started.length === 0));
+  await g.shot('result_gameover_retry_room');
+  await g.done('이 방부터 다시 하기');
+});
+
+await section('결과: 「이 방부터」 키 잠금 — 막 떴을 때 연타·꾹 누름으로 눌리지 않음 (POLISH-2)', async () => {
+  const g = await fresh();
+  const { page } = g;
+  await g.ev(() => { UI_TUNE.result.keyLockMs = 400; });
+  await toPlay(g);
+  await page.keyboard.down('Space');                                                      // 공격 키를 누른 채 결과가 열림
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 3, rooms: 3 }));
+  check('(전제) 첫 선택이 「이 방부터 다시 하기」', await g.ev(() => document.activeElement.id === 'ui-retry-room'));
+  for (let i = 0; i < 5; i++) { await wait(150); await page.keyboard.down('Space'); }          // 잠금(400ms)이 지나도 이어지는 자동 반복
+  await page.keyboard.up('Space');
+  await step(page, 3);
+  check('Space 를 꾹 누른 채 결과가 열려도 「이 방부터 다시 하기」가 눌리지 않음', await g.ev(() => Game.scene === 'result' && T.started.length === 0));
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 3, rooms: 3 }));
+  await page.keyboard.press('Space'); await page.keyboard.press('Enter');
+  await step(page, 3);
+  check('결과가 뜬 직후 Space/Enter 연타(잠금 400ms 안)도 눌리지 않음', await g.ev(() => Game.scene === 'result' && T.started.length === 0));
+  await wait(500);
+  await page.keyboard.press('Space');
+  await step(page, 3);
+  check('잠금이 지난 뒤 일부러 누른 Space 는 눌림 → 3번째 방(번호 3)부터 새 판', await g.ev(() => Game.scene === 'play' && T.started.length === 1 && T.started[0].roomIndex === 3), JSON.stringify(await g.ev(() => T.started)));
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 3, rooms: 3 }));
+  await page.click('#ui-retry-room');
+  check('마우스/터치 클릭은 잠금 없이 바로 눌림', await g.ev(() => Game.scene === 'play' && T.started.length === 2));
+  await g.done('이 방부터 키 잠금');
+});
+
+await section('결과: 이어서 한 판은 랭킹에 올리지 않음 — 저장 요청 없음 · 짧은 안내 · 랭킹은 보여줌 (POLISH-2)', async () => {
+  const g = await fresh();
+  const { page } = g;
+  const NOTE = '이어서 한 판은 랭킹에 올라가지 않아요';
+  const info = () => g.ev(() => ({ state: document.querySelector('.save').dataset.state, text: document.querySelector('.save-text').textContent, retry: !document.getElementById('ui-retry').hidden, saves: T.saves.length, ranks: T.ranks.length, ui: UI.state().saveState, rows: document.querySelectorAll('#ui-result .rank-row').length }));
+  await g.ev(() => { Store.set('scores', [{ nickname: '기존', score: 777, stars: 1, difficulty: 'normal' }]); });
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 1, rooms: 1, startRoom: 4, roomCount: 7 }));
+  await wait(60);
+  let r = await info();
+  check('이어서 한 판(startRoom 4)의 결과: Server.saveScore 를 부르지 않음', r.saves === 0, JSON.stringify(r));
+  check('저장 상태 자리에 짧은 안내 "이어서 한 판은 랭킹에 올라가지 않아요" (저장 중/저장됐어요/실패가 아님)', r.state === 'skipped' && r.ui === 'skipped' && r.text.includes(NOTE) && !/저장/.test(r.text) && !r.retry, JSON.stringify(r));
+  check('랭킹 목록은 그래도 불러와서 보여줌', r.ranks === 1 && r.rows === 4, JSON.stringify(r));
+  check('이 기기의 기록(Store scores)은 그대로', await g.ev(() => JSON.stringify(Store.get('scores')) === JSON.stringify([{ nickname: '기존', score: 777, stars: 1, difficulty: 'normal' }])));
+  // 저장 시간 제한이 지나도 "실패"로 바뀌지 않음 (저장을 시작하지 않았으니까)
+  await g.ev(() => { UI_TUNE.saveTimeoutMs = 200; });
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 1, rooms: 1, startRoom: 4, roomCount: 7 }));
+  await wait(400);
+  r = await info();
+  check('저장 제한 시간이 지나도 안내 그대로 (실패/다시 보내기로 바뀌지 않음)', r.state === 'skipped' && !r.retry && r.saves === 0, JSON.stringify(r));
+  await g.ev(() => { UI_TUNE.saveTimeoutMs = 12000; });
+  // 이어서 한 판이 클리어로 끝나도 같음
+  await toResult(g, RES({ startRoom: 6, rooms: 1, stars: 3 }));
+  await wait(60);
+  r = await info();
+  check('이어서 한 판을 클리어해도(별 3개) 저장하지 않고 같은 안내', r.saves === 0 && r.state === 'skipped' && r.text.includes(NOTE), JSON.stringify(r));
+  // 이전 판(처음부터 한 판)의 늦은 저장 응답이 이어서 한 판 화면을 덮어쓰지 않음
+  await g.ev(() => { T.saves.length = 0; T.saveCbs.length = 0; });
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 3, rooms: 3, startRoom: 0 }));
+  await g.ev(() => Game.setScene('title'));
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 1, rooms: 1, startRoom: 3 }));
+  await g.ev(() => T.saveCbs[0].res({ ok: true, source: 'server' }));
+  await wait(80);
+  r = await info();
+  check('앞 판의 늦은 응답("저장됐어요")이 이어서 한 판 화면의 안내를 덮어쓰지 않음', r.state === 'skipped' && r.text.includes(NOTE), JSON.stringify(r));
+  // 처음부터 한 판은 그대로 저장 (startRoom 0 이든 없든)
+  await g.ev(() => { T.saves.length = 0; });
+  await toResult(g, RES({ startRoom: 0 }));
+  check('처음부터 한 판(startRoom 0)은 예전처럼 저장 요청 1번 + "저장 중"', await g.ev(() => T.saves.length === 1 && document.querySelector('.save').dataset.state === 'saving'));
+  await toResult(g, RES());
+  check('startRoom 이 아예 없는 결과도 예전처럼 저장 (호환)', await g.ev(() => T.saves.length === 2));
+  // 이어서 한 판의 「다시 하기」는 처음부터 새 판 → 그 판은 다시 저장 대상
+  await toResult(g, RES({ cleared: false, stars: 0, deaths: 1, rooms: 1, startRoom: 3 }));
+  await g.ev(() => { T.started.length = 0; });
+  await page.click('#ui-again');
+  check('이어서 한 판 결과의 「다시 하기」는 처음부터 (roomIndex 없음) → 새 판은 랭킹에 오를 수 있음', await g.ev(() => T.started.length === 1 && !('roomIndex' in T.started[0])));
+  await g.shot('result_resumed_note');
+  await g.done('이어서 한 판 안 저장');
+});
+
+await section('HUD: 스킬 이름표 — 칸 아래 윤곽선 글자(14px 이상), 이웃·체력판·보스 체력바와 안 겹침 (POLISH-3)', async () => {
+  const g = await fresh();
+  const { page } = g;
+  await toPlay(g);
+  await g.ev(() => { FX.reduceMotion = true; Game.touch = false; Game.difficulty = 'normal'; Game.lives = 3; Game.score = 0; Game.boss = null; Game.stage = { id: 's', name: 'x', roomIndex: 1, roomCount: 7, roomName: '달콤한 오솔길' }; Game.player.hp = Game.player.maxHp = 100; Game.player.skills.forEach(s => { s.cd = 0; }); });
+  // (1) 그리기 호출 기록: 이름은 p.skills[i].label 에서, 크기 14 이상, 윤곽선(lw>0, 윤곽선 색을 끄지 않음)
+  const calls = await g.ev(() => {
+    const rec = [], orig = Draw.text;
+    Draw.text = function (ctx, str, x, y, o) { rec.push({ str: String(str), x, y, size: (o && o.size) || 20, lw: o && o.lw !== undefined ? o.lw : 4, stroke: o ? o.stroke : undefined }); return orig.apply(Draw, arguments); };
+    PX.draw(); Draw.text = orig;
+    return { rec, want: Game.player.skills.map(s => s.label) };
+  });
+  const lab = calls.want.map(w => calls.rec.find(r => r.str === w.replace(' ', '\n')));
+  check('세 스킬 이름이 p.skills[i].label 에서 와서 두 줄("회오리/베기")로 그려짐', calls.want.length === 3 && lab.every(Boolean), JSON.stringify(calls.rec.map(r => r.str)));
+  check('이름표 글자는 논리 14px 이상이고 윤곽선 글자 (lw>0, 윤곽선 색을 끄지 않음)', lab.every(l => l && l.size >= 14 && l.lw > 0 && l.stroke !== null && l.stroke !== ''), JSON.stringify(lab));
+  check('이름표가 각 스킬 칸 가운데(x = 18 + 74×i + 31)의 칸 아래(y > 168)에 놓임', lab.every((l, i) => l && Math.abs(l.x - (18 + i * 74 + 31)) < 1 && l.y > 168), JSON.stringify(lab.map(l => l && [l.x, l.y])));
+  // (2) 픽셀: 칸 바로 아래 띠에 글자가 실제로 그려지고, 이웃 이름표와 붙지 않음
+  const px = await g.ev(() => {
+    const ctx = PX.draw(), d = Loop.dpr, x0 = 0, y0 = 172, w = Math.round(300 * d), h = Math.round(44 * d);
+    const im = ctx.getImageData(x0, Math.round(y0 * d), w, h).data;
+    const cols = [];
+    for (let x = 0; x < w; x++) { let on = false; for (let y = 0; y < h && !on; y++) if (im[(y * w + x) * 4 + 3] > 200) on = true; cols.push(on); }
+    const runs = []; let s = -1;
+    for (let x = 0; x <= w; x++) { if (x < w && cols[x]) { if (s < 0) s = x; } else if (s >= 0) { runs.push([s / d, x / d]); s = -1; } }
+    const white = [0, 1, 2].map(i => PX.run([{ x: 18 + i * 74 - 6, y: 172, w: 74, h: 44, pred: 'bright' }])[0]);
+    return { runs, white };
+  });
+  check('칸 아래 띠(y 172~216)에 이름표 글자 덩어리가 정확히 3개 (이웃과 붙지 않고 갈라져 있음)', px.runs.length === 3, JSON.stringify(px.runs));
+  check('이웃 이름표 사이에 6px 이상 틈이 있음', px.runs.length === 3 && px.runs[1][0] - px.runs[0][1] >= 6 && px.runs[2][0] - px.runs[1][1] >= 6, JSON.stringify(px.runs));
+  check('각 이름표는 자기 칸 폭(74px) 안에서 칸 가운데에 놓임', px.runs.length === 3 && px.runs.every((r, i) => r[1] - r[0] <= 74 && Math.abs((r[0] + r[1]) / 2 - (18 + i * 74 + 31)) <= 6), JSON.stringify(px.runs));
+  check('각 이름표에 흰 글자 본체 픽셀이 충분함 (윤곽선만 있는 게 아님)', px.white.every(n => n > 150), JSON.stringify(px.white));
+  // (3) 체력판(y 8~94)과 보스 체력바 상자(x 256~704, y 98~174)를 건드리지 않음: 같은 화면을 이름표 있이/없이 그려 달라진 픽셀만 본다
+  const diff = await g.ev(() => {
+    const orig = performance.now.bind(performance); performance.now = () => 900000;              // 시간 고정 (보스 체력바 연출·반짝임이 두 번 그림 사이에 달라지지 않게)
+    Game.boss = { name: '젤리 대왕', hp: 300, maxHp: 300, boss: true };
+    const d = Loop.dpr, w = Math.round(960 * d), h = Math.round(260 * d);
+    const grab = () => PX.draw().getImageData(0, 0, w, h).data;
+    PX.draw();                                                                                      // (체력바 지연값 따라잡기)
+    const on = grab();
+    const keep = Game.player.skills.map(s => s.label); Game.player.skills.forEach(s => { s.label = ' '; });   // 이름이 비면(공백) 이름표를 그리지 않음
+    const off = grab();
+    Game.player.skills.forEach((s, i) => { s.label = keep[i]; }); Game.boss = null; performance.now = orig;
+    let n = 0, minX = 1e9, maxX = -1, minY = 1e9, maxY = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; if (on[i] !== off[i] || on[i + 1] !== off[i + 1] || on[i + 2] !== off[i + 2] || on[i + 3] !== off[i + 3]) { n++; minX = Math.min(minX, x / d); maxX = Math.max(maxX, x / d); minY = Math.min(minY, y / d); maxY = Math.max(maxY, y / d); } }
+    return { n, minX, maxX, minY, maxY };
+  });
+  check('(측정 확인) 이름표가 있고 없고의 차이가 실제로 잡힘', diff.n > 500, JSON.stringify(diff));
+  check('이름표는 체력판(y<94)과 보스 체력바 상자(x≥256) 어디도 건드리지 않음 — 칸 아래 x<250, y 169~216 안에만', diff.minY >= 169 && diff.maxY <= 216 && diff.maxX < 250 && diff.minX >= 0, JSON.stringify(diff));
+  // (4) 이름이 길거나 띄어쓰기가 없어도: 2줄 이하, 14px 아래로는 안 줄고, 칸 폭 근처에 들어옴
+  const long = await g.ev(() => {
+    const names = ['번개 폭풍 베기', '회오리베기돌진', 'AB', '가나다라 마바', '  '], out = [];
+    const keep = Game.player.skills.map(s => s.label);
+    for (let k = 0; k < 3; k++) {
+      Game.player.skills.forEach((s, i) => { s.label = names[(k + i) % names.length]; });
+      const rec = [], orig = Draw.text;
+      Draw.text = function (ctx, str, x, y, o) { if (y > 168 && y < 230 && x < 300) { const c = Loop.canvas.getContext('2d'); c.save(); c.font = 'bold ' + ((o && o.size) || 20) + 'px ' + CFG.font; const wd = Math.max(...String(str).split('\n').map(l => c.measureText(l).width)); c.restore(); rec.push({ str: String(str), size: (o && o.size) || 20, lines: String(str).split('\n').length, widest: wd }); } return orig.apply(Draw, arguments); };
+      PX.draw(); Draw.text = orig; out.push(rec);
+    }
+    Game.player.skills.forEach((s, i) => { s.label = keep[i]; });
+    return out.flat();
+  });
+  check('세 낱말 이름·띄어쓰기 없는 7글자 이름·짧은 이름·빈 이름도 안전: 2줄 이하, 글자 14px 이상, 한 줄 폭이 칸 사이(74px)를 크게 넘지 않음', long.length >= 6 && long.every(r => r.lines <= 2 && r.size >= 14 && r.widest <= 80), JSON.stringify(long));
+  await g.shot('hud_skill_names');
+  await g.done('HUD 스킬 이름표');
+});
+
+await section('터치: 스킬 이름표는 터치 버튼 아래에만 (캔버스와 겹쳐 두 번 나오지 않음) — 여러 화면 크기 (POLISH-3)', async () => {
+  for (const [w, h] of [[844, 390], [1280, 720], [667, 375], [568, 320]]) {
+    const g = await fresh({ touch: true, viewport: { width: w, height: h } });
+    const { page } = g;
+    await toPlay(g);
+    await g.ev(() => { FX.reduceMotion = true; });
+    await step(page, 2);
+    await g.ev(() => Loop.draw());
+    const m = await g.ev(() => {
+      const u = UI.state().u, vw = innerWidth, vh = innerHeight;
+      const btns = [...document.querySelectorAll('.tc-btn')], skills = [...document.querySelectorAll('.tc-skill')];
+      const circ = b => { const r = b.getBoundingClientRect(); return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, r: r.width / 2 }; };
+      const hitCircle = (rc, c) => { const nx = Math.max(rc.left, Math.min(c.cx, rc.right)), ny = Math.max(rc.top, Math.min(c.cy, rc.bottom)); return Math.hypot(nx - c.cx, ny - c.cy) < c.r - 1; };
+      const rows = skills.map(b => {
+        const l = b.querySelector('.tc-lbl'), lr = l.getBoundingClientRect(), br = b.getBoundingClientRect(), cs = getComputedStyle(l);
+        return { text: l.textContent, vis: lr.width > 0 && lr.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none', fsLogical: parseFloat(cs.fontSize) / u, below: lr.top >= br.bottom - 1, center: Math.abs((lr.left + lr.width / 2) - (br.left + br.width / 2)) <= 4, inside: lr.left >= 0 && lr.right <= vw + 0.5 && lr.bottom <= vh + 0.5, hit: btns.filter(o => o !== b).some(o => hitCircle(lr, circ(o))), aria: l.getAttribute('aria-hidden'), stroke: cs.webkitTextStrokeWidth };
+      });
+      const rs = skills.map(b => b.querySelector('.tc-lbl').getBoundingClientRect());
+      let overlap = false; for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) { const a = rs[i], b = rs[j]; if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) overlap = true; }
+      const st = document.querySelector('.tc-base').getBoundingClientRect();
+      const hitStick = rs.some(r => r.left < st.right && st.left < r.right && r.top < st.bottom && st.top < r.bottom);
+      return { rows, overlap, hitStick, skillLabels: Game.player.skills.map(s => s.label) };
+    });
+    const tag = `[${w}x${h}]`;
+    check(`${tag} 터치 스킬 버튼 3개 아래에 이름표가 있고 이름은 p.skills 의 label (두 줄)`, m.rows.length === 3 && m.rows.every((r, i) => r.text === m.skillLabels[i].replace(' ', '\n') && r.vis), JSON.stringify(m.rows.map(r => r.text)));
+    check(`${tag} 이름표 글자는 논리 14px 이상 + 윤곽선, 화면 읽기 도구에는 숨김(버튼 aria-label 이 이미 이름을 알려줌)`, m.rows.every(r => r.fsLogical >= 14 && parseFloat(r.stroke) > 0 && r.aria === 'true'), JSON.stringify(m.rows.map(r => [r.fsLogical.toFixed(1), r.stroke, r.aria])));
+    check(`${tag} 이름표가 버튼 바로 아래 가운데, 화면 안에 있음`, m.rows.every(r => r.below && r.center && r.inside), JSON.stringify(m.rows.map(r => [r.below, r.center, r.inside])));
+    check(`${tag} 이름표가 다른 터치 버튼·이웃 이름표·조이스틱과 겹치지 않음`, m.rows.every(r => !r.hit) && !m.overlap && !m.hitStick, JSON.stringify([m.rows.map(r => r.hit), m.overlap, m.hitStick]));
+    // 겹쳐 두 번 나오지 않음: 터치 중에는 캔버스에 스킬 칸·이름표가 없음 (이 영역에 아무것도 안 그려짐)
+    const canvasTouch = await g.ev(() => PX.run([{ x: 0, y: 100, w: 320, h: 130, pred: 'alpha' }])[0]);
+    check(`${tag} 터치 화면에서는 캔버스 HUD 의 스킬 칸/이름표 자리(왼쪽 위 y 100~230)가 비어 있음 (DOM 이름표와 겹쳐 두 번 나오지 않음)`, canvasTouch === 0, String(canvasTouch));
+    if (w === 844) {
+      // 이름이 바뀌면 터치 이름표도 따라감
+      await g.ev(() => { Game.player.skills[0].label = '번개 폭풍'; Loop.draw(); });
+      check(`${tag} 스킬 이름이 바뀌면 터치 이름표와 aria-label 도 바뀜`, await g.ev(() => document.querySelector('.tc-skill[data-key=KeyA] .tc-lbl').textContent === '번개\n폭풍' && document.querySelector('.tc-skill[data-key=KeyA]').getAttribute('aria-label').includes('번개 폭풍')));
+      await g.ev(() => { Game.player.skills[0].label = '회오리 베기'; Loop.draw(); });
+      // 물리 키보드로 플레이하면: 터치 버튼(과 이름표)은 사라지고 캔버스에 이름표가 나옴 — 어느 한쪽에만
+      await page.keyboard.press('ArrowRight');
+      await g.ev(() => Loop.draw());
+      const kb = await g.ev(() => ({ touchOn: UI.state().touchVisible, domVis: [...document.querySelectorAll('.tc-lbl')].some(l => { const r = l.getBoundingClientRect(); return r.width > 0 && r.height > 0; }), canvas: PX.run([{ x: 0, y: 172, w: 300, h: 44, pred: 'alpha' }])[0] }));
+      check(`${tag} 키보드로 바꾸면 DOM 이름표는 안 보이고(터치 버튼과 함께 사라짐) 캔버스에 이름표가 그려짐 — 한쪽에만`, !kb.touchOn && !kb.domVis && kb.canvas > 500, JSON.stringify(kb));
+      await g.ev(() => window.dispatchEvent(new Event('touchstart')));
+      const tc = await g.ev(() => ({ touchOn: UI.state().touchVisible, domVis: [...document.querySelectorAll('.tc-lbl')].filter(l => { const r = l.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length, canvas: PX.run([{ x: 0, y: 100, w: 320, h: 130, pred: 'alpha' }])[0] }));
+      check(`${tag} 다시 화면을 만지면 DOM 이름표 3개가 돌아오고 캔버스는 다시 비어 있음`, tc.touchOn && tc.domVis === 3 && tc.canvas === 0, JSON.stringify(tc));
+      await g.shot('touch_skill_labels_844x390');
+    }
+    await g.done(`터치 이름표 ${w}x${h}`);
+  }
+});
+
+await section('결과: 「이 방부터 다시 하기」가 보이는 게임 오버 — 흔한 화면 크기에서도 통계 상자가 잘리지 않음', async () => {
+  // 한때 1280x720 에서 버튼이 한 줄 늘어난 만큼 통계 상자(.res-mid)가 29px 모자라 아래쪽(「쓰러졌어요」「지나온 방」)이 잘렸음
+  // (낮은 가로 폰은 위 UI-04 구간이 검사하고, 여기서는 노트북·태블릿 크기를 검사)
+  const cases = [[1920, 1080], [1366, 768], [1280, 800], [1280, 720], [1024, 768], [800, 600]];
+  for (const [w, h] of cases) {
+    const g = await fresh({ viewport: { width: w, height: h } });
+    const { page } = g;
+    await toResult(g, RES({ cleared: false, stars: 0, deaths: 1, score: 14850, kills: 75, maxCombo: 30, rooms: 5, startRoom: 0, roomCount: 7, difficulty: 'hard' }));
+    await step(page, 200); await wait(150);
+    const m = await g.ev(() => {
+      const M = document.querySelector('.res-mid'), mr = M.getBoundingClientRect(), b = document.getElementById('ui-retry-room');
+      const cut = [...document.querySelectorAll('.stat-grid li')].filter(l => { const r = l.getBoundingClientRect(); return r.top < mr.top - 1 || r.bottom > mr.bottom + 1; }).length;
+      return { retryShown: !b.hidden && !!b.offsetWidth, clip: M.scrollHeight - M.clientHeight, cut };
+    });
+    check(`[${w}x${h}] 「이 방부터 다시 하기」가 보이고, 통계 칸 5개가 하나도 안 잘리며 상자가 스크롤될 만큼 넘치지 않음(2px 이하)`, m.retryShown && m.cut === 0 && m.clip <= 2, JSON.stringify(m));
+    await g.done(`재도전 결과 ${w}x${h}`);
+  }
 });
 
 finish('ui');

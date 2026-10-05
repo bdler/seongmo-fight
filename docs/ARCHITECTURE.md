@@ -377,7 +377,7 @@ Scenes.play = { enter, exit, update, draw }
 - **플레이어 사망 처리 (`playerDied` 수신):** `Game.deaths++`, 90f 후 → `Game.lives` 가 남아 있으면(Infinity 포함) `Player.revive` (목숨 차감은 **사망한 순간** `lives--`, 유한일 때만)·`Game.diff.revivePenalty` 만큼 점수 차감(`score × penalty`), 아니면 게임 오버 → `Game.result` (`cleared:false`) 채우고 `Game.setScene('result')`. 이벤트 `playerRevived`/`gameOver`.
 - **결과(`Game.result`):**
 ```js
-{ cleared: bool, score, stars: 0~3, timeFrames, kills, deaths, maxCombo, difficulty, stageId, stageName, rooms: 클리어한 방 수(중간 방 시작 시 건너뛴 방은 제외) }
+{ cleared: bool, score, stars: 0~3, timeFrames, kills, deaths, maxCombo, difficulty, stageId, stageName, rooms: 클리어한 방 수(중간 방 시작 시 건너뛴 방은 제외), startRoom: 이번 판을 시작한 방 번호(보통 0, 「이 방부터 다시 하기」면 1 이상) }
 ```
   별: 클리어 시 1개 + 사망 ≤2회면 +1 + 사망 0회면 +1 (게임 오버면 0개).
 - **배경:** 이미지 없이 Canvas 로 '사탕 숲' (하늘 그라디언트, 멀리 산/구름 패럴랙스, 막대사탕 나무·젤리 바위·솜사탕 덤불 — 고정 시드로 위치 고정, 바닥 타일). 보스방은 어둡고 붉은 분위기로.
@@ -394,10 +394,10 @@ UI.showRanking()  UI.hideRanking()
 
 - DOM 오버레이는 `#ui`(타이틀/결과/일시정지/랭킹/토스트), 터치 컨트롤은 `#touch` 안에 JS 로 생성. (index.html 은 수정하지 않음)
 - **화면 크기:** `#app` 은 16:9 레터박스. CSS 변수 `--u`(= 캔버스 실제 폭/960 px)를 `resize` 때 갱신해 오버레이 글자/버튼 크기를 비례 조정. 화면이 작아도 버튼은 **최소 44px**.
-- **타이틀:** 게임 제목, 닉네임 입력(2~8자, 마지막 값 `Store` 에 기억, `Server.validateNickname` 으로 검증·오류 문구 표시), 난이도 3버튼(라벨+설명, `CFG.difficulty`), **「시작!」 버튼**(`SFX.init()` + `Music.play` + `Stage.start`). 닉네임 라벨은 **「별명」**, 🎲 버튼이 `Server.randomNickname()` 으로 안전한 별명을 채우고, 저장된 별명이 없으면 미리 채워 둔다(바로 시작 가능), 「조작법」 패널, 「랭킹」 버튼, 음소거 토글. 캔버스에는 귀여운 애니메이션 배경(`Scenes.title.update/draw`).
-- **HUD(캔버스):** 좌상단 HP바(숫자 포함)+목숨(하트, 쉬움은 ∞), **그 아래 스킬 3개 아이콘**(키 표시 + 쿨타임 부채꼴/숫자, 준비되면 반짝), 우상단 점수, 콤보(`3 HIT!` 크게, 콤보가 쌓일수록 커짐), 상단 중앙 `Game.stage.roomName`+방 진행도 점(`roomCount` 개), **상단 중앙 보스 체력바**(`Game.boss`, 이름 `젤리 대왕`, 점수 패널과 겹치지 않음, 보스 경고 배너가 뜨는 동안은 숨김), 우상단 작은 일시정지/음소거 버튼(DOM). **캐릭터가 서는 바닥 띠(y 330~500)는 HUD 로 가리지 않는다** — 불투명 HUD 픽셀이 이 구간에 없다는 것을 테스트가 확인.
+- **타이틀:** 게임 제목, 닉네임 입력(2~8자, 마지막 값 `Store` 에 기억, `Server.validateNickname` 으로 검증·오류 문구 표시), 난이도 3버튼(라벨+설명, `CFG.difficulty`; **저장된 선택이 없는 처음 한 판은 「쉬움」이 미리 선택**됨 — 처음 하는 아이가 게임 오버로 끝나지 않게. 한 번 하고 나면 늘 마지막으로 고른 난이도가 먼저), **「시작!」 버튼**(`SFX.init()` + `Music.play` + `Stage.start`). 닉네임 라벨은 **「별명」**, 🎲 버튼이 `Server.randomNickname()` 으로 안전한 별명을 채우고, 저장된 별명이 없으면 미리 채워 둔다(바로 시작 가능), 「조작법」 패널, 「랭킹」 버튼, 음소거 토글. 캔버스에는 귀여운 애니메이션 배경(`Scenes.title.update/draw`).
+- **HUD(캔버스):** 좌상단 HP바(숫자 포함)+목숨(하트, 쉬움은 ∞), **그 아래 스킬 3개 아이콘**(키 표시 + 쿨타임 부채꼴/숫자, 준비되면 반짝), 우상단 점수, 콤보(`3 HIT!` 크게, 콤보가 쌓일수록 커짐), **스킬 아이콘 아래에 스킬 이름표**(`p.skills[i].label`, 14px 이상 윤곽선 글자; 터치 기기에서는 DOM 터치 버튼 쪽에만 표시해 두 번 나오지 않음), 상단 중앙 `Game.stage.roomName`+방 진행도 점(`roomCount` 개), **상단 중앙 보스 체력바**(`Game.boss`, 이름 `젤리 대왕`, 점수 패널과 겹치지 않음, 보스 경고 배너가 뜨는 동안은 숨김), 우상단 작은 일시정지/음소거 버튼(DOM). **캐릭터가 서는 바닥 띠(y 330~500)는 HUD 로 가리지 않는다** — 불투명 HUD 픽셀이 이 구간에 없다는 것을 테스트가 확인.
 - **일시정지:** `Escape`/`KeyP`/버튼 → `Game.pause(true)`, DOM 오버레이(계속하기/다시 시작/처음으로). `windowBlur` 이벤트 시 play 씬이면 자동 일시정지.
-- **결과 화면:** 별 1~3개 순서대로 팝(효과음 `star`), 점수 내역(처치/콤보/클리어 보너스는 `Game.result` 필드 기준으로 표시), 게임 오버면 "아쉬워요! 다시 도전!" 처럼 **격려 문구**. 열리자마자 `Server.saveScore` 호출 → 상태 문구("저장 중…" → "저장됐어요!" / "내 기기에만 저장됐어요" / "저장 실패 — 다시 시도" 버튼), 이어서 `Server.getTopScores(10)` 로 랭킹 표시(내 닉네임 강조). 버튼: 「다시 하기」(같은 난이도로 `Stage.start`), 「처음으로」.
+- **결과 화면:** 별 1~3개 순서대로 팝(효과음 `star`), 점수 내역(처치/콤보/클리어 보너스는 `Game.result` 필드 기준으로 표시), 게임 오버면 "아쉬워요! 다시 도전!" 처럼 **격려 문구**. 열리자마자 `Server.saveScore` 호출 → 상태 문구("저장 중…" → "저장됐어요!" / "내 기기에만 저장됐어요" / "저장 실패 — 다시 시도" 버튼), 이어서 `Server.getTopScores(10)` 로 랭킹 표시(내 닉네임 강조). 버튼: 「다시 하기」(같은 난이도로 `Stage.start`), 「처음으로」, 그리고 **보통/어려움 게임 오버에서만 「이 방부터 다시 하기」**(`Stage.start({roomIndex: Game.result.rooms})`). 이어서 한 판은 `Game.result.startRoom > 0` 으로 표시되고 **랭킹에 올리지 않는다**(`Server.saveScore` 를 부르지 않고 짧은 안내만 표시). 게임 오버 문구는 제목(「아쉬워요!」)을 되풀이하지 않고 어디까지 왔는지 + 응원. 랭킹 카드에는 쉬움/보통/어려움 탭이 있고 방금 한 난이도 탭이 먼저 열린다.
 - **휴식 알림:** `Game.frame` 이 아닌 *실제 play 씬 진행 시간* 이 `CFG.breakReminderMinutes` 를 넘으면 `UI.toast('잠깐 쉬어요! 눈과 손을 풀어 볼까요? 🙆')` (런당 1회 반복 가능).
 - **터치:** `Game.touch` 이면 `#touch` 에 왼쪽 가상 조이스틱(방향키 4개를 임계값으로 `Input.press/release`), 오른쪽 `공격(Z)`·`점프(X)`·스킬 3개(A/S/D) 버튼 (`Input.bindButton`). 키보드 기기에선 숨김. 첫 `touchstart` 에 자동 표시.
 - **금지:** `alert/confirm/prompt` (샌드박스 iframe 에서 막힐 수 있음), 외부 이미지/스크립트. 폰트는 Google Fonts `Jua` 를 **논블로킹**으로 불러오되(`media="print" onload` 기법) 실패해도 폴백 폰트로 정상 동작.

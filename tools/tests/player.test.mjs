@@ -722,9 +722,10 @@ await section('그리기: 모든 상태가 오류 없이 그려지고 모양이 
   console.log('  (스크린샷: ' + join(SHOT_DIR, 'player-states.png') + ')');
 });
 
-await section('Enemies 와 함께 (구현돼 있을 때만)', async () => {
+await section('Enemies 와 함께', async () => {
   const has = await ev(() => typeof Enemies === 'object' && typeof Enemies.spawn === 'function');
-  if (!has) { console.log('  (Enemies 가 아직 스텁이라 건너뜀)'); return; }
+  check('Enemies 모듈이 로드됨 (없으면 아래 통합 검사가 통째로 빠지니 파일을 실패시켜요)', has);   // 스텁 시절의 "조용히 건너뜀" 대신 강제 확인
+  if (!has) return;
   const r = await ev(() => {
     const o = {};
     // 진짜 슬라임을 때려 눕히기: 3타 콤보로 슬라임(20) 처치

@@ -30,6 +30,9 @@ const DESIGN_FLOOR_SECONDS = 180;         // 이보다 짧으면 경고만 출�
 const SHOT_DIR = process.env.SHOT_DIR || '';
 if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
 
+// 게임 오버 문구는 "틀" ({n} = 몇 번째 방까지 왔는지) 이라서, 화면에 뜬 문구가 틀 중 하나와 맞는지 봐요
+const escapeRe = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const fitsTemplate = (list, msg) => list.some(t => new RegExp('^' + escapeRe(t).replace('\\{n\\}', '\\d+') + '$').test(msg));
 const fmtT = f => { const s = f / 60; return `${Math.floor(s / 60)}분 ${(s % 60).toFixed(1)}초 (${f}f)`; };
 const stat = (name, r) => console.log(`  [${name}] ${r}`);
 
@@ -233,7 +236,7 @@ console.log('\n== f. 어려움 + 가만히 있기 → 게임 오버 ==');
     againVisible: !!document.querySelector('#ui-again') && !document.querySelector('#ui-again').hidden,
   }));
   check('게임 오버 화면: 제목 "아쉬워요!" 이고 결과 화면이 보임', dom.shown && dom.title === '아쉬워요!', dom.title);
-  check('게임 오버 격려 문구는 준비된 문구 중 하나이고, 비난하는 말이 없음', dom.overMsgs.includes(dom.msg) && !/실패|못했|바보|졌/.test(dom.msg), dom.msg);
+  check('게임 오버 격려 문구는 준비된 문구(틀) 중 하나이고, 비난하는 말이 없고, 제목(아쉬워요!)을 되풀이하지 않음', fitsTemplate(dom.overMsgs, dom.msg) && !/실패|못했|바보|졌/.test(dom.msg) && !dom.msg.includes('아쉬워요'), dom.msg);
   check('게임 오버: 별 0개, 무사망 뱃지 없음, 「다시 하기」 버튼이 있음', dom.starsShown === '0' && dom.badgeHidden && dom.againVisible, JSON.stringify({ s: dom.starsShown, b: dom.badgeHidden }));
   check('게임 오버 기록도 저장되고 랭킹에 내 줄이 보임', (dom.save === 'local' || dom.save === 'saved') && dom.mine === 1, `${dom.save} mine=${dom.mine}`);
   if (SHOT_DIR) await page.screenshot({ path: join(SHOT_DIR, 'result-gameover.png') });
