@@ -65,12 +65,12 @@ await ev(() => {
     return Combat.damage(P, o.dmg === undefined ? 10 : o.dmg, Object.assign({ owner: e, team: 'enemy' }, o.hb || {})); };
   T.px = (x, y) => { const d = Loop.canvas.getContext('2d').getImageData(Math.round(x * Loop.dpr), Math.round(y * Loop.dpr), 1, 1).data; return [d[0], d[1], d[2]]; };
   // 화면에서 배경과 다른 픽셀: 주인공 기준 좌/우 개수와 경계 상자
-  T.ink = (x0, y0, w, h) => {
+  T.ink = (x0, y0, w, h, darkOnly) => {                                         // darkOnly: 굵은 윤곽선(어두운 픽셀)만 셈 → 그림자·옅은 입자는 제외
     Loop.draw();
     const dpr = Loop.dpr, d = Loop.canvas.getContext('2d').getImageData(x0 * dpr, y0 * dpr, w * dpr, h * dpr).data, n = w * dpr;
     let L = 0, R = 0, minx = 1e9, maxx = -1, miny = 1e9, maxy = -1;
     for (let i = 0; i < d.length; i += 4) {
-      if (Math.abs(d[i] - 200) + Math.abs(d[i + 1] - 230) + Math.abs(d[i + 2] - 201) < 24) continue;
+      if (darkOnly ? d[i] + d[i + 1] + d[i + 2] > 200 : Math.abs(d[i] - 200) + Math.abs(d[i + 1] - 230) + Math.abs(d[i + 2] - 201) < 24) continue;
       const px = (i / 4) % n, py = Math.floor(i / 4 / n);
       if (px / dpr < w / 2) L++; else R++;
       minx = Math.min(minx, px); maxx = Math.max(maxx, px); miny = Math.min(miny, py); maxy = Math.max(maxy, py);
@@ -213,7 +213,8 @@ await section('기본 콤보: 프레임 데이터·3타·버퍼', async () => {
     TT.run(5); o.step2 = { step: P.act && P.act.step, t: P.act && P.act.t };
     TT.run(11); TT.tap('KeyZ');                                  // 2타의 t=12
     TT.run(5); o.step3 = { step: P.act && P.act.step, t: P.act && P.act.t };
-    TT.run(8); o.after3 = { hits: h3.map(h => h.dmg), vz: d3.vz, z: d3.z, stun: d3.stun, hitstop: FX.hitstop, kx: d3.kx, shake: T_shake() };
+    { let g = 0; while (h3.length < 3 && g++ < 40) TT.run(1); o.hit3At = P.act && P.act.t; }   // 3타 준비(startup) 가 끝나 판정이 나올 때까지
+    o.after3 = { hits: h3.map(h => h.dmg), vz: d3.vz, z: d3.z, stun: d3.stun, hitstop: FX.hitstop, kx: d3.kx, shake: T_shake() };
     function T_shake() { return TT.fx.filter(f => f[0] === 'shake').length; }
     TT.run(40); o.end = { act: P.act, state: P.state, step: P.step, combo: Game.combo.count };
     return o;
@@ -226,7 +227,8 @@ await section('기본 콤보: 프레임 데이터·3타·버퍼', async () => {
   check('1타 후반(t=12)에 누르면 틈 없이 2타가 이어짐 (18번째 update 에 act.step=1)', r.step2.step === 1 && r.step2.t === 1, JSON.stringify(r.step2));
   check('2타 후반에 누르면 3타가 이어짐', r.step3.step === 2 && r.step3.t === 1, JSON.stringify(r.step3));
   check('세 번 맞은 피해 = 6, 6, 9 (배율 1.0 / 1.0 / 1.5)', r.after3.hits.join() === '6,6,9', r.after3.hits.join());
-  check('3타는 띄우기(vz>0 또는 공중) + 긴 경직(≥30) + 히트스톱 6 + 화면 흔들림', (r.after3.vz > 0 || r.after3.z > 0) && r.after3.stun >= 30 && r.after3.shake >= 1, JSON.stringify(r.after3));
+  check('3타는 띄우기(vz>0 또는 공중) + 긴 경직(≥30) + 히트스톱 6 + 화면 흔들림', (r.after3.vz > 0 || r.after3.z > 0) && r.after3.stun >= 30 && r.after3.hitstop === 6 && r.after3.shake >= 1, JSON.stringify(r.after3));
+  check('3타 판정은 준비(startup) 9프레임 뒤에 나옴 (1·2타의 5프레임보다 묵직)', r.hit3At === 10, String(r.hit3At));
   check('3타 후 동작이 끝나면 idle, 콤보 수 3', r.end.act === null && r.end.state === 'idle' && r.end.combo === 3, JSON.stringify(r.end));
 
   const q = await ev(() => {
@@ -244,15 +246,19 @@ await section('기본 콤보: 프레임 데이터·3타·버퍼', async () => {
     // --- 링크 구간: 끝난 뒤 몇 프레임 안에 누르면 이어짐 ---
     TT.reset(); TT.dummy(250, 420); TT.tap('KeyZ'); TT.run(17); TT.run(2); TT.tap('KeyZ'); o.linkIn = { step: P.act && P.act.step };
     TT.reset(); TT.dummy(250, 420); TT.tap('KeyZ'); TT.run(17); TT.run(12); TT.tap('KeyZ'); o.linkOut = { step: P.act && P.act.step };
-    // --- 3타 뒤 누르면 1타부터 다시 ---
+    // --- 3타 후반(마지막 40%)에 누르면 1타부터 다시 (3타 다음 타는 없음) ---
     TT.reset(); TT.dummy(250, 420, { superArmor: true });
-    TT.tap('KeyZ'); TT.run(11); TT.tap('KeyZ'); TT.run(16); TT.tap('KeyZ'); TT.run(29 - 12 + 1);   // 3타 후반을 지나감
-    TT.run(0); const st3 = P.act && P.act.step;
-    // 3타 t=22 쯤 누르기
+    TT.tap('KeyZ'); TT.run(11); TT.tap('KeyZ'); TT.run(16); TT.tap('KeyZ');         // 2타 후반에 눌러 3타 예약
+    let g = 0; while (!(P.act && P.act.step === 2 && P.act.t >= 21) && g++ < 80) TT.run(1);   // 3타(총 30프레임)의 t=21 : 후반 40% 안
+    const at = P.act && P.act.step === 2 ? P.act.t : -1; TT.tap('KeyZ');
+    g = 0; while (P.act && P.act.step === 2 && g++ < 60) TT.run(1);
+    o.wrap = { at, step: P.act && P.act.step, t: P.act && P.act.t };
+    // --- 3타 후반인데 너무 일찍(t=3) 누르면 이어지지 않음 ---
     TT.reset(); TT.dummy(250, 420, { superArmor: true });
-    TT.tap('KeyZ'); TT.run(11); TT.tap('KeyZ'); TT.run(16); TT.tap('KeyZ');       // 3타 시작 직후 (act.t 1)
-    TT.run(20); TT.tap('KeyZ'); TT.run(8);
-    o.wrap = { step: P.act && P.act.step, t: P.act && P.act.t, st3 };
+    TT.tap('KeyZ'); TT.run(11); TT.tap('KeyZ'); TT.run(16); TT.tap('KeyZ');
+    g = 0; while (!(P.act && P.act.step === 2 && P.act.t === 3) && g++ < 80) TT.run(1);
+    TT.tap('KeyZ'); g = 0; while (P.act && g++ < 80) TT.run(1);
+    o.wrapEarly = { act: P.act, state: P.state };
     return o;
   });
   check('너무 일찍(t=2) 누른 입력은 다음 타로 이어지지 않음 → 동작이 끝나면 idle', q.early.act === null && q.early.state === 'idle', JSON.stringify({ s: q.early.state, step: q.early.step }));
@@ -261,16 +267,17 @@ await section('기본 콤보: 프레임 데이터·3타·버퍼', async () => {
   check('끊긴 뒤에 누르면 다시 1타부터', q.restart.step === 0, JSON.stringify(q.restart));
   check('끝난 직후(링크 안)에 누르면 2타로 이어짐', q.linkIn.step === 1, JSON.stringify(q.linkIn));
   check('링크 시간(10프레임)이 지나서 누르면 1타부터 다시', q.linkOut.step === 0, JSON.stringify(q.linkOut));
-  check('3타 후반에 누르면 1타로 돌아가 새 콤보', q.wrap.step === 0, JSON.stringify(q.wrap));
+  check('3타 후반에 누르면 1타로 돌아가 새 콤보 (3타 다음은 없음)', q.wrap.at >= 21 && q.wrap.step === 0 && q.wrap.t === 1, JSON.stringify(q.wrap));
+  check('[부정] 3타 초반(t=3)에 누른 입력은 이어지지 않음 → 끝나면 idle', q.wrapEarly.act === null && q.wrapEarly.state === 'idle', JSON.stringify(q.wrapEarly));
 
   const m = await ev(() => {
     // --- 연타(7프레임마다): 6,6,9 가 반복 ---
     TT.reset(); TT.dummy(250, 420, { superArmor: true }); const h = TT.hits();
-    for (let i = 0; i < 150; i++) { if (i % 7 === 0) Input.press('KeyZ'); else Input.release('KeyZ'); TT.run(1); }
+    for (let i = 0; i < 300; i++) { if (i % 7 === 0) Input.press('KeyZ'); else Input.release('KeyZ'); TT.run(1); }   // 한 바퀴 = 17+17+30 = 64프레임 → 300프레임이면 4바퀴 남짓
     Input.release('KeyZ');
     return { dmg: h.map(x => x.dmg) };
   });
-  check('연타하면 6,6,9 가 계속 반복', m.dmg.length >= 9 && m.dmg.every((d, i) => d === [6, 6, 9][i % 3]), m.dmg.join());
+  check('연타하면 6,6,9 가 계속 반복 (4바퀴 남짓 = 13번 이상)', m.dmg.length >= 13 && m.dmg.every((d, i) => d === [6, 6, 9][i % 3]), m.dmg.join());
 });
 
 await section('기본 콤보: 이동 불가·방향·판정 범위', async () => {
@@ -291,7 +298,8 @@ await section('기본 콤보: 이동 불가·방향·판정 범위', async () =>
     TT.reset(); const mid = TT.dummy(250, 440); TT.tap('KeyZ'); TT.run(15); o.depthNear = mid.hp;
     TT.reset(); const mid2 = TT.dummy(250, 400); TT.tap('KeyZ'); TT.run(15); o.depthNear2 = mid2.hp;
     // 높이: 공중(z=100)에 떠 있는 적은 땅 공격이 안 맞음
-    TT.reset(); const sky = TT.dummy(250, 420, { z: 100, noGravity: true }); TT.tap('KeyZ'); TT.run(15); o.sky = sky.hp;
+    TT.reset(); const sky = TT.dummy(250, 420, { z: 120, noGravity: true }); TT.tap('KeyZ'); TT.run(15); o.sky = sky.hp;
+    TT.reset(); const cloud = TT.dummy(250, 420, { z: 92, h: 46, noGravity: true }); TT.tap('KeyZ'); TT.run(15); o.cloud = cloud.hp;     // 심술 구름 높이: 서서도 칠 수 있음
     TT.reset(); const low = TT.dummy(250, 420, { z: 30, noGravity: true }); TT.tap('KeyZ'); TT.run(15); o.low = low.hp;
     // 사거리
     TT.reset(); const edge = TT.dummy(300, 420); TT.tap('KeyZ'); TT.run(15); o.reachIn = edge.hp;
@@ -314,7 +322,8 @@ await section('기본 콤보: 이동 불가·방향·판정 범위', async () =>
   check('뒤쪽 방향키를 누르며 공격하면 뒤의 적도 맞음', r.backYes === 9993, String(r.backYes));
   check('[부정] 깊이(y)가 40 다르면 안 맞음', r.depthFar === 9999);
   check('깊이가 ±20 다르면 맞음', r.depthNear === 9993 && r.depthNear2 === 9993, `${r.depthNear} ${r.depthNear2}`);
-  check('[부정] 공중(z=100)에 떠 있는 적은 땅 공격이 안 맞음', r.sky === 9999);
+  check('[부정] 공중(z=120)에 떠 있는 적은 땅 공격이 안 맞음', r.sky === 9999);
+  check('심술 구름 높이(z=92)는 서서 휘둘러도 맞음 (머리 위 14px 까지 닿음)', r.cloud === 9993, String(r.cloud));
   check('낮게 뜬 적(z=30)은 맞음', r.low === 9993);
   check('사거리 안(적 몸 끝이 닿음)은 맞고', r.reachIn === 9993);
   check('[부정] 사거리 밖은 안 맞음', r.reachOut === 9999);
@@ -340,6 +349,8 @@ await section('점프 공격·공중 콤보', async () => {
     o.neg = [far.hp, deep.hp, sky.hp];
     // 공중 공격 중에도 살짝(50%) 조종
     TT.reset(); TT.tap('KeyX'); TT.run(5); TT.tap('KeyZ'); const x0 = P.x; Input.press('ArrowRight'); TT.run(6); o.steer = P.x - x0;
+    // 올라가는 중에 눌러도 위로 더 솟구치지 않고 훅 꺾여 내려찍음 (점프 공격은 낮게 이어서 쓰는 기술)
+    TT.reset(); TT.tap('KeyX'); TT.run(2); const vzUp = P.vz; TT.tap('KeyZ'); o.clamp = { before: vzUp, after: P.vz };
     // 땅에 있는 적에게도 맞음(낮은 점프)
     TT.reset(); const g = TT.dummy(250, 420); TT.tap('KeyX'); TT.tap('KeyZ'); TT.run(15); o.low = g.hp;
     return o;
@@ -351,6 +362,7 @@ await section('점프 공격·공중 콤보', async () => {
   check('[부정] 사거리 밖 / 깊이 다름 / 너무 높은 적은 안 맞음', r.neg.join() === '9999,9999,9999', r.neg.join());
   check('점프 공격 중 →: 6프레임 +12px (50% 조종)', near(r.steer, 12, 0.01), String(r.steer));
   check('낮은 점프로도 땅의 적을 맞힘', r.low < 9999);
+  check('올라가는 중(vz>8)에 점프 공격을 쓰면 위로 솟구치지 않고 꺾여 내려옴 (vz ≤ 2)', r.clamp.before > 8 && r.clamp.after <= 2, JSON.stringify(r.clamp));
 
   const c = await ev(() => {
     const o = {};
@@ -366,6 +378,13 @@ await section('점프 공격·공중 콤보', async () => {
     Input.release('ArrowRight');
     o.air = log.slice(3).map(l => ({ dmg: l.dmg, z: Math.round(l.z) }));
     o.combo = Game.combo.count;
+    // 방향키 없이도(어린이 배려) 앞에 선 적(거리 60)을 3타로 띄운 뒤 바로 점프하면, 앞으로 살짝 따라붙어 점프 공격이 이어짐
+    TT.reset({ x: 300 }); TT.dummy(360, 420); const l2 = TT.hits();
+    TT.tap('KeyZ'); TT.run(11); TT.tap('KeyZ'); TT.run(16); TT.tap('KeyZ');
+    let g2 = 0; while (l2.length < 3 && g2++ < 60) TT.run(1);
+    TT.tap('KeyX'); o.hop = P.kx;
+    for (let f = 0; f < 30; f++) { if (f === 3) Input.press('KeyZ'); if (f === 4) Input.release('KeyZ'); TT.run(1); }
+    o.noSteer = l2.map(l => l.dmg);
     // [부정] 3타를 헛치면 점프로 취소되지 않음 (맞혔을 때만)
     TT.reset(); TT.tap('KeyZ'); TT.run(11); TT.tap('KeyZ'); TT.run(16); TT.tap('KeyZ'); TT.run(14);
     TT.tap('KeyX'); o.whiff = { state: P.state, type: P.act && P.act.type, z: P.z };
@@ -376,6 +395,7 @@ await section('점프 공격·공중 콤보', async () => {
   check('3타 = 6,6,9 로 띄운 뒤', c.third.dmg.join() === '6,6,9' && c.third.vz > 0, JSON.stringify(c.third));
   check('3타가 맞은 직후 X → 후딜을 취소하고 점프(공중, 콤보 기억 지움)', c.cancel.state === 'jump' && c.cancel.act === null && c.cancel.vz > 5 && c.cancel.step === -1, JSON.stringify(c.cancel));
   check('떠 있는 적(z>0)에게 점프 공격이 맞음 = 공중 콤보 (7 피해)', c.air.length === 1 && c.air[0].dmg === 7 && c.air[0].z > 0, JSON.stringify(c.air));
+  check('점프 취소 때 앞으로 살짝 따라붙음(kx>0) → 방향키 없이도 거리 60 의 적에게 점프 공격이 이어짐 (6,6,9,7)', c.hop > 2 && c.noSteer.length === 4 && c.noSteer[3] === 7, JSON.stringify([c.hop, c.noSteer]));
   check('콤보 카운터가 4 로 이어짐 (6,6,9,7)', c.combo === 4, String(c.combo));
   check('[부정] 3타를 헛치면 X 로 후딜을 취소할 수 없음 (공격 중 이동 불가)', c.whiff.state === 'attack' && c.whiff.type === 'combo' && c.whiff.z === 0, JSON.stringify(c.whiff));
   check('[부정] 1타는 맞혀도 점프 취소 불가', c.noCancel1.state === 'attack' && c.noCancel1.type === 'combo', JSON.stringify(c.noCancel1));
@@ -401,7 +421,7 @@ await section('스킬: 피해 합계·범위·관통·전체', async () => {
     TT.reset({ x: 400 }); const f2 = TT.dummy(450, 420); TT.tap('KeyA'); TT.run(7 + 18); o.spinLast = { z: f2.z, vz: f2.vz, hp: 9999 - f2.hp };
     // ---------- S 돌진 찌르기: 관통 2.5배 = 15 ----------
     TT.reset({ x: 100 });
-    const t1 = TT.dummy(200, 420), t2 = TT.dummy(260, 420), t3 = TT.dummy(330, 425), tDeep = TT.dummy(200, 470), tFar = TT.dummy(700, 420);
+    const t1 = TT.dummy(200, 420), t2 = TT.dummy(260, 420), t3 = TT.dummy(295, 425), tDeep = TT.dummy(200, 470), tFar = TT.dummy(700, 420);
     const h2 = TT.hits(); const x0 = P.x;
     TT.tap('KeyS'); o.thrustStart = { state: P.state, cd: P.skills[1].cd, sfx: TT.sfx.slice() };
     TT.run(40);
@@ -418,7 +438,8 @@ await section('스킬: 피해 합계·범위·관통·전체', async () => {
     const nA = TT.dummy(60, 350), nB = TT.dummy(900, 500), nC = TT.dummy(600, 420, { z: 150, noGravity: true }), nD = TT.dummy(1500, 420), nE = TT.dummy(980, 420);
     const h3 = TT.hits();
     TT.tap('KeyD'); o.novaStart = { state: P.state, cd: P.skills[2].cd, sfx: TT.sfx.slice() };
-    TT.run(26); o.novaBefore = nA.hp;                                                    // 아직 모으는 중
+    const CH = PLAYER_DEF.skills[2].charge;                                              // 모으는 프레임 (누른 프레임이 첫 update)
+    TT.run(CH - 1); o.novaBefore = nA.hp; o.novaFxBefore = TT.fx.map(f => f[0]).join();   // 아직 모으는 중 (폭발 한 프레임 전)
     TT.run(1); o.novaHitstop = FX.hitstop; o.novaFx = TT.fx.map(f => f[0]); o.novaFlash = FX.flashAlpha;
     TT.run(80);
     const c3 = id => h3.filter(x => x.id === id).length;
@@ -441,7 +462,7 @@ await section('스킬: 피해 합계·범위·관통·전체', async () => {
   check('S: 앞으로 약 150~175px 돌진하고 멈춤', r.thrust.dx > 150 && r.thrust.dx < 180, String(r.thrust.dx));
   check('S: 맞은 적은 띄워 날림', r.thrustLaunch.vz > 0 || r.thrustLaunch.z > 0, JSON.stringify(r.thrustLaunch));
   check('S: 왼쪽 방향키를 누르며 쓰면 왼쪽으로 돌진해 맞힘', r.thrustLeft.dx < -150 && r.thrustLeft.hp === 15 && r.thrustLeft.face === -1, JSON.stringify(r.thrustLeft));
-  check('D: 쿨타임 1800 / 효과음 ultimate / 모으는 동안엔 피해 없음', r.novaStart.cd === 1800 && r.novaStart.sfx.includes('ultimate') && r.novaBefore === 9999, JSON.stringify(r.novaStart));
+  check('D: 쿨타임 1800 / 효과음 ultimate / 모으는 동안엔 피해 없음', r.novaStart.cd === 1800 && r.novaStart.sfx.includes('ultimate') && r.novaBefore === 9999 && r.novaFxBefore === '', JSON.stringify(r.novaStart));
   check('D: 폭발 순간 FX.flash 1번 + FX.freeze + FX.shake, 히트스톱 켜짐', r.novaFx.filter(x => x === 'flash').length === 1 && r.novaFx.includes('freeze') && r.novaFx.includes('shake') && r.novaHitstop >= 10 && r.novaFlash > 0 && r.novaFlash <= 0.6, JSON.stringify([r.novaFx, r.novaHitstop, r.novaFlash]));
   check('D: 화면 안의 모든 적(다른 깊이·공중 포함)이 각자 한 번씩 30 (5.0배)', r.nova.A === 30 && r.nova.B === 30 && r.nova.C === 30 && r.nova.nA === 1 && r.nova.nB === 1 && r.nova.nC === 1, JSON.stringify(r.nova));
   check('D: [부정] 카메라 화면 밖(x=1500, 980 은 화면 끝 밖)의 적은 안 맞음', r.nova.D === 0 && r.nova.E === 0, JSON.stringify([r.nova.D, r.nova.E]));
@@ -535,27 +556,31 @@ await section('쿨타임·스킬 입력', async () => {
 await section('궁극기 무적', async () => {
   const r = await ev(() => {
     const o = { dmg: [] };
+    const ND = PLAYER_DEF.skills[2], TOTAL = ND.charge + ND.recovery;              // 발동 동작 길이 (54)
+    o.total = TOTAL; o.after = ND.invulnAfter;
     TT.reset(); TT.dummy(400, 420);
-    const hp0 = P.hp;
-    TT.tap('KeyD'); o.invulnStart = P.invuln;
-    for (let i = 0; i < 80; i++) {
-      if (i % 5 === 0) o.dmg.push([i, TT.enemyHit({ dmg: 20 }), P.hp, P.invuln]);
+    TT.tap('KeyD'); o.invulnStart = P.invuln;                                       // 발동 update 끝에 커널이 -1 한 값
+    // 발동 동작 동안(TOTAL 프레임)과 여운(invulnAfter) 동안, 5프레임마다 때려 봄 (무적이니 피해 0)
+    for (let i = 1; i < TOTAL + ND.invulnAfter - 1; i++) {
       TT.run(1);
+      if (i % 5 === 0) { const inv = P.invuln; o.dmg.push([i, TT.enemyHit({ dmg: 20 }), P.hp, inv]); }
     }
-    o.end = { hp: P.hp, state: P.state, invuln: P.invuln };
-    o.after = TT.enemyHit({ dmg: 20 }); o.afterHp = P.hp;
+    // 무적이 다 끝날 때까지 기다린 뒤에는 맞음
+    let g = 0; while (P.invuln > 0 && g++ < 200) TT.run(1);
+    o.end = { invuln: P.invuln, hp: P.hp, act: P.act, state: P.state };
+    o.afterHit = TT.enemyHit({ dmg: 20 }); o.afterHp = P.hp; o.afterInv = P.invuln;
     // 궁극기를 쓰기 전에는 맞음 (대조)
     TT.reset(); o.control = TT.enemyHit({ dmg: 20 });
-    // 모으는 동안엔 눌러서 보이는 깜빡임 대신 후광 (act 유지)
+    // 모으는 동안엔 깜빡임 대신 후광 (act 유지)
     TT.reset(); TT.tap('KeyD'); TT.run(10); o.charging = { state: P.state, type: P.act.type };
     return o;
   });
-  check('발동하자마자 무적 (invuln ≥ 총 길이 54 + 여운 20)', r.invulnStart >= 74, String(r.invulnStart));
-  const during = r.dmg.filter(([i]) => i < 54);
-  check('[부정] 발동 중(54프레임) 내내 맞아도 피해 0, hp 100 그대로', during.length >= 10 && during.every(([i, d, hp]) => d === 0 && hp === 100), JSON.stringify(during.slice(0, 3)));
-  const grace = r.dmg.filter(([i]) => i >= 54 && i < 70);
-  check('끝난 뒤 여운(20프레임) 동안도 무적', grace.length >= 3 && grace.every(([i, d]) => d === 0), JSON.stringify(grace));
-  check('무적이 끝나면 다시 맞음 (일반 피해 20)', r.after === 20 && r.afterHp === 80 && r.end.invuln === 0, JSON.stringify(r.end));
+  check(`발동하자마자 무적 (invuln = 길이 ${r.total} + 여운 ${r.after} 에서 1 프레임 지난 값)`, r.invulnStart === r.total + r.after - 1, String(r.invulnStart));
+  const during = r.dmg.filter(([i]) => i < r.total);
+  check(`[부정] 발동 중(${r.total}프레임) 내내 맞아도 피해 0, hp 100 그대로`, during.length >= 10 && during.every(([i, d, hp, inv]) => d === 0 && hp === 100 && inv > 0), JSON.stringify(during.slice(0, 3)));
+  const grace = r.dmg.filter(([i]) => i >= r.total);
+  check(`끝난 뒤 여운(${r.after}프레임) 동안도 무적 (동작은 끝났는데도 피해 0)`, grace.length >= 3 && grace.every(([i, d, hp, inv]) => d === 0 && hp === 100 && inv > 0), JSON.stringify(grace));
+  check('무적이 끝나면 다시 맞음 (일반 피해 20, 그 뒤 새 무적 45)', r.end.invuln === 0 && r.end.act === null && r.afterHit === 20 && r.afterHp === 80 && r.afterInv === 45, JSON.stringify([r.end, r.afterHit, r.afterInv]));
   check('[대조] 궁극기 없이는 맞음', r.control === 20);
   check('궁극기를 모으는 중에는 skill 상태', r.charging.state === 'skill' && r.charging.type === 'nova');
 });
@@ -640,6 +665,7 @@ await section('그리기: 모든 상태가 오류 없이 그려지고 모양이 
     const sample = (label, x = 200, y = 420) => { o.shots[label] = TT.ink(x - 150, y - 200, 300, 230); TT.tile(label); };
     TT.reset({ x: 480 }); TT.run(10); sample('idle', 480);
     const idle = o.shots.idle;
+    o.idleHigh = TT.ink(480 - 150, 420 - 112, 300, 50, true);
     Input.press('ArrowRight'); TT.run(7); sample('walk', P.x); Input.release('ArrowRight'); TT.run(2);
     TT.tap('KeyX'); TT.run(4); sample('jump up', P.x); TT.run(14); sample('jump down', P.x); TT.run(30);
     TT.run(1); sample('land', P.x);
@@ -654,6 +680,8 @@ await section('그리기: 모든 상태가 오류 없이 그려지고 모양이 
     TT.reset({ x: 480 }); TT.enemyHit({ hb: { knock: 4 } }); TT.run(4); sample('hurt', P.x);
     TT.reset({ x: 480 }); P.hp = 1; TT.enemyHit({ dmg: 10, hb: { knock: 4 } }); TT.run(40); sample('down', P.x);
     o.down = o.shots.down;
+    o.downHigh = TT.ink(480 - 150, 420 - 112, 300, 50, true);                          // 키 62~112px 높이 띠: 서 있으면 머리·삐죽머리가 있는 곳
+    o.downLow = TT.ink(480 - 150, 420 - 40, 300, 40, true);                            // 땅에서 40px 이내 띠: 누우면 몸이 여기에 가로로 깔림
     Player.revive(P); TT.run(6); sample('revive', P.x);
     TT.run(130); P.cheer = true; TT.run(5); sample('cheer', P.x); P.cheer = false;
     // 얼굴 방향 뒤집기: 같은 휘두름 장면이 좌우 대칭
@@ -661,10 +689,10 @@ await section('그리기: 모든 상태가 오류 없이 그려지고 모양이 
     TT.reset({ x: 480 }); TT.dummy(420, 420, { superArmor: true }); Input.press('ArrowLeft'); TT.tap('KeyZ'); Input.release('ArrowLeft'); TT.run(6); const L1 = TT.ink(330, 220, 300, 230);
     o.mirror = { R1, L1, face: P.face };
     // 색: 평상시 튜닉 하늘색, 번쩍이면(flash) 흰색
-    TT.reset({ x: 480 }); TT.run(5); Loop.draw(); o.tunic = TT.px(488, 386);
-    P.flash = 6; Loop.draw(); o.flashPx = TT.px(488, 386);
+    TT.reset({ x: 480 }); TT.run(5); Loop.draw(); o.tunic = TT.px(476, 397);
+    P.flash = 6; Loop.draw(); o.flashPx = TT.px(476, 397);
     // 무적 깜빡임: 같은 위치 색이 프레임마다 달라짐
-    TT.reset({ x: 480 }); P.invuln = 90; const cols = new Set(); for (let i = 0; i < 30; i++) { TT.run(1); Loop.draw(); cols.add(TT.px(488, 386).join()); }
+    TT.reset({ x: 480 }); P.invuln = 90; const cols = new Set(); for (let i = 0; i < 30; i++) { TT.run(1); Loop.draw(); cols.add(TT.px(476, 397).join()); }
     o.flicker = cols.size;
     // 돌진 잔상이 쌓였다가 사라짐
     TT.reset({ x: 380 }); TT.tap('KeyS'); TT.run(24); o.ghosts = P.ghosts.length; TT.run(60); o.ghostsGone = P.ghosts.length;
@@ -676,7 +704,8 @@ await section('그리기: 모든 상태가 오류 없이 그려지고 모양이 
   const s = r.shots;
   check('모든 상태(서기·걷기·점프·3타·공중·스킬 3개·피격·쓰러짐·부활·만세)가 오류 없이 그려짐', Object.keys(s).length >= 17 && Object.values(s).every(v => v.L + v.R > 400), Object.entries(s).map(([k, v]) => `${k}:${v.L + v.R}`).join(' '));
   check('서 있는 모습은 세로로 길다 (키 > 폭)', s.idle.bh > s.idle.bw * 0.9 && s.idle.bh > 70, `${s.idle.bw}x${s.idle.bh}`);
-  check('쓰러진 모습은 가로로 누워 있다 (폭 > 높이)', s.down.bw > s.down.bh && s.down.bh < s.idle.bh * 0.7, `${s.down.bw}x${s.down.bh} vs ${s.idle.bw}x${s.idle.bh}`);
+  check('쓰러진 모습은 가로로 누워 있다 (서 있을 때 머리가 있던 높이 띠는 거의 비고, 땅 가까운 띠에 몸이 넓게 깔림)',
+    r.downHigh.L + r.downHigh.R < (r.idleHigh.L + r.idleHigh.R) * 0.3 && r.downLow.bw > 60, `머리 높이 윤곽 ${r.downHigh.L + r.downHigh.R} (서 있을 때 ${r.idleHigh.L + r.idleHigh.R}), 낮은 띠 폭 ${r.downLow.bw}`);
   check('3타 큰 휘두름은 서 있을 때보다 훨씬 넓게 그려짐', s.combo3.bw > s.idle.bw * 1.3, `${s.combo3.bw} vs ${s.idle.bw}`);
   check('스킬 이펙트(회오리/궁극기)는 넓게 퍼짐', s.spin.bw > s.idle.bw * 1.5 && s['nova blast'].bw > 250, `${s.spin.bw} ${s['nova blast'].bw}`);
   check('공격 장면은 칼 쪽(오른쪽)이 훨씬 많이 그려지고, 왼쪽을 보면 정확히 반대로 대칭', r.mirror.R1.R > r.mirror.R1.L * 1.2 && r.mirror.L1.L > r.mirror.L1.R * 1.2 && Math.abs(r.mirror.R1.R - r.mirror.L1.L) / r.mirror.R1.R < 0.2,

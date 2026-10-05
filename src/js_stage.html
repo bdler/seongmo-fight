@@ -1,4 +1,1249 @@
 <script>
-/* stage 모듈 — 소유 모듈이 구현하기 전까지의 빈 스텁 */
-const Stage = {};
+'use strict';
+/* ==========================================================================
+   js_stage.html — 스테이지 / 방 진행 / 배경 (stage 모듈)
+   --------------------------------------------------------------------------
+   계약서: docs/ARCHITECTURE.md 5-3.   구성:
+     0. STAGE_TUNE  숫자표 (시간·점수·드롭·배경 색 — 숫자만 바꿔도 게임이 달라져요)
+     1. STAGES      스테이지 데이터 (방 이름·너비·웨이브·보상)
+     2. Stage       방 상태 머신 / 웨이브 소환 / 픽업 / 점수 / 죽음·부활 / 결과
+     3. 배경        사탕 숲을 Canvas 도형만으로 (멀리 산 → 언덕 → 나무·바위·덤불 → 바닥 타일)
+     4. 오버레이    방 이름 배너 · GO ▶ · 튜토리얼 · 보스 경고 · CLEAR! · 페이드
+   ※ 전역 이름은 STAGE_TUNE · STAGES · Stage 세 개뿐이에요. 나머지는 모두 함수 안에 숨겼어요.
+   ※ 다른 모듈(Player, Enemies, UI …)은 함수 "안에서" 부르고, 없거나 비어 있어도 죽지 않게 ?. 로 불러요.
+   ※ 방 상태(Stage.state): intro → fight → clear → transition → intro … → (보스방) → victory → 결과 씬
+                           플레이어가 쓰러지면 dead → (부활하면 원래 상태로 / 목숨이 없으면 over)
+   ※ 이벤트 리스너는 파일이 로드될 때 딱 한 번만 등록합니다 (Stage.start 를 몇 번 불러도 겹치지 않음).
+   ========================================================================== */
+
+// ===== 0. 숫자표 — 시간 단위는 프레임(1/60초) =====
+const STAGE_TUNE = {
+  introFrames: 90,         // 방에 들어오면 방 이름 배너가 보이는 시간 (1.5초)
+  bossIntroFrames: 150,    // 보스방: 경고 배너가 보이는 시간
+  bossSpawnAt: 70,         // 보스방에 들어온 지 이 프레임 뒤에 보스가 위에서 쿵! 하고 떨어짐
+  bossDropX: 560,          // 보스가 떨어지는 가로 위치: 주인공 오른쪽으로 이만큼 떨어진 곳 (최소값이기도 함)
+  waveGap: 50,             // 웨이브를 다 잡은 뒤 다음 웨이브가 나오기까지 숨 돌리는 시간
+  spawnGap: 18,            // 같은 웨이브에서 한 마리씩 나오는 간격
+  maxOnScreen: 6,          // 화면에 동시에 있을 수 있는 적 (나머지는 줄 서서 기다림)
+  exitMargin: 40,          // 클리어한 방의 오른쪽 끝에서 이만큼 안쪽까지 오면 "닿았다"
+  playerStart: { x: 60, y: 420 },   // 새 방에 들어올 때 주인공 위치
+  transitionFrames: 40,    // 방 사이 페이드 (아웃 20 + 인 20)
+  deadFrames: 90,          // 쓰러진 뒤 부활/게임오버까지 (1.5초)
+  score: { roomClear: 300, stageClear: 1000, noDeath: 500, comboStep: 0.02, comboCap: 30 },   // 처치 점수 = 점수 × (1 + min(콤보, 30) × 0.02)
+  drop: { candy: 0.12, coin: 0.35 },                 // 처치했을 때 드롭 확률 (사탕 12%, 코인 35%, 보스는 없음)
+  bossCandyAt: 0.5,        // 보스 체력이 이 비율 이하가 되면 사탕 1개
+  pickup: {
+    candyHeal: 20, coinScore: 50,                    // 사탕은 HP +20, 코인은 점수 +50
+    candyLife: 900, coinLife: 600, blink: 150,       // 사라지기까지 / 사라지기 전 깜빡이는 시간
+    rx: 36, ry: 30,                                  // 줍는 거리 (가로 · 깊이)
+    collectDelay: 10,                                // 떨어지고 이 프레임이 지나야 주울 수 있음 (톡 튀는 모습이 보이게)
+    max: 14,                                         // 바닥에 동시에 있을 수 있는 개수
+  },
+  victory: { slowFrames: 80, bannerAt: 30, total: 180 },   // 보스를 잡은 뒤: 슬로모션 / CLEAR! 글자가 나오는 때 / 결과 화면으로 넘어가는 때
+  hint: { fadeDelay: 20, fadeFrames: 40 },           // 튜토리얼 힌트: 첫 타격 뒤 사라지기까지
+
+  // ----- 배경 룩 (사탕 숲) : 방마다 다른 분위기. 색은 위에서 아래(지평선) 순서 -----
+  //   far: 먼 산 종류('peaks' 사탕 산 / 'arches' 보스방 아치)   items: 심는 순서(반복)   spacing: 물건 사이 간격 범위
+  looks: {
+    forest: {
+      sky: ['#7fd3ff', '#bde8ff', '#ffeaf6'], sun: { x: 0.80, y: 84, r: 40, color: '#fff4b3' }, clouds: 5,
+      far: 'peaks', peaks: ['#e6d6fb', '#d6c6f4'], icing: '#fffafc', hills: ['#c4f0d2', '#a8e5bd'], hillTop: '#e9fbec',
+      ground: ['#f3d9ae', '#ecce9f'], gline: '#d7b484', lip: '#fff7ea', lipEdge: '#ffb7de', outline: 'rgba(43,27,58,.30)',
+      items: ['tree', 'bush', 'rock', 'tree', 'tree', 'bush'], spacing: [150, 250], treeBase: [296, 318],
+      treeCols: ['#ff8ad8', '#7ad7f0', '#ffd93d', '#b79bff', '#7bd88f'], stripe: '#ff8ad8',
+      bushCols: ['#ffc2ea', '#bfeaff', '#fff0b8'], rockCols: ['#a9e9ff', '#ffd0f0', '#d4f0a8'],
+    },
+    path: {
+      sky: ['#ffbfe0', '#ffdcec', '#fff3da'], sun: { x: 0.28, y: 96, r: 36, color: '#fffbe3' }, clouds: 4,
+      far: 'peaks', peaks: ['#f6cde6', '#eebfdc'], icing: '#fffafc', hills: ['#bff0d9', '#9be3c3'], hillTop: '#e4fbf1',
+      ground: ['#f3d7c4', '#ebcbb6'], gline: '#d3a994', lip: '#fff6ee', lipEdge: '#ff9fd0', outline: 'rgba(43,27,58,.30)',
+      items: ['cane', 'bush', 'tree', 'cane', 'rock', 'tree', 'bush'], spacing: [120, 210], treeBase: [296, 316],
+      treeCols: ['#7ad7f0', '#ff8ad8', '#b79bff', '#7bd88f'], stripe: '#7ad7f0',
+      bushCols: ['#ffc2ea', '#c9f5df', '#ffe5a8'], rockCols: ['#ffd0f0', '#a9e9ff', '#e4d0ff'],
+    },
+    river: {
+      sky: ['#93d6ff', '#cdeeff', '#fff1d6'], sun: { x: 0.70, y: 80, r: 38, color: '#fff2b0' }, clouds: 5,
+      far: 'peaks', peaks: ['#e9d9f6', '#dccbef'], icing: '#fffaf6', hills: ['#c7efcf', '#afe4bd'], hillTop: '#eafbea',
+      ground: ['#efd3ab', '#e6c69a'], gline: '#cfa97a', lip: '#fff3dc', lipEdge: '#c98a62', outline: 'rgba(43,27,58,.30)',
+      river: { top: 238, colors: ['#a8714f', '#85503a'], foam: '#e1b293' },
+      items: ['rock', 'bush', 'rock', 'bush', 'cane'], spacing: [150, 260], treeBase: [240, 244], treeFar: true,
+      treeCols: ['#ff8ad8', '#ffd93d', '#7ad7f0', '#b79bff'], stripe: '#ff8ad8',
+      bushCols: ['#ffc2ea', '#bfeaff', '#ffe9a8'], rockCols: ['#d9b48c', '#c79a72', '#e6c8a8'],
+    },
+    cave: {
+      sky: ['#352a70', '#6a4a9e', '#c28ccf'], sun: { x: 0.18, y: 90, r: 30, color: '#ffe3f8' }, stars: 26,
+      far: 'peaks', peaks: ['#4d3b88', '#43337a'], icing: '#8f7bd0', hills: ['#5b4592', '#4a3780'], hillTop: '#7a64b8',
+      ground: ['#a28ec9', '#9682bf'], gline: '#7d69a8', lip: '#e0d0f7', lipEdge: '#ff9bd6', outline: 'rgba(30,15,60,.38)',
+      items: ['crystal', 'rock', 'crystal', 'bush', 'crystal', 'rock'], spacing: [140, 240], treeBase: [300, 318],
+      treeCols: ['#ff8ad8', '#7ad7f0'], stripe: '#ff8ad8',
+      bushCols: ['#9fe3ff', '#ffb0e8', '#c9b6ff'], rockCols: ['#b8a2f0', '#8fd8f0', '#ffb7e6'],
+      crystalCols: ['#ff8ad8', '#7ad7f0', '#7bd88f', '#c9a6ff'], cave: true,
+    },
+    boss: {
+      sky: ['#150c2a', '#3a1640', '#7c2444'], stars: 0,
+      far: 'arches', peaks: ['#8a2d52', '#5a1d44'], icing: '#c25b73', hills: null, hillTop: '#9a3a5e',
+      ground: ['#704065', '#673760'], gline: '#4b2545', lip: '#b36585', lipEdge: '#ff7a8a', outline: 'rgba(20,5,30,.5)',
+      items: ['rock', 'crystal', 'rock'], spacing: [210, 320], treeBase: [300, 318],
+      treeCols: ['#ff8ad8'], stripe: '#ff8ad8',
+      bushCols: ['#ff9bb0'], rockCols: ['#b05a86', '#8a4a82'], crystalCols: ['#ff6b8f', '#ffb347', '#c46bff'], boss: true,
+    },
+  },
+};
+
+// ===== 1. 스테이지 데이터 =====
+//   rooms[].waves 는 "웨이브 목록". 각 웨이브는 { type, count } 묶음의 목록이고, 앞 웨이브를 다 잡아야 다음 웨이브가 나와요.
+//   reward: 방을 깨면 바닥에 나오는 보상('candy' | 'coin' | null)   boss: true 면 보스방   look: 배경 룩(STAGE_TUNE.looks 의 이름)
+const STAGES = [
+  { id: 'stage1', name: '사탕 숲', theme: 'candy',
+    rooms: [
+      { name: '숲 입구', width: 960, look: 'forest', tutorial: true,
+        waves: [[{ type: 'slime', count: 2 }], [{ type: 'slime', count: 3 }]], reward: null, boss: false },
+      { name: '달콤한 오솔길', width: 1920, look: 'path',
+        waves: [[{ type: 'slime', count: 3 }], [{ type: 'slime', count: 2 }, { type: 'soldier', count: 1 }]], reward: 'candy', boss: false },
+      { name: '초콜릿 시냇가', width: 1920, look: 'river',
+        waves: [[{ type: 'soldier', count: 2 }, { type: 'slime', count: 2 }], [{ type: 'cloud', count: 2 }, { type: 'slime', count: 2 }]], reward: null, boss: false },
+      { name: '젤리 동굴 입구', width: 1920, look: 'cave',
+        waves: [[{ type: 'cloud', count: 1 }, { type: 'soldier', count: 2 }],
+                [{ type: 'slime', count: 3 }, { type: 'soldier', count: 2 }, { type: 'cloud', count: 1 }]], reward: 'candy', boss: false },
+      { name: '젤리 대왕의 방', width: 960, look: 'boss', waves: [], reward: null, boss: true, bossType: 'jellyKing' },
+    ] },
+];
+
+const Stage = (() => {
+  const T = STAGE_TUNE;
+  const TAU = Math.PI * 2;
+  const clamp01 = u => clamp(u, 0, 1);
+  const ease = u => { u = clamp01(u); return u * u * (3 - 2 * u); };
+  const easeOutBack = u => { u = clamp01(u); const c = 1.8; return 1 + (c + 1) * Math.pow(u - 1, 3) + c * Math.pow(u - 1, 2); };
+  const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };   // 그림용 가짜 난수 (게임 난수 rand() 는 건드리지 않음)
+  const GROUND_Y = FLOOR_TOP - 40;       // 지평선: 바닥 타일이 시작되는 y
+  const PAD = 32;                        // 배경 그림을 화면 흔들림 때문에 양옆으로 더 그려 두는 여유
+
+  // ---------------------------------------------------------------------
+  // 내부 상태 (Stage.start 때마다 통째로 새로 만들어요 → 이전 판의 찌꺼기가 남지 않음)
+  // ---------------------------------------------------------------------
+  const S = {
+    active: false,                  // 진행 중인 런이 있나
+    stageIdx: 0, stage: null, room: null,
+    t: 0,                           // 지금 상태가 시작된 뒤 프레임 (일시정지/히트스톱 중엔 멈춤)
+    clock: 0,                       // 런 시작 뒤 프레임 (연출 시간)
+    queue: [], spawnCd: 0, waveWait: 0, spawnSeq: 0,
+    roomsCleared: 0,
+    bossSpawned: false, bossFailed: false, bossCandy: false,
+    deadT: 0, resume: 'fight',
+    banner: null,                   // 가운데 큰 글씨 { text, sub, color, t, life }
+    edgeHintCd: 0,
+    tut: null,
+    bgCache: null,                  // 배경 캐시 { key, bg }
+  };
+  const newTut = () => ({ moved: false, jumped: false, hit: false, hitT: 0, fade: 0, sx: T.playerStart.x, sy: T.playerStart.y });
+
+  const api = {
+    state: 'idle',                  // 'idle'(아직 시작 전) | 'intro' | 'fight' | 'clear' | 'transition' | 'victory' | 'dead' | 'over'
+    roomIndex: 0,                   // 지금 방 번호 (0 부터)
+    waveIndex: -1,                  // 지금 웨이브 번호 (0 부터, 아직 안 나왔으면 -1)
+  };
+
+  // ---------------------------------------------------------------------
+  // 작은 도우미들
+  // ---------------------------------------------------------------------
+  const isFoe = e => !!e && (e.kind === 'enemy' || e.kind === 'boss');
+  function aliveFoes() {
+    if (typeof Enemies !== 'undefined' && typeof Enemies.aliveCount === 'function') return Enemies.aliveCount();
+    let n = 0;
+    for (const e of Entities.list) if (isFoe(e) && !e.dead && !e._removed) n++;
+    return n;
+  }
+  const pickupsOnField = () => Entities.list.filter(e => e.kind === 'pickup' && !e._removed);
+  const isLastRoom = () => !!S.stage && api.roomIndex >= S.stage.rooms.length - 1;
+
+  function syncGameStage() {
+    const st = S.stage, gs = Game.stage;
+    gs.id = st.id; gs.name = st.name;
+    gs.roomIndex = api.roomIndex; gs.roomCount = st.rooms.length;
+    gs.roomName = S.room ? S.room.name : '';
+  }
+
+  function say(text, sub, color, life) { S.banner = { text, sub: sub || '', color: color || COLORS.yellow, t: 0, life: life || 70 }; }
+
+  // ---------------------------------------------------------------------
+  // 별점 / 결과
+  // ---------------------------------------------------------------------
+  //   클리어하면 1개, 쓰러진 횟수가 2번 이하면 +1, 한 번도 안 쓰러지면 +1. 게임 오버는 0개.
+  function calcStars(r) {
+    r = r || {};
+    if (!r.cleared) return 0;
+    const deaths = Math.max(0, Number(r.deaths) || 0);
+    let s = 1;
+    if (deaths <= 2) s++;
+    if (deaths === 0) s++;
+    return s;
+  }
+
+  function finishRun(cleared) {
+    const st = S.stage;
+    Game.result = {
+      cleared: !!cleared, score: Game.score, stars: calcStars({ cleared, deaths: Game.deaths }),
+      timeFrames: Game.frame, kills: Game.kills, deaths: Game.deaths, maxCombo: Game.combo.max,
+      difficulty: Game.difficulty, stageId: st.id, stageName: st.name, rooms: S.roomsCleared,
+    };
+    S.active = false;
+    api.state = cleared ? 'victory' : 'over';
+    Music.play(null);
+    Events.emit(cleared ? 'stageCleared' : 'gameOver', Game.result);
+    Game.setScene('result');
+  }
+
+  // ---------------------------------------------------------------------
+  // 픽업 (사탕 · 코인)
+  // ---------------------------------------------------------------------
+  function collect(e, p) {
+    const P = T.pickup;
+    if (e.type === 'candy') {
+      if (typeof Player !== 'undefined' && Player.heal) Player.heal(p, P.candyHeal);
+      else p.hp = Math.min(p.maxHp, p.hp + P.candyHeal);
+    } else {
+      Game.addScore(P.coinScore);
+      FX.popup(e.x, e.y - e.z - 24, '+' + P.coinScore, { color: COLORS.yellow, size: 26, life: 36 });
+      SFX.play('coin');
+    }
+    FX.burst(e.x, e.y - e.z - 8, { kind: 'spark', count: 7, speed: 3.5, life: 24, colors: e.type === 'candy' ? [COLORS.pink, COLORS.white, COLORS.mint] : [COLORS.yellow, COLORS.white] });
+    Events.emit('pickup', { type: e.type, x: e.x, y: e.y });
+    Entities.remove(e);
+  }
+
+  function pickupUpdate(e) {
+    const P = T.pickup;
+    e.age++;
+    const pop = e.age < 22 ? Math.sin(e.age / 22 * Math.PI) * 34 : 0;                 // 톡 튀어오름
+    e.z = 22 + Math.sin(e.age * 0.08 + e.phase) * 4 + pop;                           // 둥실둥실
+    if (e.age >= e.life) { Entities.remove(e); return; }
+    const p = Game.player;
+    if (e.age >= P.collectDelay && p && !p.dead && !p._removed && Math.abs(p.x - e.x) < P.rx && Math.abs(p.y - e.y) < P.ry) collect(e, p);
+  }
+
+  function pickupDraw(ctx, e) {
+    const P = T.pickup, left = e.life - e.age;
+    if (left < P.blink && Math.floor(e.age / (left < 60 ? 5 : 9)) % 2 === 1) return;   // 사라지기 전에 깜빡 (초당 3번 이하)
+    const x = e.x, y = e.y - e.z - 12;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 2.6; ctx.strokeStyle = COLORS.ink;
+    if (e.type === 'candy') {                                   // 포장지 사탕
+      ctx.rotate(Math.sin(e.age * 0.1 + e.phase) * 0.18);
+      const pulse = 1 + Math.sin(e.age * 0.15) * 0.04;
+      ctx.scale(pulse, pulse);
+      ctx.fillStyle = COLORS.mint;
+      ctx.beginPath(); ctx.moveTo(-8, 0); ctx.lineTo(-20, -9); ctx.lineTo(-20, 9); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(20, -9); ctx.lineTo(20, 9); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = COLORS.pink;
+      ctx.beginPath(); ctx.arc(0, 0, 11, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2.4;
+      ctx.beginPath(); ctx.arc(0, 0, 6.5, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, 6.5, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
+    } else {                                                    // 반짝 코인 (빙글빙글)
+      const sx = Math.max(0.16, Math.abs(Math.cos(e.age * 0.07 + e.phase)));
+      ctx.scale(sx, 1);
+      ctx.fillStyle = COLORS.yellow;
+      ctx.beginPath(); ctx.arc(0, 0, 13, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#d99a1c'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, 8.5, 0, TAU); ctx.stroke();
+      if (sx > 0.45) { ctx.fillStyle = '#e8a82a'; Draw.star(ctx, 0, 0, 6, 2.8, 0); ctx.fill(); }
+      ctx.fillStyle = 'rgba(255,255,255,.7)';
+      ctx.beginPath(); ctx.ellipse(-5, -6, 2.6, 1.6, -0.6, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+    const tw = (e.age + e.phase * 9) % 70;                      // 가끔 반짝
+    if (tw < 12) {
+      const k = Math.sin(tw / 12 * Math.PI), sz = 7 * k;
+      ctx.save(); ctx.translate(x + 12, y - 12); ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(43,27,58,.4)'; ctx.lineWidth = 1;
+      Draw.star(ctx, 0, 0, sz, sz * 0.35, 0, 4); ctx.fill(); ctx.stroke(); ctx.restore();
+    }
+  }
+
+  // 바닥에 사탕/코인을 떨어뜨린다. 돌려주는 값: 만든 픽업 엔티티
+  function dropPickup(x, y, type) {
+    const P = T.pickup;
+    type = type === 'candy' ? 'candy' : 'coin';
+    const list = pickupsOnField();
+    while (list.length >= P.max) Entities.remove(list.shift());      // 너무 많으면 오래된 것부터
+    const e = Entities.make({
+      kind: 'pickup', team: 'neutral', type, x, y, z: 22, w: 30, h: 30, hp: 1, maxHp: 1,
+      noGravity: true, untargetable: true,
+      age: 0, life: type === 'candy' ? P.candyLife : P.coinLife, phase: RNG.fx() * TAU,
+      kx: (RNG.fx() - 0.5) * 5,                                       // 톡 튀면서 옆으로 살짝 미끄러짐
+      update: pickupUpdate, draw: pickupDraw,
+    });
+    Entities.add(e);
+    return e;
+  }
+
+  // ---------------------------------------------------------------------
+  // 웨이브 소환
+  // ---------------------------------------------------------------------
+  //   [{type:'slime',count:3},{type:'soldier',count:2}] → slime, soldier, slime, soldier, slime  (종류를 번갈아 내보냄)
+  function expandWave(wave) {
+    const groups = (wave || []).map(g => ({ type: g.type, n: Math.max(0, Math.floor(Number(g.count)) || 0) }));
+    const out = [];
+    for (let more = true; more;) {
+      more = false;
+      for (const g of groups) if (g.n > 0) { out.push(g.type); g.n--; more = true; }
+    }
+    return out;
+  }
+
+  function loadWave(i) {
+    api.waveIndex = i;
+    S.queue = expandWave(S.room.waves[i]);
+    S.spawnCd = i === 0 ? 12 : 0;
+    S.waveWait = 0;
+    if (i > 0) say('다음 물결!', (i + 1) + ' / ' + S.room.waves.length, COLORS.sky, 60);
+  }
+
+  // 큐에서 한 마리 꺼내 소환. 좁은 방은 위에서 떨어지고, 넓은 방은 화면 바깥(오른쪽 → 안 되면 왼쪽)에서 걸어 들어옴
+  function spawnNext() {
+    const type = S.queue.shift();
+    const room = S.room, p = Game.player;
+    const y = randInt(FLOOR_TOP + 15, FLOOR_BOTTOM - 10);
+    let x, opts;
+    if (room.width <= W) {
+      x = randInt(110, W - 110);
+      for (let tries = 6; p && Math.abs(x - p.x) < 170 && tries > 0; tries--) x = randInt(110, W - 110);   // 주인공 머리 위로는 피함
+      opts = { drop: true };
+    } else {
+      const gap = (S.spawnSeq % 3) * 46;
+      const right = Cam.x + W + 40 + gap, left = Cam.x - 40 - gap;
+      if (right <= room.width - 40) x = right;
+      else if (left >= 40) x = left;
+      else { x = Cam.x + randInt(120, W - 120); opts = { drop: true }; }
+    }
+    S.spawnSeq++;
+    return typeof Enemies !== 'undefined' && Enemies.spawn ? Enemies.spawn(type, x, y, opts) : null;
+  }
+
+  function spawnBoss() {
+    const room = S.room, p = Game.player;
+    const x = clamp((p ? p.x : 300) + T.bossDropX, T.bossDropX, W - 130);
+    const b = typeof Enemies !== 'undefined' && Enemies.spawn ? Enemies.spawn(room.bossType || 'jellyKing', x, 430, { drop: true }) : null;
+    if (b) S.bossSpawned = true; else S.bossFailed = true;
+  }
+
+  // ---------------------------------------------------------------------
+  // 방 상태 머신
+  // ---------------------------------------------------------------------
+  function enterRoom(idx) {
+    const rooms = S.stage.rooms;
+    idx = clamp(Math.floor(idx), 0, rooms.length - 1);
+    S.room = rooms[idx];
+    api.roomIndex = idx; api.waveIndex = -1;
+    S.queue = []; S.spawnCd = 0; S.waveWait = 0; S.spawnSeq = 0;
+    S.bossSpawned = false; S.bossFailed = false; S.bossCandy = false;
+    S.banner = null; S.edgeHintCd = 0;
+    Game.world.width = S.room.width;
+    syncGameStage();
+    getBG(S.stageIdx, idx, S.room);                       // 배경을 미리 그려 둠 (페이드 중이라 끊김이 안 보임)
+    if (S.room.boss) { Music.play('boss'); SFX.play('warn'); }
+    Events.emit('roomStarted', { index: idx, room: S.room });
+  }
+
+  function startFight() {
+    api.state = 'fight'; S.t = 0;
+    if (!S.room.boss) loadWave(0);
+  }
+
+  function clearRoom() {
+    if (isLastRoom()) { beginVictory(); return; }                      // 마지막 방을 깨면 스테이지 클리어 (보스방이 아니어도)
+    api.state = 'clear'; S.t = 0;
+    S.roomsCleared++;
+    Game.addScore(T.score.roomClear);
+    const room = S.room, p = Game.player;
+    if (room.reward) dropPickup(clamp((p ? p.x : 400) + 110, 60, Game.world.width - 80), randInt(380, 450), room.reward);
+    SFX.play('go');
+    say('방 클리어!', '+' + T.score.roomClear, COLORS.yellow, 80);
+    if (p) FX.burst(p.x, p.y - 70, { kind: 'star', count: 10, speed: 5, life: 44 });
+    Events.emit('roomCleared', { index: api.roomIndex, room });
+  }
+
+  function beginTransition() {
+    api.state = 'transition'; S.t = 0;
+  }
+
+  function swapRoom() {                                   // 화면이 까맣게 된 순간에 방을 바꿈
+    if (typeof Enemies !== 'undefined' && Enemies.clear) Enemies.clear();
+    for (const e of pickupsOnField()) Entities.remove(e);
+    FX.clear();
+    const p = Game.player;
+    enterRoom(api.roomIndex + 1);
+    if (p) { p.x = T.playerStart.x; p.kx = 0; p.vx = 0; p.vy = 0; p.y = clamp(p.y, FLOOR_TOP + 20, FLOOR_BOTTOM - 10); }
+    Cam.x = 0;
+    Cam.snap(p);
+  }
+
+  function beginVictory() {
+    api.state = 'victory'; S.t = 0;
+    S.roomsCleared++;                                     // 보스방도 클리어한 방으로 셈
+    const sc = T.score;
+    Game.addScore(sc.roomClear + sc.stageClear + (Game.deaths === 0 ? sc.noDeath : 0));
+    const p = Game.player;
+    if (p) {
+      if (p.dead && typeof Player !== 'undefined' && Player.revive) Player.revive(p, { invuln: 0 });   // 같이 쓰러졌어도 만세는 같이!
+      p.cheer = true;
+    }
+    FX.flash('#fff6c8', 24);
+    Music.play(null);
+    Events.emit('roomCleared', { index: api.roomIndex, room: S.room });
+  }
+
+  // 튜토리얼 진행 확인 (걸었나 / 점프했나). 첫 타격은 entityHit 이벤트에서 기록
+  function trackTutorial() {
+    const p = Game.player, tut = S.tut;
+    if (!p || !tut) return;
+    if (!tut.moved && (Math.abs(p.x - tut.sx) > 100 || Math.abs(p.y - tut.sy) > 45)) tut.moved = true;
+    if (p.z > 0) tut.jumped = true;
+  }
+
+  // 보스를 쓰러뜨림: 마지막 방이면 승리 연출, 중간 방이면 평범한 방 클리어 (데이터를 바꿔 보스를 중간에 둬도 동작)
+  function endBossRoom() {
+    if (isLastRoom()) { beginVictory(); return; }
+    const wasDead = api.state === 'dead';
+    clearRoom();
+    if (wasDead) { S.resume = 'clear'; api.state = 'dead'; }
+  }
+
+  function tickIntro() {
+    S.t++;
+    if (S.room.boss && S.t === T.bossSpawnAt) spawnBoss();
+    trackTutorial();
+    if (S.t >= (S.room.boss ? T.bossIntroFrames : T.introFrames)) startFight();
+  }
+
+  function tickFight() {
+    S.t++;
+    const room = S.room, p = Game.player;
+    trackTutorial();
+    if (room.boss) {
+      if (S.bossFailed) { endBossRoom(); return; }
+      const b = Game.boss;
+      if (b && !b.dead && !S.bossCandy && b.hp <= b.maxHp * T.bossCandyAt) {          // 체력 절반 → 사탕 선물
+        S.bossCandy = true;
+        const dir = p && p.x < b.x ? -1 : 1;
+        dropPickup(clamp(b.x + dir * 100, 60, Game.world.width - 60), clamp(b.y, 380, 470), 'candy');
+        say('사탕이 나왔어요!', '', COLORS.mint, 70);
+      }
+      return;
+    }
+    const alive = aliveFoes();
+    if (S.queue.length) {
+      if (S.spawnCd > 0) S.spawnCd--;
+      if (S.spawnCd <= 0 && alive < T.maxOnScreen) { spawnNext(); S.spawnCd = T.spawnGap; }   // 한 번에 최대 6마리, 나머지는 줄 서서 대기
+    } else if (alive === 0) {
+      if (api.waveIndex + 1 < room.waves.length) {
+        if (++S.waveWait >= T.waveGap) loadWave(api.waveIndex + 1);
+      } else clearRoom();
+    }
+    if (S.edgeHintCd > 0) S.edgeHintCd--;                 // 아직 못 나가는데 오른쪽 끝으로 가면 알려 줌
+    if (p && !p.dead && S.edgeHintCd <= 0 && p.x >= Game.world.width - T.exitMargin) {
+      S.edgeHintCd = 150;
+      FX.popup(clamp(p.x, Cam.x + 140, Cam.x + W - 140), p.y - p.h - 30, '먼저 친구들을 물리쳐요!', { color: COLORS.cream, size: 22, life: 70, vy: -0.4 });   // 화면 끝에서 글자가 잘리지 않게
+    }
+  }
+
+  function tickClear() {
+    S.t++;
+    const p = Game.player;
+    if (p && !p.dead && p.x >= Game.world.width - T.exitMargin) beginTransition();
+  }
+
+  function tickTransition() {
+    S.t++;
+    if (S.t === Math.floor(T.transitionFrames / 2)) swapRoom();
+    if (S.t >= T.transitionFrames) { api.state = 'intro'; S.t = 0; }
+  }
+
+  function tickVictory() {
+    S.t++;
+    const V = T.victory;
+    if (S.t === V.bannerAt) SFX.play('clear');
+    if (S.t >= V.bannerAt && S.t % 7 === 0 && S.t < V.total - 20) {          // 색종이(별/사탕) 비
+      const kind = (S.t / 7) % 2 === 0 ? 'star' : 'candy';
+      FX.burst(Cam.x + RNG.fx() * W, 40 + RNG.fx() * 40, { kind, count: 5, speed: 2.5, life: 70, gravity: 0.1, size: 15 });
+    }
+    if (S.t >= V.total) finishRun(true);
+  }
+
+  function tickDead() {
+    S.deadT++;
+    if (S.deadT < T.deadFrames) return;
+    if (Game.lives > 0) {                                 // 목숨이 남아 있으면 (쉬움은 무한) 그 자리에서 부활
+      const pen = Game.diff.revivePenalty || 0;
+      if (pen > 0) {
+        const lost = Math.round(Game.score * pen);
+        if (lost > 0) { Game.addScore(-lost); FX.popup(Game.player ? clamp(Game.player.x, Cam.x + 80, Cam.x + W - 80) : Cam.x + W / 2, 250, '점수 -' + lost, { color: COLORS.red, size: 24, life: 60 }); }
+      }
+      if (typeof Player !== 'undefined' && Player.revive) Player.revive(Game.player);
+      api.state = S.resume;
+    } else finishRun(false);                              // 목숨이 없으면 게임 오버
+  }
+
+  // ---------------------------------------------------------------------
+  // 이벤트 (파일 로드 때 한 번만 등록)
+  // ---------------------------------------------------------------------
+  Events.on('enemyKilled', e => {
+    if (!S.active || !e) return;
+    const sc = T.score;
+    Game.addScore((Number(e.score) || 0) * (1 + Math.min(Game.combo.count, sc.comboCap) * sc.comboStep));
+    if (e.boss) return;                                   // 보스는 드롭 없음
+    const r = rand();
+    if (r < T.drop.candy) dropPickup(e.x, e.y, 'candy');
+    else if (r < T.drop.candy + T.drop.coin) dropPickup(e.x, e.y, 'coin');
+  });
+
+  Events.on('bossKilled', () => {
+    if (!S.active || (api.state !== 'intro' && api.state !== 'fight' && api.state !== 'dead' && api.state !== 'clear')) return;
+    endBossRoom();
+  });
+
+  Events.on('playerDied', () => {
+    if (!S.active) return;
+    const st = api.state;
+    if (st !== 'intro' && st !== 'fight' && st !== 'clear') return;     // 승리/전환 중이거나 이미 쓰러진 중이면 무시
+    Game.deaths++;
+    if (isFinite(Game.lives)) Game.lives = Math.max(0, Game.lives - 1); // 목숨 하나 사용 (쉬움은 무한)
+    S.resume = st; S.deadT = 0;
+    api.state = 'dead';
+  });
+
+  Events.on('entityHit', d => {
+    if (!S.active || !S.tut || !d || !d.target || d.target.team !== 'enemy') return;
+    const hb = d.hb || {};
+    if (hb.team === 'player' || (hb.owner && hb.owner.team === 'player')) S.tut.hit = true;
+  });
+
+  // ---------------------------------------------------------------------
+  // 런 시작 / 씬
+  // ---------------------------------------------------------------------
+  function beginRun(opts) {
+    opts = opts || {};
+    const idx = clamp(Math.floor(Number(opts.stageIndex)) || 0, 0, STAGES.length - 1);
+    Game.resetRun({ difficulty: opts.difficulty, nickname: opts.nickname });
+    if (Game.paused) Game.pause(false);                   // 일시정지 메뉴에서 "다시 시작"을 눌렀을 때도 멈춘 채 시작하지 않게
+    Entities.clear();
+    FX.clear();
+    if (typeof Enemies !== 'undefined' && Enemies.clear) Enemies.clear();
+    Game.boss = null; Game.player = null;
+
+    S.active = true;
+    S.stageIdx = idx; S.stage = STAGES[idx]; S.room = null;
+    S.t = 0; S.clock = 0; S.queue = []; S.spawnCd = 0; S.waveWait = 0; S.spawnSeq = 0;
+    S.roomsCleared = 0; S.bossSpawned = false; S.bossFailed = false; S.bossCandy = false;
+    S.deadT = 0; S.resume = 'fight'; S.banner = null; S.edgeHintCd = 0;
+    S.tut = newTut();
+
+    if (typeof Player !== 'undefined' && Player.create) Player.create(T.playerStart.x, T.playerStart.y);
+    enterRoom(0);
+    api.state = 'intro'; S.t = 0;
+    Cam.x = 0; Cam.snap(Game.player);
+    Music.play('stage');
+  }
+
+  // Stage.start({ difficulty, nickname, stageIndex }) : 새 런 시작 → play 씬
+  function start(opts) {
+    beginRun(opts);
+    Game.setScene('play');
+  }
+
+  Scenes.play = {
+    enter() {
+      if (!S.active) beginRun({ difficulty: Game.difficulty, nickname: Game.nickname });   // Stage.start 없이 바로 play 씬으로 와도 동작
+    },
+    exit() { /* 정리할 것 없음 — 다음 Stage.start 가 처음부터 다시 세팅해요 */ },
+
+    update() {
+      if (!S.active) return;
+      S.clock++;
+      const st = api.state;
+      const frozen = st === 'transition';                                  // 방 사이 페이드 동안엔 월드가 멈춤 (누른 키는 그대로 유지)
+      const slow = st === 'victory' && S.t < T.victory.slowFrames && S.t % 2 === 1;   // 승리 슬로모션: 두 프레임에 한 번만 월드가 움직임
+      if (!frozen && !slow) Entities.updateAll();
+      switch (api.state) {                                                 // Stage 진행
+        case 'intro': tickIntro(); break;
+        case 'fight': tickFight(); break;
+        case 'clear': tickClear(); break;
+        case 'transition': tickTransition(); break;
+        case 'victory': tickVictory(); break;
+        case 'dead': tickDead(); break;
+        default: break;
+      }
+      if (S.banner && ++S.banner.t >= S.banner.life) S.banner = null;
+      const tut = S.tut;
+      if (tut && tut.hit) { tut.hitT++; tut.fade = clamp01((tut.hitT - T.hint.fadeDelay) / T.hint.fadeFrames); }
+      if (api.state !== 'transition') Cam.follow(Game.player);
+      if (!slow) FX.update();
+      Game.tickCombo();                                                     // 커널 요청: FX.update 바로 뒤에 매 update 마다 정확히 한 번
+    },
+
+    draw(ctx) {
+      Cam.apply(ctx);                                                      // save + 카메라 이동 (짝: restore)
+      try { Stage.drawBackground(ctx); } catch (e) { Debug.logOnce('Stage.drawBackground', e); }
+      Entities.drawAll(ctx);
+      FX.drawWorld(ctx);
+      ctx.restore();
+      FX.drawScreen(ctx);
+      try { Stage.drawOverlay(ctx); } catch (e) { Debug.logOnce('Stage.drawOverlay', e); }
+      try { if (typeof UI !== 'undefined' && UI.drawHUD) UI.drawHUD(ctx); } catch (e) { Debug.logOnce('UI.drawHUD', e); }
+    },
+  };
+
+  // =====================================================================
+  // 3. 배경 — 사탕 숲 (이미지 없이 Canvas 도형만)
+  // =====================================================================
+  //   움직이지 않는 그림(산·언덕·나무·바닥)은 방마다 한 번만 오프스크린 캔버스에 그려 두고 매 프레임 복사만 해요.
+  //   위치는 고정 시드(seeded)로 정해서 절대 깜빡이거나 바뀌지 않아요. 구름·반딧불·불씨는 매 프레임 가볍게 그려요.
+  function seeded(seed) {                                 // mulberry32 (게임 난수 RNG 와 따로 — 배경 때문에 rand() 순서가 바뀌면 안 됨)
+    let a = seed | 0;
+    return function () {
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const mkCanvas = (w, h) => { const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h)); return c; };
+  const pickOf = (arr, r) => arr[Math.floor(r * arr.length) % arr.length];
+
+  // 선명도: 화면 dpr 만큼 그려 두되, 너무 크면 줄임 (메모리 보호)
+  function bgScale(rw) {
+    const dpr = (typeof Loop !== 'undefined' && Loop.dpr) || 1;
+    let s = clamp(dpr, 1, 2);
+    while (s > 1 && (rw + PAD * 2) * s * H * s > 4.4e6) s -= 0.25;
+    return Math.max(1, Math.round(s * 4) / 4);
+  }
+
+  // ----- 그림 도구: 막대사탕 나무 / 젤리 바위 / 솜사탕 덤불 / 지팡이 사탕 / 수정 -----
+  function paintTree(c, x, base, sc, col, look, rnd) {
+    const h = (92 + rnd() * 56) * sc, r = (30 + rnd() * 14) * sc, sw = 9 * sc;
+    c.save();
+    Draw.roundRect(c, x - sw / 2, base - h, sw, h, sw / 2); c.clip();               // 줄무늬 막대
+    c.fillStyle = '#fff8f0'; c.fillRect(x - sw, base - h, sw * 2, h);
+    c.fillStyle = look.stripe;
+    for (let yy = base - h - 8; yy < base + 12; yy += 20 * sc) {
+      c.beginPath(); c.moveTo(x - sw, yy + sw); c.lineTo(x + sw, yy - sw); c.lineTo(x + sw, yy - sw + 9 * sc); c.lineTo(x - sw, yy + sw + 9 * sc); c.closePath(); c.fill();
+    }
+    c.restore();
+    c.lineWidth = 2.5; c.strokeStyle = look.outline; c.lineJoin = 'round';
+    Draw.roundRect(c, x - sw / 2, base - h, sw, h, sw / 2); c.stroke();
+    const cy = base - h - r * 0.55;                                                  // 둥근 사탕 머리 + 소용돌이
+    c.beginPath(); c.arc(x, cy, r, 0, TAU); c.fillStyle = col; c.fill(); c.lineWidth = 3; c.stroke();
+    c.strokeStyle = 'rgba(255,255,255,.85)'; c.lineWidth = 5 * sc; c.lineCap = 'round';
+    c.beginPath();
+    for (let a = 0.4; a < 4.3 * Math.PI; a += 0.25) {
+      const rr = a / (4.3 * Math.PI) * r * 0.78;
+      const px = x + Math.cos(a) * rr, py = cy + Math.sin(a) * rr;
+      if (a === 0.4) c.moveTo(px, py); else c.lineTo(px, py);
+    }
+    c.stroke();
+    c.fillStyle = 'rgba(255,255,255,.6)';
+    c.beginPath(); c.ellipse(x - r * 0.45, cy - r * 0.5, r * 0.17, r * 0.1, -0.7, 0, TAU); c.fill();
+  }
+
+  function paintRock(c, x, base, sc, col, look, rnd) {
+    const w = (58 + rnd() * 42) * sc, h = (34 + rnd() * 22) * sc;
+    c.beginPath(); c.moveTo(x - w / 2, base);
+    c.bezierCurveTo(x - w / 2, base - h * 0.95, x - w * 0.22, base - h * 1.1, x, base - h);
+    c.bezierCurveTo(x + w * 0.3, base - h * 1.06, x + w / 2, base - h * 0.8, x + w / 2, base);
+    c.closePath();
+    c.fillStyle = col; c.fill(); c.lineWidth = 3; c.strokeStyle = look.outline; c.lineJoin = 'round'; c.stroke();
+    c.fillStyle = 'rgba(255,255,255,.5)';                                          // 젤리의 반짝임
+    c.beginPath(); c.ellipse(x - w * 0.17, base - h * 0.66, w * 0.09, h * 0.15, -0.5, 0, TAU); c.fill();
+    c.beginPath(); c.arc(x - w * 0.02, base - h * 0.85, 2.4 * sc, 0, TAU); c.fill();
+    c.fillStyle = 'rgba(43,27,58,.10)';                                            // 아래쪽 그늘
+    c.beginPath(); c.ellipse(x, base - 2, w * 0.42, h * 0.12, 0, 0, TAU); c.fill();
+  }
+
+  function paintBush(c, x, base, sc, col, look, rnd) {
+    const n = 4 + Math.floor(rnd() * 2), w = (74 + rnd() * 40) * sc, blobs = [];
+    for (let i = 0; i < n; i++) {
+      const u = n === 1 ? 0.5 : i / (n - 1);
+      const r = (20 + rnd() * 11) * sc * (1 - Math.abs(u - 0.5) * 0.7);
+      blobs.push({ x: x - w / 2 + w * u, y: base - r * 0.72 - rnd() * 7, r });
+    }
+    c.lineJoin = 'round'; c.strokeStyle = look.outline; c.lineWidth = 6;           // 먼저 굵은 테두리를 한꺼번에 → 덩어리 하나로 보임
+    for (const b of blobs) { c.beginPath(); c.arc(b.x, b.y, b.r, 0, TAU); c.stroke(); }
+    c.fillStyle = col;
+    for (const b of blobs) { c.beginPath(); c.arc(b.x, b.y, b.r, 0, TAU); c.fill(); }
+    c.fillStyle = 'rgba(255,255,255,.38)';
+    for (const b of blobs) { c.beginPath(); c.arc(b.x - b.r * 0.28, b.y - b.r * 0.3, b.r * 0.42, 0, TAU); c.fill(); }
+    c.fillStyle = 'rgba(255,255,255,.8)';                                          // 반짝이는 설탕 알갱이
+    for (let i = 0; i < 4; i++) { c.beginPath(); c.arc(x - w * 0.4 + rnd() * w * 0.8, base - 10 - rnd() * 26 * sc, 1.8, 0, TAU); c.fill(); }
+  }
+
+  function paintCane(c, x, base, sc, col, look, rnd) {                             // 지팡이 사탕 말뚝
+    const h = (62 + rnd() * 26) * sc, r = 13 * sc;
+    const path = () => { c.beginPath(); c.moveTo(x, base); c.lineTo(x, base - h); c.arc(x + r, base - h, r, Math.PI, Math.PI * 2.05); };
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    path(); c.lineWidth = 12 * sc + 4; c.strokeStyle = look.outline; c.stroke();
+    path(); c.lineWidth = 12 * sc; c.strokeStyle = '#fff8f0'; c.stroke();
+    path(); c.lineWidth = 12 * sc; c.strokeStyle = look.stripe; c.setLineDash([7 * sc, 12 * sc]); c.stroke(); c.setLineDash([]);
+  }
+
+  function paintCrystal(c, x, base, sc, col, look, rnd) {                          // 반짝이는 젤리 수정
+    const g = c.createRadialGradient(x, base - 30 * sc, 4, x, base - 30 * sc, 70 * sc);
+    g.addColorStop(0, col + '88'); g.addColorStop(1, col + '00');
+    c.fillStyle = g; c.fillRect(x - 80 * sc, base - 110 * sc, 160 * sc, 130 * sc);
+    const spikes = [{ dx: -16, h: 0.65, w: 20 }, { dx: 0, h: 1.0, w: 26 }, { dx: 17, h: 0.7, w: 20 }];
+    c.lineJoin = 'round';
+    for (const s of spikes) {
+      const cx = x + s.dx * sc, h = (60 + rnd() * 26) * sc * s.h, w = s.w * sc;
+      c.beginPath(); c.moveTo(cx - w / 2, base); c.lineTo(cx - w * 0.34, base - h * 0.72); c.lineTo(cx, base - h); c.lineTo(cx + w * 0.34, base - h * 0.72); c.lineTo(cx + w / 2, base); c.closePath();
+      c.fillStyle = col; c.fill(); c.lineWidth = 3; c.strokeStyle = look.outline; c.stroke();
+      c.fillStyle = 'rgba(255,255,255,.4)';
+      c.beginPath(); c.moveTo(cx - w * 0.5, base); c.lineTo(cx - w * 0.34, base - h * 0.72); c.lineTo(cx, base - h); c.lineTo(cx - w * 0.04, base); c.closePath(); c.fill();
+    }
+  }
+
+  // 아주 먼 사탕 산 (끝이 둥글고 흰 아이싱 모자) / 보스방의 붉은 아치
+  function paintFar(c, lw, look, rnd) {
+    const base = GROUND_Y + 24;
+    if (look.far === 'arches') {
+      const n = Math.ceil(lw / 250);
+      for (let i = 0; i < n; i++) {
+        const x = i * 250 + 125, w = 190, h = 250;
+        const g = c.createLinearGradient(0, base - h, 0, base);
+        g.addColorStop(0, look.peaks[0]); g.addColorStop(1, look.peaks[1]);
+        c.beginPath(); c.moveTo(x - w / 2, base); c.lineTo(x - w / 2, base - h + w / 2); c.arc(x, base - h + w / 2, w / 2, Math.PI, 0); c.lineTo(x + w / 2, base); c.closePath();
+        c.fillStyle = g; c.fill(); c.lineWidth = 6; c.strokeStyle = 'rgba(20,5,30,.45)'; c.stroke();
+        const g2 = c.createRadialGradient(x, base - h * 0.55, 6, x, base - h * 0.55, 90);          // 아치 안쪽의 붉은 빛
+        g2.addColorStop(0, 'rgba(255,150,90,.55)'); g2.addColorStop(1, 'rgba(255,150,90,0)');
+        c.fillStyle = g2; c.fillRect(x - 100, base - h, 200, h);
+      }
+      return;
+    }
+    let x = -60 + rnd() * 40;
+    while (x < lw + 60) {
+      const w = 230 + rnd() * 110, h = 140 + rnd() * 80, cx = x + w / 2;
+      c.beginPath(); c.moveTo(cx - w / 2, base);
+      c.bezierCurveTo(cx - w * 0.28, base - h * 0.15, cx - w * 0.14, base - h, cx, base - h);
+      c.bezierCurveTo(cx + w * 0.14, base - h, cx + w * 0.28, base - h * 0.15, cx + w / 2, base); c.closePath();
+      c.fillStyle = look.peaks[Math.floor(rnd() * 2)]; c.fill();
+      c.save(); c.clip();                                                                         // 아이싱 모자
+      const capY = base - h * 0.62;
+      c.fillStyle = look.icing; c.fillRect(cx - w / 2, base - h - 6, w, capY - (base - h - 6));
+      for (let bx = cx - w * 0.5; bx <= cx + w * 0.5; bx += 30) { c.beginPath(); c.arc(bx + rnd() * 8, capY + rnd() * 12, 15 + rnd() * 5, 0, TAU); c.fill(); }
+      c.restore();
+      x += w * (0.62 + rnd() * 0.25);
+    }
+  }
+
+  function paintHills(c, lw, look, rnd) {
+    const ph1 = rnd() * TAU, ph2 = rnd() * TAU, base = GROUND_Y - 28;
+    const top = x => base - 30 - Math.sin(x * 0.0125 + ph1) * 26 - Math.sin(x * 0.031 + ph2) * 12;
+    c.beginPath(); c.moveTo(-4, GROUND_Y + 40);
+    for (let x = -4; x <= lw + 4; x += 6) c.lineTo(x, top(x));
+    c.lineTo(lw + 4, GROUND_Y + 40); c.closePath();
+    c.fillStyle = look.hills[0]; c.fill();
+    c.beginPath();                                                                               // 윗선 하이라이트
+    for (let x = -4; x <= lw + 4; x += 6) { if (x === -4) c.moveTo(x, top(x)); else c.lineTo(x, top(x)); }
+    c.lineWidth = 5; c.strokeStyle = look.hillTop; c.lineJoin = 'round'; c.stroke();
+    const sprink = ['#ff8ad8', '#ffd93d', '#7ad7f0', '#ffffff', '#b79bff'];                     // 언덕 위 스프링클
+    c.lineCap = 'round'; c.lineWidth = 3;
+    for (let i = 0; i < lw / 14; i++) {
+      const x = rnd() * lw, y = top(x) + 10 + rnd() * 34;
+      c.strokeStyle = pickOf(sprink, rnd()); c.globalAlpha = 0.55;
+      const a = rnd() * TAU; c.beginPath(); c.moveTo(x, y); c.lineTo(x + Math.cos(a) * 5, y + Math.sin(a) * 3); c.stroke();
+    }
+    c.globalAlpha = 1;
+    // 가까운 언덕 (조금 더 진한 색, 낮게)
+    const ph3 = rnd() * TAU, ph4 = rnd() * TAU;
+    const top2 = x => GROUND_Y - 6 - Math.sin(x * 0.02 + ph3) * 14 - Math.sin(x * 0.047 + ph4) * 6;
+    c.beginPath(); c.moveTo(-4, GROUND_Y + 40);
+    for (let x = -4; x <= lw + 4; x += 6) c.lineTo(x, top2(x));
+    c.lineTo(lw + 4, GROUND_Y + 40); c.closePath();
+    c.fillStyle = look.hills[1]; c.fill();
+  }
+
+  // 바닥: 아래로 갈수록 커지는 타일 + 위쪽 끝의 크림 아이싱 물방울
+  function paintGround(c, rw, look, rnd) {
+    const x0 = -PAD, x1 = rw + PAD;
+    let y = GROUND_Y, h = 20, row = 0;
+    while (y < H + 2) {
+      const tile = 96 + row * 14;
+      for (let i = 0, x = x0; x < x1 + tile; i++, x += tile) {
+        c.fillStyle = look.ground[(i + row) % 2]; c.fillRect(x, y, tile + 1, h + 1);
+      }
+      c.strokeStyle = look.gline; c.globalAlpha = 0.55; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke();
+      c.globalAlpha = 0.3;
+      c.beginPath();
+      for (let x = x0; x < x1 + tile; x += tile) { c.moveTo(x, y); c.lineTo(x, y + h); }
+      c.stroke();
+      c.globalAlpha = 1;
+      y += h; h *= 1.2; row++;
+    }
+    const gs = c.createLinearGradient(0, GROUND_Y, 0, GROUND_Y + 70);                            // 지평선 쪽은 살짝 어둡게 (깊이감)
+    gs.addColorStop(0, 'rgba(43,27,58,.14)'); gs.addColorStop(1, 'rgba(43,27,58,0)');
+    c.fillStyle = gs; c.fillRect(x0, GROUND_Y, x1 - x0, 70);
+    c.lineCap = 'round'; c.lineWidth = 3;                                                        // 바닥에 흩어진 스프링클 (아주 옅게)
+    const cols = ['#ff8ad8', '#7ad7f0', '#ffffff', '#ffd93d', '#7bd88f'];
+    for (let i = 0; i < rw / 9; i++) {
+      const x = rnd() * rw, yy = GROUND_Y + 30 + rnd() * (H - GROUND_Y - 36), a = rnd() * TAU;
+      c.globalAlpha = 0.28; c.strokeStyle = pickOf(cols, rnd());
+      c.beginPath(); c.moveTo(x, yy); c.lineTo(x + Math.cos(a) * 5, yy + Math.sin(a) * 2.2); c.stroke();
+    }
+    c.globalAlpha = 1;
+    c.fillStyle = look.lipEdge;                                                                  // 아이싱 테두리 (분홍/초콜릿) 위에 크림
+    for (let x = x0; x < x1 + 24; x += 22) { c.beginPath(); c.arc(x, GROUND_Y + 9, 13, 0, Math.PI); c.fill(); }
+    c.fillStyle = look.lip;
+    c.fillRect(x0, GROUND_Y - 6, x1 - x0, 14);
+    for (let x = x0 + 11; x < x1 + 24; x += 22) { c.beginPath(); c.arc(x, GROUND_Y + 6, 12, 0, Math.PI); c.fill(); }
+    c.fillStyle = 'rgba(255,255,255,.7)'; c.fillRect(x0, GROUND_Y - 6, x1 - x0, 3);
+  }
+
+  function paintRiver(c, rw, look) {
+    const R = look.river, x0 = -PAD, x1 = rw + PAD, top = R.top;
+    const g = c.createLinearGradient(0, top, 0, GROUND_Y + 6);
+    g.addColorStop(0, R.colors[0]); g.addColorStop(1, R.colors[1]);
+    c.beginPath(); c.moveTo(x0, GROUND_Y + 6); c.lineTo(x0, top);
+    for (let x = x0; x <= x1; x += 8) c.lineTo(x, top + Math.sin(x * 0.04) * 2.5);
+    c.lineTo(x1, GROUND_Y + 6); c.closePath();
+    c.fillStyle = g; c.fill();
+    c.strokeStyle = R.foam; c.lineWidth = 4; c.lineJoin = 'round';                                // 강가의 크림 거품 선
+    c.beginPath(); for (let x = x0; x <= x1; x += 8) { const y = top + Math.sin(x * 0.04) * 2.5; if (x === x0) c.moveTo(x, y); else c.lineTo(x, y); } c.stroke();
+    c.strokeStyle = 'rgba(255,240,220,.4)'; c.lineWidth = 3; c.lineCap = 'round';                // 물결 무늬
+    for (let x = x0 + 20; x < x1; x += 70) { c.beginPath(); c.moveTo(x, top + 18); c.quadraticCurveTo(x + 14, top + 12, x + 28, top + 18); c.stroke(); }
+  }
+
+  function paintCaveMouth(c, x, look) {                                                        // 젤리 동굴 입구 (큰 아치)
+    const w = 300, h = 250, base = GROUND_Y + 14;
+    const g = c.createLinearGradient(0, base - h, 0, base);
+    g.addColorStop(0, '#1c1036'); g.addColorStop(1, '#2d1a4f');
+    c.beginPath(); c.moveTo(x - w / 2, base); c.lineTo(x - w / 2, base - h + w / 2); c.arc(x, base - h + w / 2, w / 2, Math.PI, 0); c.lineTo(x + w / 2, base); c.closePath();
+    c.fillStyle = g; c.fill();
+    c.lineWidth = 12; c.strokeStyle = '#b79bff'; c.lineJoin = 'round'; c.stroke();
+    c.lineWidth = 4; c.strokeStyle = 'rgba(255,255,255,.6)'; c.stroke();
+    const gl = c.createRadialGradient(x, base - 60, 10, x, base - 60, 130);                     // 동굴 안쪽의 은은한 빛
+    gl.addColorStop(0, 'rgba(255,138,216,.5)'); gl.addColorStop(1, 'rgba(255,138,216,0)');
+    c.fillStyle = gl; c.fillRect(x - 150, base - h, 300, h);
+    c.fillStyle = '#c9b6ff';                                                                     // 입구 위에서 흘러내리는 젤리 방울
+    for (let i = -3; i <= 3; i++) { c.beginPath(); c.arc(x + i * 44, base - h + w / 2 - Math.sqrt(Math.max(0, (w / 2) * (w / 2) - (i * 44) * (i * 44))) + 4, 9, 0, TAU); c.fill(); }
+  }
+
+  function paintBossHall(c, rw, look, rnd) {                                                   // 기둥 + 왕관 문양 (보스방)
+    const cx = rw / 2;
+    c.save(); c.globalAlpha = 0.5; c.lineJoin = 'round';                                         // 가운데 벽의 왕관 문양
+    c.fillStyle = '#d6a042'; c.strokeStyle = 'rgba(20,5,30,.5)'; c.lineWidth = 5;
+    c.beginPath(); c.moveTo(cx - 90, 210); c.lineTo(cx - 100, 120); c.lineTo(cx - 50, 160); c.lineTo(cx, 100); c.lineTo(cx + 50, 160); c.lineTo(cx + 100, 120); c.lineTo(cx + 90, 210); c.closePath();
+    c.fill(); c.stroke();
+    c.fillStyle = '#ff6b8f';
+    for (const dx of [-60, 0, 60]) { c.beginPath(); c.arc(cx + dx, 190, 11, 0, TAU); c.fill(); }
+    c.restore();
+    const xs = [70, rw - 70];                                                                    // 양옆 기둥 + 횃불 받침
+    for (const x of xs) {
+      const g = c.createLinearGradient(x - 34, 0, x + 34, 0);
+      g.addColorStop(0, '#4a2149'); g.addColorStop(0.5, '#6a3262'); g.addColorStop(1, '#3d1a3f');
+      Draw.roundRect(c, x - 34, 60, 68, GROUND_Y - 50, 14); c.fillStyle = g; c.fill(); c.lineWidth = 4; c.strokeStyle = 'rgba(20,5,30,.55)'; c.stroke();
+      Draw.roundRect(c, x - 44, 52, 88, 26, 10); c.fillStyle = '#7a3a6c'; c.fill(); c.stroke();
+      c.fillStyle = '#2b1236'; Draw.roundRect(c, x - 10, 170, 20, 14, 5); c.fill();
+    }
+    return xs;
+  }
+
+  // 방 하나의 배경을 오프스크린 캔버스에 그려 둔다
+  function buildBG(stageIdx, roomIdx, room) {
+    const look = T.looks[room.look] || T.looks.forest;
+    const rw = Math.max(W, room.width), maxCam = rw - W, s = bgScale(rw);
+    const rnd = seeded(stageIdx * 1000 + roomIdx * 37 + 11);
+    const bg = { look, rw, s, torches: [], clouds: [] };
+
+    const layer = (k, h, fn) => {                                                              // k: 카메라 대비 움직이는 비율 (작을수록 멀리 있음)
+      const lw = W + PAD * 2 + k * maxCam;
+      const c = mkCanvas(lw * s, h * s); const g = c.getContext('2d'); g.scale(s, s);
+      fn(g, lw);
+      return { c, w: lw, h, k };
+    };
+    bg.far = layer(0.10, GROUND_Y + 60, (g, lw) => paintFar(g, lw, look, rnd));
+    bg.hills = look.hills ? layer(0.28, GROUND_Y + 60, (g, lw) => paintHills(g, lw, look, rnd)) : null;
+
+    // 움직이지 않는 월드 그림: (벽 장식) → 강 → 바닥 → 물건들 (뒤에서 앞으로)
+    const wc = mkCanvas((rw + PAD * 2) * s, H * s), c = wc.getContext('2d');
+    c.scale(s, s); c.translate(PAD, 0);
+    if (look.boss) { for (const x of paintBossHall(c, rw, look, rnd)) bg.torches.push({ x, y: 160 }); }
+    if (look.cave) paintCaveMouth(c, rw - 260, look);
+    const items = [];
+    for (let i = 0, x = 40 + rnd() * 60; x < rw - 20; i++) {
+      const kind = look.items[i % look.items.length], sc = 0.85 + rnd() * 0.4;
+      const base = kind === 'tree' && look.treeFar ? look.treeBase[0] + rnd() * 4 : (kind === 'tree' ? look.treeBase[0] + rnd() * (look.treeBase[1] - look.treeBase[0]) : GROUND_Y + 8 + rnd() * 26);
+      const cols = kind === 'tree' ? look.treeCols : kind === 'bush' ? look.bushCols : kind === 'crystal' ? (look.crystalCols || look.treeCols) : look.rockCols;
+      items.push({ kind, x, base, sc, col: pickOf(cols, rnd()), seed: Math.floor(rnd() * 1e9) });
+      x += look.spacing[0] + rnd() * (look.spacing[1] - look.spacing[0]);
+    }
+    if (look.treeFar) {                                                                         // 강 건너편의 나무 (강보다 먼저)
+      for (let x = 60 + rnd() * 80; x < rw; x += 150 + rnd() * 120) {
+        items.push({ kind: 'tree', x, base: look.treeBase[0] + rnd() * 4, sc: 0.7 + rnd() * 0.3, col: pickOf(look.treeCols, rnd()), seed: Math.floor(rnd() * 1e9), far: true });
+      }
+    }
+    const paint = it => {
+      const r = seeded(it.seed);
+      const fn = it.kind === 'tree' ? paintTree : it.kind === 'bush' ? paintBush : it.kind === 'crystal' ? paintCrystal : it.kind === 'cane' ? paintCane : paintRock;
+      fn(c, it.x, it.base, it.sc, it.col, look, r);
+    };
+    for (const it of items.filter(i => i.far).sort((a, b) => a.base - b.base)) paint(it);
+    if (look.river) paintRiver(c, rw, look);
+    paintGround(c, rw, look, rnd);
+    for (const it of items.filter(i => !i.far).sort((a, b) => a.base - b.base)) paint(it);
+    bg.world = wc;
+
+    for (let i = 0; i < (look.clouds || 0); i++) bg.clouds.push({ x0: rnd() * (W + 400), y: 40 + rnd() * 110, sc: 0.7 + rnd() * 0.7, sp: 0.12 + rnd() * 0.18 });
+    return bg;
+  }
+
+  function getBG(stageIdx, roomIdx, room) {
+    const key = stageIdx + ':' + roomIdx + ':' + room.width + ':' + room.look + ':' + bgScale(Math.max(W, room.width));
+    if (!S.bgCache || S.bgCache.key !== key) S.bgCache = { key, bg: buildBG(stageIdx, roomIdx, room) };
+    return S.bgCache.bg;
+  }
+
+  // ----- 움직이는 배경 조각들 (매 프레임 가볍게) -----
+  function drawCloud(ctx, x, y, sc) {
+    ctx.save(); ctx.translate(x, y); ctx.scale(sc, sc);
+    ctx.fillStyle = 'rgba(255,255,255,.93)';
+    ctx.beginPath(); ctx.ellipse(0, 6, 54, 15, 0, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(-24, -2, 18, 0, TAU); ctx.arc(2, -12, 24, 0, TAU); ctx.arc(28, -1, 17, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(190,225,255,.5)'; ctx.beginPath(); ctx.ellipse(0, 14, 44, 6, 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawFlame(ctx, x, y, t, k) {
+    const f = 1 + Math.sin(t * 0.3 + x) * 0.13;
+    const g = ctx.createRadialGradient(x, y - 14, 4, x, y - 14, 95);
+    g.addColorStop(0, 'rgba(255,170,80,' + (0.4 * k) + ')'); g.addColorStop(1, 'rgba(255,120,60,0)');
+    ctx.fillStyle = g; ctx.fillRect(x - 100, y - 114, 200, 200);
+    ctx.save(); ctx.translate(x, y); ctx.scale(1, f);
+    ctx.fillStyle = '#ff7a2e'; ctx.strokeStyle = 'rgba(43,27,58,.6)'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(0, -36); ctx.quadraticCurveTo(17, -14, 0, 4); ctx.quadraticCurveTo(-17, -14, 0, -36); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = COLORS.yellow; ctx.beginPath(); ctx.moveTo(0, -22); ctx.quadraticCurveTo(8, -9, 0, 1); ctx.quadraticCurveTo(-8, -9, 0, -22); ctx.fill();
+    ctx.restore();
+  }
+
+  function paintAmbient(ctx, bg, camX) {
+    const look = bg.look, t = S.clock;
+    if (look.boss) {                                                                             // 붉은 불씨 + 횃불
+      for (const tc of bg.torches) drawFlame(ctx, tc.x, tc.y, t, 1);
+      for (let i = 0; i < 36; i++) {
+        const sp = 0.35 + hash(i * 3.1) * 0.7;
+        const px = hash(i * 1.7) * (W + 80) - 40 + Math.sin(t * 0.02 + i) * 18;
+        const py = H + 30 - ((t * sp + hash(i * 5.3) * (H + 60)) % (H + 60));
+        ctx.globalAlpha = (0.35 + 0.45 * Math.abs(Math.sin(t * 0.05 + i))) * clamp01(py / 140);
+        ctx.fillStyle = i % 3 ? '#ffb347' : '#ff6b4a';
+        ctx.beginPath(); ctx.arc(camX + px, py, 1.4 + hash(i * 7.9) * 2.4, 0, TAU); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    } else if (look.cave) {                                                                      // 반딧불
+      for (let i = 0; i < 16; i++) {
+        const px = hash(i * 2.3) * W + Math.sin(t * 0.012 + i * 1.7) * 40;
+        const py = 150 + hash(i * 4.1) * 260 + Math.cos(t * 0.017 + i) * 26;
+        const a = 0.35 + 0.55 * Math.abs(Math.sin(t * 0.03 + i * 2));
+        ctx.globalAlpha = a * 0.35; ctx.fillStyle = '#b8ffd8'; ctx.beginPath(); ctx.arc(camX + px, py, 7, 0, TAU); ctx.fill();
+        ctx.globalAlpha = a; ctx.fillStyle = '#f4fff0'; ctx.beginPath(); ctx.arc(camX + px, py, 2.4, 0, TAU); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    } else if (look.river) {                                                                     // 강물의 반짝임
+      const R = look.river;
+      ctx.fillStyle = 'rgba(255,240,220,.5)';
+      for (let i = 0; i < 16; i++) {
+        const x = (hash(i * 1.9) * bg.rw + t * (0.25 + hash(i * 2.2) * 0.4)) % bg.rw;
+        if (x < camX - 40 || x > camX + W + 40) continue;
+        ctx.fillRect(x, R.top + 8 + hash(i * 3.3) * (GROUND_Y - R.top - 14), 12 + hash(i * 4.4) * 14, 2);
+      }
+    } else {                                                                                     // 둥둥 떠다니는 사탕 가루
+      for (let i = 0; i < 10; i++) {
+        const px = (hash(i * 2.9) * (W + 60) + t * (0.2 + hash(i * 3.7) * 0.3)) % (W + 60) - 30;
+        const py = 70 + hash(i * 6.1) * 240 + Math.sin(t * 0.02 + i * 2) * 14;
+        ctx.globalAlpha = 0.5 * Math.abs(Math.sin(t * 0.03 + i));
+        ctx.fillStyle = '#fff'; Draw.star(ctx, camX + px, py, 4.5, 1.6, t * 0.02 + i, 4); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawExitChevrons(ctx, rw) {                                                           // 클리어하면 바닥의 오른쪽 끝에 ▶▶▶
+    const pulse = 0.5 + 0.5 * Math.sin(S.t * 0.16);
+    for (let i = 0; i < 3; i++) {
+      const x = rw - 150 + i * 34, a = 0.18 + 0.4 * clamp01(pulse - i * 0.15 + 0.2);
+      ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = COLORS.yellow; ctx.strokeStyle = COLORS.ink; ctx.lineWidth = 3; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(x - 10, 400); ctx.lineTo(x + 8, 420); ctx.lineTo(x - 10, 440); ctx.lineTo(x - 2, 440); ctx.lineTo(x + 16, 420); ctx.lineTo(x - 2, 400); ctx.closePath();
+      ctx.fill(); ctx.stroke(); ctx.restore();
+    }
+  }
+
+  // Stage.drawBackground(ctx [, roomIndex]) : 카메라 변환 안에서 호출됨. roomIndex 를 주면 그 방의 배경을 그림 (테스트/미리보기용)
+  function drawBackground(ctx, roomIndex) {
+    const stageIdx = S.stage ? S.stageIdx : 0, stage = STAGES[stageIdx] || STAGES[0];
+    const idx = clamp(Math.floor(roomIndex === undefined ? api.roomIndex : roomIndex) || 0, 0, stage.rooms.length - 1);
+    const room = stage.rooms[idx];
+    const bg = getBG(stageIdx, idx, room), look = bg.look, s = bg.s;
+    const camX = Math.round(Cam.x), t = S.clock;
+    ctx.save();
+    try {
+      // 하늘 (화면에 고정)
+      const g = ctx.createLinearGradient(0, 0, 0, GROUND_Y + 10);
+      look.sky.forEach((col, i) => g.addColorStop(i / (look.sky.length - 1), col));
+      ctx.fillStyle = g; ctx.fillRect(camX - 24, -24, W + 48, H + 48);
+      // 해/달, 별
+      if (look.sun) {
+        const sx = camX + look.sun.x * W - Cam.x * 0.02, sy = look.sun.y;
+        const gl = ctx.createRadialGradient(sx, sy, look.sun.r * 0.5, sx, sy, look.sun.r * 3);
+        gl.addColorStop(0, 'rgba(255,248,200,.55)'); gl.addColorStop(1, 'rgba(255,248,200,0)');
+        ctx.fillStyle = gl; ctx.fillRect(sx - look.sun.r * 3, sy - look.sun.r * 3, look.sun.r * 6, look.sun.r * 6);
+        ctx.fillStyle = look.sun.color; ctx.beginPath(); ctx.arc(sx, sy, look.sun.r, 0, TAU); ctx.fill();
+      }
+      for (let i = 0; i < (look.stars || 0); i++) {
+        const sx = camX + hash(i * 1.3) * W, sy = 14 + hash(i * 2.9) * (GROUND_Y - 80), a = 0.35 + 0.6 * Math.abs(Math.sin(t * 0.04 + i * 1.9));
+        ctx.globalAlpha = a; ctx.fillStyle = '#fff4fb'; Draw.star(ctx, sx, sy, 3 + hash(i * 5.1) * 3, 1, 0, 4); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      // 구름 (아주 천천히 흐름)
+      for (const cl of bg.clouds) {
+        const span = W + 400;
+        const sx = (((cl.x0 + t * cl.sp - Cam.x * 0.06) % span) + span) % span - 200;
+        drawCloud(ctx, camX + sx, cl.y, cl.sc);
+      }
+      // 시차(패럴랙스) 층: 멀수록 카메라를 덜 따라감
+      for (const L of [bg.far, bg.hills]) {
+        if (!L) continue;
+        ctx.drawImage(L.c, 0, 0, L.c.width, L.c.height, camX - Math.round(camX * L.k) - PAD, 0, L.w, L.h);
+      }
+      // 월드에 고정된 그림 (보이는 부분만 복사)
+      const vx0 = camX - 24, vx1 = camX + W + 24, c0 = Math.max(0, vx0 + PAD), c1 = Math.min(bg.rw + PAD * 2, vx1 + PAD);
+      const sxp = Math.round(c0 * s), swp = Math.max(1, Math.min(bg.world.width - sxp, Math.round((c1 - c0) * s)));
+      ctx.drawImage(bg.world, sxp, 0, swp, bg.world.height, sxp / s - PAD, 0, swp / s, H);
+      if (S.active && idx === api.roomIndex && api.state === 'clear') drawExitChevrons(ctx, bg.rw);
+      paintAmbient(ctx, bg, camX);
+    } finally { ctx.restore(); }
+  }
+
+  // =====================================================================
+  // 4. 오버레이 (화면 좌표) — 방 이름 · GO · 튜토리얼 · 보스 경고 · CLEAR! · 쓰러짐 · 페이드
+  // =====================================================================
+  function arrowShape(ctx, x, y, s) {                       // 통통한 ▶ (글꼴과 상관없이 도형으로)
+    ctx.beginPath();
+    ctx.moveTo(x - s, y - s * 0.34); ctx.lineTo(x + s * 0.15, y - s * 0.34); ctx.lineTo(x + s * 0.15, y - s * 0.82);
+    ctx.lineTo(x + s, y); ctx.lineTo(x + s * 0.15, y + s * 0.82); ctx.lineTo(x + s * 0.15, y + s * 0.34); ctx.lineTo(x - s, y + s * 0.34);
+    ctx.closePath();
+  }
+  function triShape(ctx, x, y, r, dir) {                    // 키보드 화살표 칸 안의 작은 삼각형
+    ctx.beginPath();
+    if (dir === 'r') { ctx.moveTo(x - r * 0.7, y - r); ctx.lineTo(x + r * 0.9, y); ctx.lineTo(x - r * 0.7, y + r); }
+    else if (dir === 'l') { ctx.moveTo(x + r * 0.7, y - r); ctx.lineTo(x - r * 0.9, y); ctx.lineTo(x + r * 0.7, y + r); }
+    else if (dir === 'u') { ctx.moveTo(x - r, y + r * 0.7); ctx.lineTo(x, y - r * 0.9); ctx.lineTo(x + r, y + r * 0.7); }
+    else { ctx.moveTo(x - r, y - r * 0.7); ctx.lineTo(x, y + r * 0.9); ctx.lineTo(x + r, y - r * 0.7); }
+    ctx.closePath();
+  }
+  function keyCap(ctx, x, y, w, label, dir) {
+    Draw.roundRect(ctx, x - w / 2, y - 14, w, 28, 7);
+    ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+    if (dir) { ctx.fillStyle = COLORS.ink; triShape(ctx, x, y, 6.5, dir); ctx.fill(); }
+    else Draw.text(ctx, label, x, y + 7, { size: 19, color: COLORS.ink, stroke: null });
+  }
+
+  function drawTutorial(ctx) {
+    const tut = S.tut;
+    if (!S.active || !tut || !S.room || !S.room.tutorial || tut.fade >= 1) return;
+    if (api.state === 'transition' || api.state === 'victory' || api.state === 'over') return;
+    const touch = !!Game.touch;
+    const cards = [
+      { x: 190, done: tut.moved, text: '걸어가요', kind: 'move' },
+      { x: 480, done: tut.hit, text: '때려요!', kind: 'attack' },
+      { x: 770, done: tut.jumped, text: '폴짝!', kind: 'jump' },
+    ];
+    ctx.save();
+    ctx.globalAlpha = (1 - tut.fade) * clamp01((S.clock - 20) / 20);
+    cards.forEach((cd, i) => {
+      const bob = Math.sin(S.clock * 0.06 + i * 1.3) * 3, x = cd.x, y = 162 + bob, w = 172, h = 74;
+      Draw.roundRect(ctx, x - w / 2, y, w, h, 16);
+      ctx.fillStyle = 'rgba(255,244,224,.94)'; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+      const ky = y + 27;
+      if (touch) {                                           // 터치 기기: 버튼 이름으로
+        const label = cd.kind === 'move' ? '조이스틱' : cd.kind === 'attack' ? '공격 버튼' : '점프 버튼';
+        Draw.roundRect(ctx, x - 62, ky - 15, 124, 30, 15); ctx.fillStyle = cd.kind === 'move' ? COLORS.sky : cd.kind === 'attack' ? COLORS.pink : COLORS.mint; ctx.fill(); ctx.lineWidth = 3; ctx.stroke();
+        Draw.text(ctx, label, x, ky + 7, { size: 19, color: COLORS.ink, stroke: null });
+      } else if (cd.kind === 'move') {                       // 키보드: ← ↑ ↓ →
+        [['l', -48], ['u', -16], ['d', 16], ['r', 48]].forEach(([d, dx]) => keyCap(ctx, x + dx, ky, 28, '', d));
+      } else keyCap(ctx, x, ky, 40, cd.kind === 'attack' ? 'Z' : 'X');
+      Draw.text(ctx, cd.text, x, y + 62, { size: 22, color: '#4a2d6b', stroke: null });
+      if (cd.done) {                                         // 해냈으면 ✓
+        ctx.beginPath(); ctx.arc(x + w / 2 - 6, y + 6, 14, 0, TAU); ctx.fillStyle = COLORS.mint; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x + w / 2 - 12, y + 6); ctx.lineTo(x + w / 2 - 7, y + 11); ctx.lineTo(x + w / 2 + 1, y - 1);
+        ctx.lineWidth = 3.5; ctx.strokeStyle = '#fff'; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.stroke();
+      }
+    });
+    ctx.restore();
+  }
+
+  function drawRoomBanner(ctx) {
+    if (api.state !== 'intro' || !S.room) return;
+    const total = S.room.boss ? T.bossIntroFrames : T.introFrames, t = S.t;
+    const k = Math.min(ease(t / 14), ease((total - t) / 14));
+    if (k <= 0) return;
+    const y = 82 - (1 - k) * 24, st = S.stage;                         // HUD(맨 위 가운데의 방 이름·점)보다 아래에
+    ctx.save();
+    ctx.globalAlpha = k;
+    Draw.roundRect(ctx, W / 2 - 190, y, 380, 66, 22);
+    ctx.fillStyle = 'rgba(43,27,58,.82)'; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = COLORS.cream; ctx.stroke();
+    Draw.text(ctx, st.name + '   ' + (api.roomIndex + 1) + ' / ' + st.rooms.length, W / 2, y + 25, { size: 18, color: COLORS.mint, lw: 3 });
+    Draw.text(ctx, S.room.name, W / 2, y + 55, { size: 32, color: '#fff' });
+    ctx.restore();
+  }
+
+  function drawBossWarning(ctx) {
+    if (api.state !== 'intro' || !S.room || !S.room.boss) return;
+    const t = S.t, total = T.bossIntroFrames;
+    const k = Math.min(ease(t / 12), ease((total - 10 - t) / 12));
+    if (k <= 0) return;
+    const calm = !!FX.reduceMotion, cy = 204, hh = 108 * k, pulse = calm ? 1 : 1 + Math.sin(t * 0.17) * 0.045;
+    ctx.save();
+    ctx.fillStyle = 'rgba(105,10,40,.88)'; ctx.fillRect(0, cy - hh / 2, W, hh);
+    ctx.save();                                                                                  // 위아래 노랑-검정 경고 줄무늬 (천천히 흐름)
+    ctx.beginPath(); ctx.rect(0, cy - hh / 2, W, 12 * k); ctx.rect(0, cy + hh / 2 - 12 * k, W, 12 * k); ctx.clip();
+    for (let x = -60 + (calm ? 0 : (t * 1.5) % 40); x < W + 40; x += 40) {
+      ctx.fillStyle = COLORS.yellow; ctx.beginPath(); ctx.moveTo(x, cy - hh); ctx.lineTo(x + 20, cy - hh); ctx.lineTo(x - 4, cy + hh); ctx.lineTo(x - 24, cy + hh); ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+    if (k > 0.9) {
+      ctx.save(); ctx.translate(W / 2 - 150, cy - 2); ctx.scale(pulse, pulse);                   // ⚠ 삼각형 (도형)
+      ctx.lineJoin = 'round'; ctx.lineWidth = 5; ctx.strokeStyle = COLORS.ink; ctx.fillStyle = COLORS.yellow;
+      ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(30, 24); ctx.lineTo(-30, 24); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = COLORS.ink; Draw.roundRect(ctx, -3.5, -14, 7, 22, 3); ctx.fill(); ctx.beginPath(); ctx.arc(0, 15, 4, 0, TAU); ctx.fill();
+      ctx.restore();
+      ctx.save(); ctx.translate(W / 2 + 28, cy + 4); ctx.scale(pulse, pulse);
+      Draw.text(ctx, '보스 등장!', 0, 8, { size: 58, color: COLORS.yellow, lw: 7 });
+      ctx.restore();
+      Draw.text(ctx, '젤리 대왕이 나타났다!', W / 2 + 28, cy + 40, { size: 20, color: COLORS.cream, lw: 4 });
+    }
+    ctx.restore();
+  }
+
+  function drawBanner(ctx) {
+    const b = S.banner;
+    if (!b || api.state === 'victory') return;
+    const left = b.life - b.t, pop = 1 + (1 - clamp01(b.t / 9)) * 0.45;
+    ctx.save();
+    ctx.globalAlpha = clamp01(left / 14) * clamp01(b.t / 4 + 0.2);
+    ctx.translate(W / 2, 198); ctx.scale(pop, pop);
+    Draw.text(ctx, b.text, 0, 0, { size: 56, color: b.color, lw: 7 });
+    if (b.sub) Draw.text(ctx, b.sub, 0, 36, { size: 26, color: COLORS.cream, lw: 5 });
+    ctx.restore();
+  }
+
+  function drawGo(ctx) {
+    if (api.state !== 'clear' || !S.room) return;
+    if (!FX.reduceMotion && S.t % 44 >= 30) return;                                              // 깜빡깜빡 (초당 1.4번 — 너무 번쩍이지 않게). '움직임 줄이기'면 계속 켜 둠
+    const x = W - 76 + Math.sin(S.t * 0.25) * 8, y = 252;                                       // (HUD 의 콤보 표시보다 아래)
+    ctx.save();
+    ctx.lineJoin = 'round';
+    arrowShape(ctx, x, y, 44); ctx.fillStyle = COLORS.yellow; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.65)'; ctx.beginPath(); ctx.ellipse(x - 14, y - 6, 16, 4.5, -0.1, 0, TAU); ctx.fill();
+    Draw.text(ctx, 'GO!', x - 6, y - 46, { size: 38, color: COLORS.yellow, lw: 7 });
+    ctx.restore();
+  }
+
+  // 넓은 방에서 적이 모두 화면 밖에 있으면, 어느 쪽으로 가야 하는지 작은 화살표로 알려 줌 (GO 와 달리 글자 없이 살랑살랑)
+  function drawFoeHint(ctx) {
+    if (api.state !== 'fight' || !S.room || S.room.boss || S.room.width <= W || S.t < 60) return;
+    let nearest = null, onScreen = false;
+    for (const e of Entities.list) {
+      if (!isFoe(e) || e.dead || e._removed) continue;
+      if (e.x >= Cam.x - 10 && e.x <= Cam.x + W + 10) { onScreen = true; break; }
+      if (!nearest || Math.abs(e.x - Cam.x - W / 2) < Math.abs(nearest.x - Cam.x - W / 2)) nearest = e;
+    }
+    if (onScreen || !nearest) return;
+    const dir = nearest.x > Cam.x + W / 2 ? 1 : -1;
+    const x = dir > 0 ? W - 56 + Math.sin(S.clock * 0.18) * 7 : 56 - Math.sin(S.clock * 0.18) * 7, y = 252;
+    ctx.save();
+    ctx.globalAlpha = 0.85; ctx.lineJoin = 'round';
+    ctx.translate(x, y); ctx.scale(dir, 1);
+    arrowShape(ctx, 0, 0, 30); ctx.fillStyle = COLORS.cream; ctx.fill(); ctx.lineWidth = 5; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawDead(ctx) {
+    if (api.state !== 'dead') return;
+    const k = clamp01(S.deadT / 30), last = !(Game.lives > 0), fadeOut = last ? clamp01((S.deadT - (T.deadFrames - 28)) / 28) : 0;
+    ctx.save();
+    ctx.fillStyle = 'rgba(30,14,50,' + (0.32 * k + 0.6 * fadeOut) + ')'; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = k;
+    if (last) Draw.text(ctx, '모두 힘껏 싸웠어요!', W / 2, 250, { size: 44, color: COLORS.cream, lw: 7 });
+    else if (Game.lives === Infinity) {
+      Draw.text(ctx, '괜찮아요! 다시 일어나요!', W / 2, 250, { size: 44, color: COLORS.cream, lw: 7 });
+      if ((Game.diff.revivePenalty || 0) > 0) Draw.text(ctx, '점수가 조금 줄어요', W / 2, 288, { size: 22, color: COLORS.sky, lw: 4 });
+    } else {
+      Draw.text(ctx, '앗! 쓰러졌어요', W / 2, 250, { size: 44, color: COLORS.cream, lw: 7 });
+      Draw.text(ctx, '남은 목숨  ' + Game.lives + '개', W / 2, 290, { size: 26, color: COLORS.yellow, lw: 5 });
+    }
+    ctx.restore();
+  }
+
+  function drawVictory(ctx) {
+    if (api.state !== 'victory' || !S.active) return;
+    const V = T.victory, t = S.t;
+    if (t < V.bannerAt) return;
+    const letters = 'CLEAR!'.split(''), cols = [COLORS.pink, COLORS.yellow, COLORS.mint, COLORS.sky, COLORS.purple, COLORS.red];
+    ctx.save();
+    letters.forEach((ch, i) => {
+      const u = (t - V.bannerAt - i * 4) / 12;
+      if (u <= 0) return;
+      const sc = easeOutBack(u), bob = u > 1 ? Math.sin(t * 0.12 + i) * 4 : 0;
+      ctx.save(); ctx.translate(W / 2 + (i - 2.5) * 72, 240 + bob); ctx.scale(sc, sc);
+      Draw.text(ctx, ch, 0, 0, { size: 112, color: cols[i], lw: 11 });
+      ctx.restore();
+    });
+    const u2 = (t - V.bannerAt - 30) / 14;
+    if (u2 > 0) Draw.text(ctx, '스테이지 클리어!', W / 2, 312, { size: 34, color: COLORS.cream, lw: 6, alpha: clamp01(u2) });
+    ctx.restore();
+  }
+
+  function drawFade(ctx) {
+    let a = 0;
+    if (api.state === 'transition') { const t = S.t, half = T.transitionFrames / 2; a = t <= half ? t / half : (T.transitionFrames - t) / half; }
+    a = clamp01(a);
+    if (a <= 0) return;
+    ctx.save(); ctx.fillStyle = 'rgba(20,10,35,' + a + ')'; ctx.fillRect(0, 0, W, H); ctx.restore();
+  }
+
+  function drawVignette(ctx) {                                                                   // 보스방: 가장자리를 어둡고 붉게
+    const g = ctx.createRadialGradient(W / 2, H / 2, 230, W / 2, H / 2, 620);
+    g.addColorStop(0, 'rgba(60,0,20,0)'); g.addColorStop(1, 'rgba(60,0,20,.38)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+
+  // Stage.drawOverlay(ctx) : 화면 좌표계에서 호출됨
+  function drawOverlay(ctx) {
+    ctx.save();
+    try {
+      if (S.room && S.room.boss && S.active) drawVignette(ctx);
+      drawTutorial(ctx);
+      drawRoomBanner(ctx);
+      drawBossWarning(ctx);
+      drawBanner(ctx);
+      drawGo(ctx);
+      drawFoeHint(ctx);
+      drawDead(ctx);
+      drawVictory(ctx);
+      drawFade(ctx);
+    } finally { ctx.restore(); }
+  }
+
+  // 디버그/테스트용 요약 (읽기 전용 사본)
+  function snapshot() {
+    return {
+      active: S.active, state: api.state, roomIndex: api.roomIndex, waveIndex: api.waveIndex, t: S.t,
+      queue: S.queue.length, waveWait: S.waveWait, roomsCleared: S.roomsCleared, deadT: S.deadT,
+      bossSpawned: S.bossSpawned, bossCandy: S.bossCandy, banner: S.banner ? S.banner.text : null,
+      pickups: pickupsOnField().length, foes: aliveFoes(), tut: S.tut ? { moved: S.tut.moved, jumped: S.tut.jumped, hit: S.tut.hit, fade: S.tut.fade } : null,
+    };
+  }
+
+  Object.assign(api, { start, dropPickup, drawBackground, drawOverlay, calcStars, snapshot });
+  return api;
+})();
 </script>

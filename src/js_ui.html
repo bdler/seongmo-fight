@@ -1,4 +1,1234 @@
 <script>
-/* ui 모듈 — 소유 모듈이 구현하기 전까지의 빈 스텁 */
-const UI = {};
+'use strict';
+/* ==========================================================================
+   js_ui.html — 젤리 던전 "화면" 모듈 (ui 모듈)   (계약서 5-4)
+   --------------------------------------------------------------------------
+     0. 숫자표(UI_TUNE)      1. 도우미          2. 귀여운 그림 부품(젤리·사탕·구름…)
+     3. HUD(캔버스)          4. DOM 화면(타이틀·조작법·랭킹·일시정지·결과·토스트·가로 안내)
+     5. 터치 컨트롤          6. 씬(Scenes.title / Scenes.result)
+     7. 이벤트·키 처리·크기 계산·휴식 알림     8. 공개 API(UI)
+   ※ 전역 이름은 UI 와 UI_TUNE 뿐이에요. 나머지는 모두 함수 안에 숨겨 두었어요.
+   ※ 다른 모듈(Stage, Server, Player …)은 "함수 안에서, 런타임에" 만 불러요. 없어도 화면이 죽지 않게 안전하게요.
+   ========================================================================== */
+
+// ===== 0. 숫자표 — 숫자와 문구만 바꿔도 화면이 달라져요 =====
+const UI_TUNE = {
+  nick: { min: 2, max: 8 },                         // 닉네임 글자 수 (서버 검증이 없을 때의 기준)
+  hud: {
+    lowHpRatio: 0.3,                                // 체력이 이 비율 이하면 "위험!" 표시 + 화면 가장자리가 은은하게 붉어짐
+    vignetteMax: 0.2,                               // 위험 표시의 최대 진하기 (깜빡임 없이 천천히 숨 쉬듯)
+    hitFlashFrames: 24, hitFlashAlpha: 0.26,        // 맞았을 때 가장자리 붉은 번쩍 (한 번, 부드럽게)
+    comboMin: 2,                                    // 이 콤보부터 "N HIT!" 표시
+    maxHearts: 5,                                   // 목숨 하트 최대 표시 수
+  },
+  touch: { stickOn: 0.38, stickOff: 0.2 },          // 조이스틱: 이 정도(반지름 비율) 넘게 밀면 방향키 눌림, 이 아래로 돌아오면 뗌
+  result: { startDelay: 36, starGap: 26, countFrames: 80 },   // 결과 화면: 첫 별 / 별 사이 / 점수 세어 올리는 시간(프레임)
+  saveTimeoutMs: 12000,                             // 저장이 이만큼 걸리면 "실패"로 보고 다시 시도 버튼을 보여줌
+  confirmMs: 3000,                                  // 일시정지 화면의 「다시 시작/처음으로」: 첫 클릭 뒤 이 시간 안에 한 번 더 눌러야 실행
+  toastMs: 2500, breakToastMs: 7000,
+  breakText: '잠깐 쉬어요! 눈과 손을 풀어 볼까요? 🙆',
+  // 스킬 버튼의 처음 모양 (플레이어가 만들어지면 p.skills 의 값으로 바뀜)
+  skillDefaults: [
+    { key: 'A', code: 'KeyA', icon: '🌪️', label: '회오리 베기' },
+    { key: 'S', code: 'KeyS', icon: '💨', label: '돌진 찌르기' },
+    { key: 'D', code: 'KeyD', icon: '🌟', label: '별빛 대폭발' },
+  ],
+  // 결과 화면 격려 문구 (별 개수별 / 게임 오버)
+  clearMsgs: {
+    3: ['완벽해요! 별 3개, 최고의 용사예요! 🎉', '와! 한 번도 안 쓰러졌어요! 대단해요! 🌟'],
+    2: ['멋져요! 별 2개! 조금만 더 하면 3개예요!', '잘했어요! 다음엔 별 3개에 도전해 봐요!'],
+    1: ['클리어 성공! 정말 잘했어요! 👏', '해냈어요! 다음엔 더 많은 별을 모아 봐요!'],
+    0: ['클리어! 끝까지 해낸 게 멋져요!'],
+  },
+  overMsgs: [
+    '아쉬워요! 다시 도전해 볼까요? 💪',
+    '괜찮아요! 누구나 처음엔 어려워요. 한 번 더!',
+    '거의 다 왔어요! 몬스터 머리의 "!" 를 보고 피해 봐요.',
+    '힘내요! 점프 공격과 스킬을 써 보면 더 쉬워요.',
+  ],
+};
+
+const UI = (() => {
+  const T = UI_TUNE;
+  const TAU = Math.PI * 2;
+  const doc = document, docEl = doc.documentElement;
+
+  // ===== 1. 도우미 =====
+  const $ = id => doc.getElementById(id);
+  // 작은 DOM 만들기 도구: el('button', { class:'btn', text:'안녕', onclick: fn }, 자식들…)  (화면에 넣는 글자는 항상 textContent 로 — 서버에서 온 닉네임도 안전)
+  function el(tag, props) {
+    const e = doc.createElement(tag);
+    if (props) {
+      for (const k in props) {
+        const v = props[k];
+        if (v === undefined || v === null || v === false) continue;
+        if (k === 'class') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else if (k.slice(0, 2) === 'on' && typeof v === 'function') e.addEventListener(k.slice(2), v);
+        else e.setAttribute(k, v === true ? '' : String(v));
+      }
+    }
+    for (let i = 2; i < arguments.length; i++) {
+      const c = arguments[i];
+      if (c !== undefined && c !== null && c !== false) e.append(c.nodeType ? c : doc.createTextNode(String(c)));
+    }
+    return e;
+  }
+  const fmt = n => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');           // 12345 → "12,345"
+  const clock = frames => { const s = Math.max(0, Math.round((Number(frames) || 0) / 60)); return Math.floor(s / 60) + '분 ' + (s % 60) + '초'; };
+  const nowF = () => performance.now() * 0.06;                                                         // 60프레임/초 단위 시계 (장식 움직임용)
+  const easeOut = t => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
+  const isTyping = t => !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable === true);
+  const fx = () => RNG.fx();
+  const reduceMotion = () => {
+    try { if (FX.reduceMotion) return true; } catch (e) { /* 무시 */ }
+    try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
+  };
+  const sfx = (name, o) => { try { SFX.play(name, o); } catch (e) { /* 소리는 없어도 돼요 */ } };
+  const safe = fn => { try { return fn(); } catch (e) { Debug.logOnce('UI', e); return undefined; } };
+  const hasFn = (obj, name) => { try { return typeof obj !== 'undefined' && obj && typeof obj[name] === 'function'; } catch (e) { return false; } };
+
+  // 화면 상태 (한 곳에 모아 둠)
+  const S = {
+    els: {}, diff: 'normal', modal: null, returnFocus: null,
+    portrait: false, u: 1, hudInset: 112,
+    t: 0,                                           // 타이틀/결과 장식 시계 (update 마다 +1)
+    starting: false,
+    res: null, saveToken: 0, saveState: '',
+    playTicks: 0, reminded: 0, breakMsgs: 0,
+    confirm: null, kbdUsed: false,
+  };
+
+  // ===== 2. 귀여운 그림 부품 (젤리 · 사탕 · 구름 · 반짝이 · 하트) =====
+  function jellyPath(ctx, r) {                      // 바닥이 납작한 말랑 젤리 모양 (기준점 = 바닥 가운데)
+    const h = r * 1.75;
+    ctx.beginPath();
+    ctx.moveTo(-r, -r * 0.22);
+    ctx.bezierCurveTo(-r, -h * 0.66, -r * 0.6, -h, 0, -h);
+    ctx.bezierCurveTo(r * 0.6, -h, r, -h * 0.66, r, -r * 0.22);
+    ctx.bezierCurveTo(r, -r * 0.03, r * 0.88, 0, r * 0.62, 0);
+    ctx.lineTo(-r * 0.62, 0);
+    ctx.bezierCurveTo(-r * 0.88, 0, -r, -r * 0.03, -r, -r * 0.22);
+    ctx.closePath();
+  }
+  // o: { sx, sy (찌그러짐), look(눈동자 방향 -1~1), mood:'happy'|'wow'|'cheer'|'sleepy', tilt, alpha, blink }
+  function drawJelly(ctx, x, y, r, color, o) {
+    o = o || {};
+    const h = r * 1.75, lw = Math.max(2, r * 0.085);
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(o.tilt || 0); ctx.scale(o.sx || 1, o.sy || 1);
+    if (o.alpha !== undefined) ctx.globalAlpha *= o.alpha;
+    jellyPath(ctx, r); ctx.fillStyle = color; ctx.fill();
+    ctx.save(); ctx.clip();                                                        // 몸 안쪽 음영과 하이라이트
+    ctx.fillStyle = 'rgba(0,0,0,.11)'; ctx.fillRect(-r * 1.1, -h * 0.26, r * 2.2, h * 0.3);
+    ctx.fillStyle = 'rgba(255,255,255,.42)';
+    ctx.beginPath(); ctx.ellipse(-r * 0.45, -h * 0.72, r * 0.2, r * 0.34, -0.5, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(-r * 0.14, -h * 0.9, r * 0.075, 0, TAU); ctx.fill();
+    ctx.restore();
+    jellyPath(ctx, r); ctx.lineWidth = lw; ctx.lineJoin = 'round'; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+    // 얼굴
+    const ey = -h * 0.5, ex = r * 0.38, look = (o.look || 0) * r * 0.05;
+    if (o.mood === 'sleepy' || o.blink) {
+      ctx.strokeStyle = COLORS.ink; ctx.lineWidth = lw * 0.8; ctx.lineCap = 'round';
+      [-1, 1].forEach(s => { ctx.beginPath(); ctx.arc(s * ex, ey, r * 0.13, Math.PI * 0.1, Math.PI * 0.9); ctx.stroke(); });
+    } else if (o.mood === 'cheer') {                                               // ^ ^ 웃는 눈
+      ctx.strokeStyle = COLORS.ink; ctx.lineWidth = lw * 0.85; ctx.lineCap = 'round';
+      [-1, 1].forEach(s => { ctx.beginPath(); ctx.arc(s * ex, ey + r * 0.08, r * 0.14, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke(); });
+    } else {
+      [-1, 1].forEach(s => {
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(s * ex, ey, r * 0.17, r * 0.22, 0, 0, TAU); ctx.fill();
+        ctx.lineWidth = lw * 0.55; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+        ctx.fillStyle = COLORS.ink; ctx.beginPath(); ctx.ellipse(s * ex + look, ey + r * 0.03, r * 0.09, r * 0.125, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(s * ex + look - r * 0.03, ey - r * 0.04, r * 0.035, 0, TAU); ctx.fill();
+      });
+    }
+    ctx.fillStyle = 'rgba(255,120,150,.5)';                                        // 볼터치
+    [-1, 1].forEach(s => { ctx.beginPath(); ctx.ellipse(s * r * 0.62, ey + r * 0.3, r * 0.13, r * 0.085, 0, 0, TAU); ctx.fill(); });
+    ctx.strokeStyle = COLORS.ink; ctx.lineWidth = lw * 0.75; ctx.lineCap = 'round';
+    ctx.beginPath();
+    if (o.mood === 'wow') { ctx.fillStyle = '#7a1f3d'; ctx.ellipse(0, ey + r * 0.36, r * 0.1, r * 0.13, 0, 0, TAU); ctx.fill(); ctx.stroke(); }
+    else if (o.mood === 'sleepy') { ctx.arc(0, ey + r * 0.3, r * 0.1, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke(); }
+    else { ctx.arc(0, ey + r * 0.22, r * 0.17, Math.PI * 0.12, Math.PI * 0.88); ctx.stroke(); }
+    ctx.restore();
+  }
+  // 통통 튀는 움직임: 높이와 찌그러짐(바닥에 닿을 때 납작, 올라갈 땐 길쭉)
+  function bounce(t, period, height, phase) {
+    const ph = (((t / period) + (phase || 0)) % 1 + 1) % 1;
+    const lift = Math.abs(Math.sin(ph * Math.PI)) * height;
+    const near = 1 - Math.min(1, lift / (height * 0.28 + 0.001));                  // 바닥에 가까울수록 1
+    return { lift, sx: 1 + 0.17 * near - 0.04 * (1 - near), sy: 1 - 0.17 * near + 0.07 * (1 - near) };
+  }
+  function drawLolli(ctx, x, y, r, rot, c1, c2) {                                   // 막대사탕 (소용돌이)
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.lineCap = 'round';
+    ctx.strokeStyle = COLORS.ink; ctx.lineWidth = r * 0.36; ctx.beginPath(); ctx.moveTo(0, r * 0.5); ctx.lineTo(0, r * 2.4); ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = r * 0.16; ctx.stroke();
+    ctx.fillStyle = c1; ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
+    ctx.strokeStyle = c2; ctx.lineWidth = r * 0.22; ctx.beginPath();
+    for (let a = 0; a < TAU * 2.1; a += 0.2) { const rr = r * 0.86 * (a / (TAU * 2.1)); const px = Math.cos(a) * rr, py = Math.sin(a) * rr; if (a === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); }
+    ctx.stroke();
+    ctx.strokeStyle = COLORS.ink; ctx.lineWidth = r * 0.14; ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.beginPath(); ctx.arc(-r * 0.4, -r * 0.45, r * 0.14, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  function drawCandy(ctx, x, y, r, rot, c1, c2) {                                   // 포장지 사탕
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.lineJoin = 'round';
+    ctx.lineWidth = Math.max(2, r * 0.13); ctx.strokeStyle = COLORS.ink; ctx.fillStyle = c2;
+    ctx.beginPath(); ctx.moveTo(-r * 0.5, 0); ctx.lineTo(-r * 1.45, -r * 0.7); ctx.lineTo(-r * 1.45, r * 0.7); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(r * 0.5, 0); ctx.lineTo(r * 1.45, -r * 0.7); ctx.lineTo(r * 1.45, r * 0.7); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = c1; ctx.beginPath(); ctx.arc(0, 0, r * 0.72, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = r * 0.14; ctx.beginPath(); ctx.arc(0, 0, r * 0.42, Math.PI * 1.1, Math.PI * 1.65); ctx.stroke();
+    ctx.restore();
+  }
+  function drawCloud(ctx, x, y, s, a) {
+    ctx.save(); ctx.fillStyle = 'rgba(255,255,255,' + a + ')';
+    ctx.beginPath();
+    ctx.arc(x, y, s * 0.5, 0, TAU); ctx.arc(x - s * 0.52, y + s * 0.14, s * 0.36, 0, TAU);
+    ctx.arc(x + s * 0.54, y + s * 0.12, s * 0.4, 0, TAU); ctx.arc(x + s * 0.02, y + s * 0.2, s * 0.46, 0, TAU);
+    ctx.fill(); ctx.restore();
+  }
+  function drawSparkle(ctx, x, y, s, rot, color) {                                  // 네 갈래 반짝이
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot || 0);
+    ctx.fillStyle = color || '#fff'; ctx.strokeStyle = 'rgba(43,27,58,.7)'; ctx.lineWidth = Math.max(1, s * 0.12); ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, -s); ctx.lineTo(s * 0.26, -s * 0.26); ctx.lineTo(s, 0); ctx.lineTo(s * 0.26, s * 0.26);
+    ctx.lineTo(0, s); ctx.lineTo(-s * 0.26, s * 0.26); ctx.lineTo(-s, 0); ctx.lineTo(-s * 0.26, -s * 0.26);
+    ctx.closePath(); ctx.stroke(); ctx.fill(); ctx.restore();
+  }
+  function heartPath(ctx, x, y, s) {                                                // 하트 (x,y = 중심, s = 너비)
+    ctx.beginPath();
+    ctx.moveTo(x, y + s * 0.4);
+    ctx.bezierCurveTo(x - s * 0.78, y - s * 0.02, x - s * 0.5, y - s * 0.58, x, y - s * 0.2);
+    ctx.bezierCurveTo(x + s * 0.5, y - s * 0.58, x + s * 0.78, y - s * 0.02, x, y + s * 0.4);
+    ctx.closePath();
+  }
+  function drawHeart(ctx, x, y, s, full) {
+    ctx.save();
+    heartPath(ctx, x, y, s);
+    if (full) {
+      ctx.fillStyle = COLORS.red; ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(x - s * 0.24, y - s * 0.16, s * 0.1, s * 0.07, -0.6, 0, TAU); ctx.fill();
+    } else { ctx.fillStyle = 'rgba(43,27,58,.55)'; ctx.fill(); }
+    heartPath(ctx, x, y, s);
+    ctx.lineWidth = 2.6; ctx.lineJoin = 'round'; ctx.strokeStyle = full ? COLORS.ink : 'rgba(255,244,224,.75)'; ctx.stroke();
+    ctx.restore();
+  }
+  function drawInfinity(ctx, x, y, w) {                                             // ∞ (글꼴에 없어도 되게 직접 그림)
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let a = 0; a <= TAU + 0.05; a += 0.12) {
+      const px = x + Math.sin(a) * w / 2, py = y + Math.sin(a) * Math.cos(a) * w * 0.34;
+      if (a === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = COLORS.ink; ctx.lineWidth = 8; ctx.stroke();
+    ctx.strokeStyle = COLORS.cream; ctx.lineWidth = 3.6; ctx.stroke();
+    ctx.restore();
+  }
+
+  // ===== 3. HUD (캔버스) =====
+  const HUD = {
+    scoreShown: 0, lastScore: 0, scorePop: -99,
+    comboPop: -99, comboLast: 0, ghost: null,
+    hitT: -99,
+    readyAt: [-99, -99, -99], lastCd: [0, 0, 0],
+    boss: null, bossT: -99, bossLag: 1,
+    touchSkill: [null, null, null],
+  };
+
+  function hudVignette(ctx, p, now, calm) {
+    let a = 0;
+    if (p && !p.dead && p.maxHp > 0 && p.hp / p.maxHp <= T.hud.lowHpRatio) {
+      a += calm ? 0.14 : 0.07 + (T.hud.vignetteMax - 0.07) * (0.5 + 0.5 * Math.sin(now * 0.07));   // 1.5초 주기로 천천히 (깜빡임 아님)
+    }
+    const age = now - HUD.hitT;
+    if (age >= 0 && age < T.hud.hitFlashFrames) a += (calm ? 0.1 : T.hud.hitFlashAlpha) * (1 - age / T.hud.hitFlashFrames);
+    if (a <= 0.004) return;
+    const g = ctx.createRadialGradient(W / 2, H / 2, H * 0.38, W / 2, H / 2, H * 1.0);
+    g.addColorStop(0, 'rgba(255,60,90,0)'); g.addColorStop(1, 'rgba(255,60,90,' + Math.min(a, 0.45).toFixed(3) + ')');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+
+  function hudHp(ctx, p, now, calm) {
+    const maxHp = p && p.maxHp > 0 ? p.maxHp : 100;
+    const hp = p ? clamp(Math.ceil(p.hp || 0), 0, maxHp) : maxHp;
+    const ratio = hp / maxHp, low = !!p && hp > 0 && ratio <= T.hud.lowHpRatio;
+    ctx.save();
+    Draw.roundRect(ctx, 10, 8, 304, 86, 18); ctx.fillStyle = 'rgba(43,27,58,.62)'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke();
+    const beat = low && !calm ? 1 + 0.12 * Math.max(0, Math.sin(now * 0.14)) : 1;     // 위험할 때 하트가 콩닥콩닥
+    drawHeart(ctx, 36, 32, 34 * beat, true);
+    const fg = ratio > 0.5 ? COLORS.mint : ratio > T.hud.lowHpRatio ? COLORS.yellow : COLORS.red;
+    Draw.bar(ctx, 60, 19, 242, 26, ratio, { fg, bg: 'rgba(20,10,30,.72)', border: COLORS.ink, lw: 3 });
+    Draw.text(ctx, hp + ' / ' + maxHp, 181, 39, { size: 18, lw: 4 });
+    // 목숨
+    Draw.text(ctx, '목숨', 24, 78, { size: 18, align: 'left', lw: 4 });
+    const maxLives = Game.diff ? Game.diff.lives : 3, lives = Game.lives;
+    if (maxLives === Infinity || lives === Infinity) {
+      drawHeart(ctx, 100, 71, 26, true); drawInfinity(ctx, 140, 71, 40);
+    } else {
+      const total = clamp(Math.round(Number(maxLives) || 0), 0, T.hud.maxHearts), have = clamp(Math.round(Number(lives) || 0), 0, total);
+      for (let i = 0; i < total; i++) drawHeart(ctx, 100 + i * 30, 71, 26, i < have);
+    }
+    if (low) Draw.text(ctx, '위험!', 300, 78, { size: 18, align: 'right', color: COLORS.yellow, lw: 4 });
+    ctx.restore();
+  }
+
+  function hudRoom(ctx, now, calm) {
+    const st = Game.stage || {};
+    const name = st.roomName || '', n = clamp(Math.round(st.roomCount) || 0, 0, 12);
+    if (!name && !n) return;
+    ctx.save();
+    ctx.font = 'bold 22px ' + CFG.font;
+    const nameW = name ? ctx.measureText(name).width : 0, fs = nameW > 210 ? Math.max(14, Math.floor(22 * 210 / nameW)) : 22;   // 이름이 너무 길면 글자를 줄여요 (양옆 판과 겹치지 않게)
+    const w = Math.max(180, Math.min(nameW, 210) + 54), x = W / 2 - w / 2;
+    Draw.roundRect(ctx, x, 8, w, 34, 17); ctx.fillStyle = 'rgba(43,27,58,.62)'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke();
+    if (name) Draw.text(ctx, name, W / 2, 25 + fs * 0.36, { size: fs, lw: 4 });
+    if (n > 0) {
+      const gap = 24, dw = (n - 1) * gap + 40, x0 = W / 2 - (n - 1) * gap / 2, idx = clamp(Math.round(st.roomIndex) || 0, 0, n - 1);
+      Draw.roundRect(ctx, W / 2 - dw / 2, 46, dw, 24, 12); ctx.fillStyle = 'rgba(43,27,58,.55)'; ctx.fill();
+      for (let i = 0; i < n; i++) {
+        const cx = x0 + i * gap, cy = 58;
+        ctx.beginPath();
+        if (i === idx) {                                                              // 지금 방: 크고 노랗고 테두리가 도드라짐
+          const pr = calm ? 0 : Math.sin(now * 0.12) * 0.8;
+          ctx.arc(cx, cy, 8.5 + pr, 0, TAU); ctx.fillStyle = COLORS.yellow; ctx.fill();
+          ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke();
+        } else if (i < idx) {                                                         // 지나온 방: 꽉 찬 민트
+          ctx.arc(cx, cy, 6, 0, TAU); ctx.fillStyle = COLORS.mint; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+        } else {                                                                      // 앞으로 갈 방: 속이 빈 동그라미
+          ctx.arc(cx, cy, 5.5, 0, TAU); ctx.fillStyle = 'rgba(20,10,30,.6)'; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = COLORS.cream; ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  function hudScore(ctx, now, calm) {
+    const score = Math.max(0, Number(Game.score) || 0);
+    if (score > HUD.lastScore) HUD.scorePop = now;
+    if (score < HUD.scoreShown) HUD.scoreShown = score;                                // 새 판이 시작되면 바로 0 으로
+    HUD.lastScore = score;
+    HUD.scoreShown += (score - HUD.scoreShown) * (calm ? 1 : 0.2);                     // 숫자가 드르륵 올라감
+    if (Math.abs(score - HUD.scoreShown) < 1) HUD.scoreShown = score;
+    ctx.font = 'bold 34px ' + CFG.font;
+    const txt = fmt(HUD.scoreShown), numW = ctx.measureText(txt).width;
+    const xr = W - S.hudInset, w = clamp(numW + 92, 214, 290), x = xr - w;                // 점수가 아주 커도 숫자가 판 밖으로 나가지 않게
+    ctx.save();
+    Draw.roundRect(ctx, x, 8, w, 58, 18); ctx.fillStyle = 'rgba(43,27,58,.62)'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke();
+    Draw.text(ctx, '점수', x + 16, 45, { size: 18, align: 'left', lw: 4 });
+    const age = now - HUD.scorePop, pop = !calm && age >= 0 && age < 9 ? 1 + 0.16 * (1 - age / 9) : 1;
+    ctx.translate(x + w - 16, 50); ctx.scale(pop, pop);
+    Draw.text(ctx, txt, 0, 0, { size: 34, align: 'right', color: COLORS.yellow, lw: 5 });
+    ctx.restore();
+  }
+
+  function hudCombo(ctx, now, calm) {
+    const c = Game.combo || { count: 0, timer: 0 }, count = c.count | 0;
+    const x = W - 28, y = 150;
+    const comboColor = n => n >= 20 ? COLORS.pink : n >= 10 ? '#ffb347' : n >= 5 ? COLORS.yellow : '#fff';
+    ctx.save();
+    if (count >= T.hud.comboMin) {
+      const age = now - HUD.comboPop, pop = !calm && age >= 0 && age < 12 ? 1 + 0.5 * Math.pow(1 - age / 12, 2) : 1;
+      const size = clamp(30 + count * 1.8, 30, 66) * pop, col = comboColor(count);
+      ctx.translate(x, y); if (!calm) ctx.rotate(-0.05);
+      const w1 = Draw.text(ctx, 'HIT!', 0, 0, { size: size * 0.5, align: 'right', color: col, lw: 5 });
+      const w2 = Draw.text(ctx, String(count), -w1 - 8, 0, { size, align: 'right', color: col, lw: 7 });
+      const tw = w1 + w2 + 8, ratio = CFG.comboWindow > 0 ? clamp((c.timer || 0) / CFG.comboWindow, 0, 1) : 0;
+      Draw.bar(ctx, -Math.max(120, tw), 12, Math.max(120, tw), 9, ratio, { fg: col, bg: 'rgba(20,10,30,.6)', border: COLORS.ink, lw: 2 });
+    } else if (HUD.ghost) {                                                           // 콤보가 끊기면 숫자가 위로 사라짐
+      const gAge = now - HUD.ghost.t;
+      if (gAge >= 0 && gAge < 28) {
+        ctx.globalAlpha = 1 - gAge / 28;
+        Draw.text(ctx, HUD.ghost.count + ' HIT', x, y - gAge * 0.6, { size: 30, align: 'right', color: '#ddd', lw: 5 });
+      } else HUD.ghost = null;
+    }
+    ctx.restore();
+  }
+
+  // 스킬 상태 계산 (캔버스와 터치 버튼이 같이 씀)
+  function skillInfo(sk) {
+    const cdMax = Math.max(1, Number(sk && sk.cdMax) || 1), cd = clamp(Number(sk && sk.cd) || 0, 0, cdMax);
+    return { cd, cdMax, ratio: cd / cdMax, secs: Math.ceil(cd / 60), ready: cd <= 0 };
+  }
+
+  function hudSkills(ctx, p, now, calm) {
+    const skills = (p && p.skills) || [];
+    const dead = !!(p && p.dead);
+    for (let i = 0; i < 3; i++) {
+      const def = T.skillDefaults[i], sk = skills[i];
+      const info = skillInfo(sk || { cd: 0, cdMax: 1 });
+      if (HUD.lastCd[i] > 0 && info.cd <= 0) HUD.readyAt[i] = now;                      // 준비되는 순간 반짝!
+      HUD.lastCd[i] = info.cd;
+      const s = 62, bx = 18 + i * 74, by = H - 84, cx = bx + s / 2, cy = by + s / 2;
+      ctx.save();
+      if (dead) ctx.globalAlpha = 0.55;
+      Draw.roundRect(ctx, bx, by, s, s, 15); ctx.fillStyle = 'rgba(43,27,58,.78)'; ctx.fill();
+      ctx.font = '31px ' + CFG.font; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.globalAlpha *= info.ready ? 1 : 0.6;
+      ctx.fillStyle = '#fff'; ctx.fillText((sk && sk.icon) || def.icon, cx, cy + 3);
+      ctx.globalAlpha = dead ? 0.55 : 1;
+      if (!info.ready) {                                                                // 쿨타임 부채꼴 (맨 위에서 시계 방향으로 걷힘)
+        ctx.save(); Draw.roundRect(ctx, bx, by, s, s, 15); ctx.clip();
+        ctx.fillStyle = 'rgba(15,8,25,.7)'; ctx.beginPath(); ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, s, -Math.PI / 2 + (1 - info.ratio) * TAU, -Math.PI / 2 + TAU); ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+      Draw.roundRect(ctx, bx, by, s, s, 15);
+      ctx.lineWidth = info.ready ? 4 : 3; ctx.strokeStyle = info.ready ? COLORS.yellow : 'rgba(255,244,224,.7)'; ctx.stroke();
+      if (info.ready && !dead) {                                                        // 준비됨: 테두리 바깥 은은한 숨쉬기 링 + 반짝이
+        const br = calm ? 0.5 : 0.5 + 0.5 * Math.sin(now * 0.1 + i);
+        Draw.roundRect(ctx, bx - 3, by - 3, s + 6, s + 6, 18); ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,246,168,' + (0.35 + 0.4 * br).toFixed(2) + ')'; ctx.stroke();
+        drawSparkle(ctx, bx + s - 6, by + 8, calm ? 9 : 7 + 4 * br, calm ? 0 : now * 0.03, '#fff6a8');
+      }
+      const fAge = now - HUD.readyAt[i];
+      if (!calm && fAge >= 0 && fAge < 20) {                                            // 준비되는 순간 퍼지는 링
+        ctx.globalAlpha = 1 - fAge / 20; ctx.lineWidth = 4; ctx.strokeStyle = '#fff';
+        Draw.roundRect(ctx, bx - fAge * 0.8, by - fAge * 0.8, s + fAge * 1.6, s + fAge * 1.6, 15 + fAge * 0.5); ctx.stroke();
+        ctx.globalAlpha = dead ? 0.55 : 1;
+      }
+      ctx.restore();
+      // 키 이름표 (왼쪽 위 동그라미) + 남은 초
+      ctx.save();
+      ctx.beginPath(); ctx.arc(bx + 4, by + 5, 14, 0, TAU); ctx.fillStyle = COLORS.ink; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = COLORS.cream; ctx.stroke();
+      Draw.text(ctx, (sk && sk.key) || def.key, bx + 4, by + 11, { size: 18, lw: 0 });
+      if (!info.ready) Draw.text(ctx, String(info.secs), cx, cy + 10, { size: 28, lw: 5 });
+      ctx.restore();
+    }
+  }
+
+  function hudBoss(ctx, now, calm) {
+    const b = Game.boss;
+    if (!b || !(b.maxHp > 0)) { HUD.boss = null; return; }
+    if (HUD.boss !== b) { HUD.boss = b; HUD.bossT = now; HUD.bossLag = clamp(b.hp / b.maxHp, 0, 1); }
+    const ratio = clamp(b.hp / b.maxHp, 0, 1);
+    HUD.bossLag = ratio > HUD.bossLag ? ratio : HUD.bossLag + (ratio - HUD.bossLag) * 0.05;   // 깎인 부분이 천천히 따라 내려옴
+    const slide = calm ? 1 : easeOut((now - HUD.bossT) / 24);
+    const w = 460, x = (W - w) / 2, y = H - 50 + (1 - slide) * 70;
+    ctx.save();
+    Draw.roundRect(ctx, x - 14, y - 40, w + 28, 76, 20); ctx.fillStyle = 'rgba(43,27,58,.66)'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke();
+    Draw.text(ctx, '👑 ' + (b.name || '젤리 대왕'), x + 4, y - 12, { size: 22, align: 'left', lw: 4 });
+    Draw.text(ctx, Math.ceil(ratio * 100) + '%', x + w - 4, y - 12, { size: 20, align: 'right', lw: 4 });
+    Draw.bar(ctx, x, y, w, 24, HUD.bossLag, { fg: COLORS.yellow, bg: 'rgba(20,10,30,.72)', border: COLORS.ink, lw: 3 });
+    Draw.bar(ctx, x, y, w, 24, ratio, { fg: ratio > 0.5 ? COLORS.pink : COLORS.red, bg: 'rgba(0,0,0,0)', border: COLORS.ink, lw: 3 });
+    ctx.strokeStyle = COLORS.cream; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x + w / 2, y - 3); ctx.lineTo(x + w / 2, y + 27); ctx.stroke();   // 50% 눈금: 화나는 지점
+    ctx.restore();
+  }
+
+  // 터치 스킬 버튼의 쿨타임 표시 (값이 바뀔 때만 DOM 을 건드려요)
+  function syncTouchSkills(p) {
+    const btns = S.els.touchSkills;
+    if (!btns) return;
+    const skills = (p && p.skills) || [];
+    for (let i = 0; i < 3; i++) {
+      const b = btns[i], sk = skills[i], def = T.skillDefaults[i], info = skillInfo(sk || { cd: 0, cdMax: 1 });
+      const key = [info.secs, info.ready ? 1 : 0, Math.round(info.ratio * 100), (sk && sk.icon) || ''].join('|');
+      if (HUD.touchSkill[i] === key) continue;
+      HUD.touchSkill[i] = key;
+      b.root.setAttribute('data-ready', info.ready ? '1' : '0');
+      b.root.style.setProperty('--cd', String(Math.round(info.ratio * 100)));
+      b.sec.textContent = info.ready ? '' : String(info.secs);
+      b.ico.textContent = (sk && sk.icon) || def.icon;
+      b.root.setAttribute('aria-label', ((sk && sk.label) || def.label) + ' (' + def.key + ')' + (info.ready ? ', 쓸 수 있어요' : ', ' + info.secs + '초 뒤에 쓸 수 있어요'));
+    }
+  }
+
+  // HUD 전체: play 씬의 마지막에 stage 가 부름. 플레이어/보스가 없어도, 목숨이 ∞ 여도 안전해야 해요
+  function drawHUD(ctx) {
+    const now = nowF(), calm = reduceMotion(), p = Game.player;
+    ctx.save();
+    try {
+      hudVignette(ctx, p, now, calm);
+      hudHp(ctx, p, now, calm);
+      hudRoom(ctx, now, calm);
+      hudScore(ctx, now, calm);
+      hudCombo(ctx, now, calm);
+      if (!touchActive()) hudSkills(ctx, p, now, calm);
+      hudBoss(ctx, now, calm);
+    } finally { ctx.restore(); }
+    syncTouchSkills(p);
+  }
+
+  // ===== 4. DOM 화면 =====
+  const show = (e, on) => { if (e) e.hidden = on === false; };
+  const modalOpen = () => !!S.modal;
+  const overlayActive = () => Game.scene !== 'play' || !!Game.paused || modalOpen();
+  // 터치 컨트롤을 쓸지: 터치 기기이고, (터치 화면 + 키보드가 둘 다 있는 기기에서) 키보드로 플레이 중이 아닐 때
+  const touchActive = () => !!Game.touch && !S.kbdUsed;
+
+  function blurAll() {                                                              // 시작 후 포커스가 버튼에 남아 Space 를 먹지 않게
+    try {
+      const a = doc.activeElement;
+      if (a && a !== doc.body && a.blur && S.els.root && S.els.root.contains(a)) a.blur();
+    } catch (e) { /* 무시 */ }
+    try { window.focus(); } catch (e) { /* 무시 */ }
+  }
+  function focusEl(e) { try { if (e && !e.hidden) e.focus({ preventScroll: true }); } catch (err) { /* 무시 */ } }
+
+  // --- 토스트 ---
+  function toast(text, ms) {
+    const box = S.els.toasts;
+    if (!box) return null;
+    const life = ms === undefined ? T.toastMs : ms;
+    const n = el('div', { class: 'toast', text: String(text) });
+    box.append(n);
+    while (box.children.length > 3) box.firstChild.remove();
+    setTimeout(() => { n.classList.add('out'); setTimeout(() => n.remove(), 340); }, Math.max(200, life));
+    return n;
+  }
+
+  // --- 소리 켜고 끄기 (KeyM 도 버튼도 모두 여기 한 곳으로) ---
+  function updateMuteBtn() {
+    const b = S.els.btnMute;
+    if (!b) return;
+    const m = !!SFX.muted;
+    b.textContent = m ? '🔇' : '🔊';
+    b.setAttribute('aria-label', m ? '소리 켜기' : '소리 끄기');
+    b.setAttribute('aria-pressed', m ? 'true' : 'false');
+    b.title = m ? '소리 켜기 (M)' : '소리 끄기 (M)';
+    const pm = S.els.pauseMute;
+    if (pm) pm.textContent = m ? '🔇 소리 켜기' : '🔊 소리 끄기';
+  }
+  function toggleMute(withToast) {
+    try { SFX.init(); SFX.setMuted(!SFX.muted); } catch (e) { /* 무시 */ }
+    updateMuteBtn();
+    if (withToast) toast(SFX.muted ? '🔇 소리를 껐어요' : '🔊 소리를 켰어요', 1200);
+    return !!SFX.muted;
+  }
+
+  // --- 모달(조작법 / 랭킹) 열고 닫기 ---
+  function openModal(name) {
+    if (S.modal && S.modal !== name) closeModal(S.modal, true);
+    const m = S.els[name + 'Modal'];
+    if (!m) return;
+    if (!S.modal) S.returnFocus = doc.activeElement;
+    S.modal = name; show(m);
+    focusEl(m.querySelector('[data-first]') || m.querySelector('button'));
+  }
+  function closeModal(name, keepFocus) {
+    const m = S.els[name + 'Modal'];
+    if (!m || S.modal !== name) return;
+    show(m, false); S.modal = null;
+    if (!keepFocus) { const f = S.returnFocus; S.returnFocus = null; if (f && f.focus && doc.contains(f) && !f.hidden) focusEl(f); }
+  }
+
+  // --- 랭킹 목록 (결과 화면과 랭킹 모달이 같이 씀) ---
+  function makeRankView(opts) {
+    const list = el('ol', { class: 'rank-list', 'aria-label': '랭킹 TOP 10' });
+    const status = el('p', { class: 'rank-status', role: 'status' });
+    let token = 0;
+    const myNick = () => Game.nickname || Store.get('nickname', '');
+    function render(rows) {
+      list.textContent = '';
+      if (!Array.isArray(rows) || !rows.length) { status.textContent = '아직 기록이 없어요. 첫 번째 주인공이 되어 봐요!'; return; }
+      status.textContent = '';
+      const me = myNick();
+      rows.slice(0, 10).forEach((r, i) => {
+        r = r || {};
+        const rank = Number(r.rank) || i + 1, nick = String(r.nickname === undefined ? '?' : r.nickname);
+        const stars = clamp(Math.round(Number(r.stars) || 0), 0, 3);
+        const d = CFG.difficulty[r.difficulty];
+        const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : String(rank);
+        const isMe = !!me && nick === me;
+        list.append(el('li', { class: 'rank-row' + (isMe ? ' me' : ''), 'data-rank': rank, 'data-me': isMe ? '1' : '0' },
+          el('span', { class: 'rank-no', text: medal, 'aria-label': rank + '등' }),
+          el('span', { class: 'rank-name' }, isMe ? el('span', { class: 'rank-me-tag', text: '나' }) : null, el('span', { class: 'rank-nick', text: nick }), d ? el('span', { class: 'rank-diff', text: d.label }) : null),
+          el('span', { class: 'rank-stars', text: '★'.repeat(stars) + '☆'.repeat(3 - stars), role: 'img', 'aria-label': '별 ' + stars + '개' }),
+          el('span', { class: 'rank-score', text: fmt(r.score) })));
+      });
+    }
+    function load() {
+      const my = ++token;
+      list.textContent = ''; status.textContent = '랭킹을 불러오는 중…';
+      let p = null;
+      try { if (hasFn(Server, 'getTopScores')) p = Server.getTopScores(10); } catch (e) { p = null; }
+      if (!p || typeof p.then !== 'function') { status.textContent = '랭킹을 불러올 수 없어요. 조금 있다가 다시 봐요!'; return; }
+      p.then(rows => { if (my === token) render(rows); }, () => { if (my === token) status.textContent = '랭킹을 불러올 수 없어요. 조금 있다가 다시 봐요!'; });
+    }
+    return { list, status, render, load, cancel() { token++; } };
+  }
+
+  // --- 닉네임 검사: 서버 모듈이 있으면 그걸, 없으면 간단한 검사 ---
+  function validateNick(raw) {
+    const s = String(raw === undefined || raw === null ? '' : raw);
+    if (hasFn(Server, 'validateNickname')) {
+      const r = safe(() => Server.validateNickname(s));
+      if (r && typeof r.ok === 'boolean') return r.ok ? { ok: true, value: String(r.value === undefined ? s.trim() : r.value) } : { ok: false, error: String(r.error || '이름을 다시 적어 주세요') };
+    }
+    const v = s.replace(/\s+/g, ' ').trim(), len = Array.from(v).length;
+    if (len < T.nick.min) return { ok: false, error: '이름은 ' + T.nick.min + '~' + T.nick.max + '글자로 적어 주세요' };
+    if (len > T.nick.max) return { ok: false, error: '이름은 ' + T.nick.max + '글자까지만 쓸 수 있어요' };
+    if (!/^[0-9A-Za-zㄱ-ㆎ가-힣 ]+$/.test(v)) return { ok: false, error: '한글, 영어, 숫자만 쓸 수 있어요' };
+    return { ok: true, value: v };
+  }
+  function showNickError(msg) {
+    const e = S.els;
+    e.nickErr.textContent = msg || '';
+    e.nick.setAttribute('aria-invalid', msg ? 'true' : 'false');
+    e.nickErr.classList.remove('shake');
+    if (msg) { void e.nickErr.offsetWidth; e.nickErr.classList.add('shake'); }
+  }
+
+  // --- 난이도 카드 ---
+  function selectDiff(key, focus) {
+    if (!CFG.difficulty[key]) return;
+    S.diff = key;
+    S.els.diffCards.forEach(c => {
+      const on = c.getAttribute('data-diff') === key;
+      c.setAttribute('aria-checked', on ? 'true' : 'false'); c.tabIndex = on ? 0 : -1;
+      if (on && focus) focusEl(c);
+    });
+  }
+
+  // --- 게임 시작 / 다시 / 처음으로 ---
+  function startGame() {
+    if (Game.scene !== 'title' || S.starting) return false;
+    const r = validateNick(S.els.nick.value);
+    if (!r.ok) { showNickError(r.error); focusEl(S.els.nick); sfx('ui'); return false; }
+    showNickError('');
+    S.els.nick.value = r.value;
+    Store.set('nickname', r.value); Store.set('difficulty', S.diff);
+    Game.nickname = r.value;
+    if (!hasFn(Stage, 'start')) { toast('아직 준비 중이에요. 조금만 기다려 줘요!', 3000); return false; }
+    S.starting = true;
+    try { SFX.init(); sfx('go'); Music.play('stage'); } catch (e) { /* 소리는 없어도 돼요 */ }
+    try { Stage.start({ difficulty: S.diff, nickname: r.value }); }
+    catch (e) { S.starting = false; Debug.logOnce('UI.startGame', e); toast('앗, 시작하지 못했어요. 다시 눌러 줘요!', 3000); try { Music.play('title'); } catch (e2) { /* 무시 */ } return false; }
+    S.starting = false;
+    blurAll();
+    return true;
+  }
+  function restartRun() {                                                           // 같은 난이도·닉네임으로 처음부터
+    const nick = Game.nickname || Store.get('nickname', '용사');
+    const diff = (Game.result && Game.result.difficulty) || Game.difficulty;
+    if (Game.paused) Game.pause(false);
+    try { SFX.init(); Music.play('stage'); } catch (e) { /* 무시 */ }
+    if (hasFn(Stage, 'start')) safe(() => Stage.start({ difficulty: CFG.difficulty[diff] ? diff : Game.difficulty, nickname: nick }));
+    blurAll();
+  }
+  function toTitle() {
+    if (Game.paused) Game.pause(false);
+    safe(() => { Entities.clear(); FX.clear(); });
+    if (hasFn(Enemies, 'clear')) safe(() => Enemies.clear());
+    try { Music.play('title'); } catch (e) { /* 무시 */ }
+    Game.setScene('title');
+  }
+  function resume() { if (Game.paused) Game.pause(false); }
+
+  // --- 일시정지 오버레이의 "한 번 더 누르세요" (실수로 눌러 기록을 잃지 않게) ---
+  function armConfirm(btn, label, action) {
+    if (S.confirm && S.confirm.btn === btn) { const a = S.confirm.action; disarmConfirm(); a(); return; }
+    disarmConfirm();
+    const old = btn.textContent;
+    btn.textContent = '정말요? 한 번 더 눌러요!';
+    S.confirm = { btn, old, action, timer: setTimeout(disarmConfirm, T.confirmMs) };
+  }
+  function disarmConfirm() {
+    if (!S.confirm) return;
+    clearTimeout(S.confirm.timer); S.confirm.btn.textContent = S.confirm.old; S.confirm = null;
+  }
+
+  // --- 화면 요소 만들기 ---
+  function buildChrome() {
+    const root = $('ui') || (() => { const n = el('div', { id: 'ui' }); ($('app') || doc.body).append(n); return n; })();
+    const touch = $('touch') || (() => { const n = el('div', { id: 'touch' }); ($('app') || doc.body).append(n); return n; })();
+    S.els.root = root; S.els.touchRoot = touch;
+    // 오른쪽 위 작은 버튼
+    const btnPause = el('button', { class: 'round-btn', type: 'button', id: 'ui-pause', 'aria-label': '잠깐 멈춤 (Esc)', title: '잠깐 멈춤 (Esc 또는 P)', text: '⏸', hidden: true, onclick: () => { if (Game.scene === 'play' && !Game.paused) Game.pause(true); } });   // (일시정지 화면이 「계속하기」에 포커스를 줘요)
+    const btnMute = el('button', { class: 'round-btn', type: 'button', id: 'ui-mute', onclick: () => { toggleMute(false); if (Game.scene === 'play') blurAll(); } });
+    const hudBtns = el('div', { class: 'hud-btns' }, btnPause, btnMute);
+    const toasts = el('div', { class: 'toasts', id: 'ui-toasts', role: 'status', 'aria-live': 'polite' });
+    // 세로 화면 안내
+    const rotate = el('div', { class: 'rotate', id: 'ui-rotate', role: 'alert' },
+      el('div', { class: 'rotate-phone', 'aria-hidden': 'true', text: '📱' }),
+      el('h2', { text: '가로로 돌려 주세요' }),
+      el('p', { text: '화면을 옆으로 눕히면 게임이 훨씬 크게 보여요! (컴퓨터라면 창을 넓게 해 줘요)' }));
+    // 화면(타이틀/결과 …)을 다 만든 뒤에 맨 끝에 붙여요 (Tab 순서가 "화면 안 버튼들 → 일시정지/소리 버튼" 이 되게. 겹치는 순서는 CSS z-index 가 정함)
+    Object.assign(S.els, { btnPause, btnMute, hudBtns, toasts, rotate });
+    updateMuteBtn();
+  }
+
+  function buildTitle() {
+    const nick = el('input', { class: 'nick-input', id: 'ui-nick', type: 'text', maxlength: T.nick.max, placeholder: T.nick.min + '~' + T.nick.max + '글자', autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go', 'aria-label': '내 이름 (' + T.nick.min + '~' + T.nick.max + '글자)', 'aria-describedby': 'ui-nick-err', 'aria-invalid': 'false' });
+    const nickErr = el('p', { class: 'nick-err', id: 'ui-nick-err', role: 'alert' });
+    nick.addEventListener('input', () => { if (nickErr.textContent) showNickError(''); });
+    nick.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); startGame(); }   // 한글 조합을 끝내는 Enter 는 무시
+    });
+    const nickRow = el('div', { class: 'nick-row' }, el('label', { class: 'nick-label', for: 'ui-nick', text: '내 이름' }), nick);
+    const nickWrap = el('div', { class: 'nick-wrap' }, nickRow, nickErr);
+    const diffRow = el('div', { class: 'diff-row', role: 'radiogroup', 'aria-label': '난이도' });
+    const cards = Object.keys(CFG.difficulty).map(key => {
+      const d = CFG.difficulty[key];
+      const c = el('button', { class: 'diff-card', type: 'button', role: 'radio', 'data-diff': key, 'aria-checked': 'false', tabindex: '-1', 'aria-label': d.label + ' — ' + d.desc, onclick: () => { selectDiff(key, false); sfx('ui'); } },
+        el('span', { class: 'diff-label', text: d.label }), el('span', { class: 'diff-desc', text: d.desc }));
+      diffRow.append(c);
+      return c;
+    });
+    const start = el('button', { class: 'btn btn-big start-btn', type: 'button', id: 'ui-start', 'aria-label': '시작하기', text: '▶ 시작!', onclick: () => startGame() });
+    const helpBtn = el('button', { class: 'btn btn-small btn-sky', type: 'button', id: 'ui-help', text: '❓ 조작법', onclick: () => { sfx('ui'); openModal('help'); } });
+    const rankBtn = el('button', { class: 'btn btn-small btn-sky', type: 'button', id: 'ui-rank', text: '🏆 랭킹', onclick: () => { sfx('ui'); showRanking(); } });
+    const panel = el('div', { class: 'title-panel' }, nickWrap, diffRow, start);
+    const title = el('section', { class: 'screen title', id: 'ui-title', 'aria-label': '시작 화면', hidden: true }, el('h1', { class: 'sr', text: CFG.title }), el('div', { class: 'corner-btns' }, helpBtn, rankBtn), panel);
+    S.els.root.append(title);
+    Object.assign(S.els, { title, nick, nickErr, diffCards: cards, startBtn: start, helpBtn, rankBtn });
+    // 난이도 카드: 화살표 키로 고르기 (모듈 전체가 쓰는 한 곳의 키 처리에서 부름)
+    S.els.diffRow = diffRow;
+  }
+
+  function buildHelp() {
+    const keys = [
+      [['←', '↑', '↓', '→'], '움직이기'], [['Z', 'Space'], '공격'], [['X'], '점프'],
+      [['A'], '회오리 베기'], [['S'], '돌진 찌르기'], [['D'], '별빛 대폭발'],
+      [['Esc', 'P'], '잠깐 멈춤'], [['M'], '소리 끄기·켜기'],
+    ];
+    const list = el('ul', { class: 'keys' });
+    keys.forEach(([ks, label]) => list.append(el('li', null, el('span', { class: 'kk' }, ...ks.map(k => el('kbd', { text: k }))), el('span', { text: label }))));
+    const close = el('button', { class: 'btn btn-mint', type: 'button', 'data-first': '1', text: '알겠어요!', onclick: () => closeModal('help') });
+    const modal = el('div', { class: 'modal-back', id: 'ui-help-modal', hidden: true, onclick: e => { if (e.target === e.currentTarget) closeModal('help'); } },
+      el('div', { class: 'card modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'ui-help-h' },
+        el('h2', { id: 'ui-help-h', text: '🎮 조작법' }), list,
+        el('p', { class: 'help-note', text: '공격은 3번 이어서 누르면 콤보! 공중에서 Z 는 내려찍기예요. 몬스터 머리 위에 ! 가 뜨면 곧 공격하니까 살짝 피해 보세요. (터치 화면: 왼쪽 조이스틱으로 움직이고 오른쪽 버튼으로 싸워요)' }),
+        el('div', { class: 'modal-actions' }, close)));
+    S.els.root.append(modal);
+    S.els.helpModal = modal;
+  }
+
+  function buildRank() {
+    const view = makeRankView();
+    const close = el('button', { class: 'btn btn-mint', type: 'button', 'data-first': '1', text: '닫기', onclick: () => hideRanking() });
+    const modal = el('div', { class: 'modal-back', id: 'ui-rank-modal', hidden: true, onclick: e => { if (e.target === e.currentTarget) hideRanking(); } },
+      el('div', { class: 'card modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'ui-rank-h', style: 'display:flex;flex-direction:column;max-height:100%' },
+        el('h2', { id: 'ui-rank-h', text: '🏆 랭킹 TOP 10' }), view.status, view.list,
+        el('div', { class: 'modal-actions' }, close)));
+    S.els.root.append(modal);
+    S.els.rankModal = modal; S.els.rankView = view;
+  }
+
+  function buildPause() {
+    const resumeBtn = el('button', { class: 'btn btn-big btn-mint', type: 'button', 'data-first': '1', id: 'ui-resume', text: '▶ 계속하기', onclick: () => { disarmConfirm(); resume(); } });
+    const restartBtn = el('button', { class: 'btn btn-sky', type: 'button', id: 'ui-restart', text: '🔄 다시 시작', onclick: () => armConfirm(restartBtn, '', restartRun) });
+    const homeBtn = el('button', { class: 'btn btn-pink', type: 'button', id: 'ui-home', text: '🏠 처음으로', onclick: () => armConfirm(homeBtn, '', toTitle) });
+    const muteBtn = el('button', { class: 'btn btn-cream', type: 'button', id: 'ui-pause-mute', onclick: () => toggleMute(false) });
+    const modal = el('div', { class: 'modal-back', id: 'ui-pause-modal', hidden: true },
+      el('div', { class: 'card pause-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'ui-pause-h' },
+        el('h2', { id: 'ui-pause-h', text: '잠깐 멈춤' }), resumeBtn, restartBtn, homeBtn, muteBtn,
+        el('p', { class: 'pause-hint', text: 'Esc 나 P 키를 눌러도 계속할 수 있어요' })));
+    S.els.root.append(modal);
+    Object.assign(S.els, { pauseModal: modal, resumeBtn, restartBtn, homeBtn, pauseMute: muteBtn });
+  }
+
+  // 별 모양 SVG (속이 빈 별 → 켜지면 노랗게 꽉 참)
+  function starPoints(ro, ri) {
+    const pts = [];
+    for (let i = 0; i < 10; i++) { const r = i % 2 ? ri : ro, a = -Math.PI / 2 + i * Math.PI / 5; pts.push((Math.cos(a) * r).toFixed(1) + ',' + (Math.sin(a) * r).toFixed(1)); }
+    return pts.join(' ');
+  }
+  function makeStarEl() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (tag, attrs) => { const n = doc.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+    const svg = mk('svg', { viewBox: '-58 -58 116 116', 'aria-hidden': 'true', focusable: 'false' });
+    svg.append(mk('polygon', { class: 's-back', points: starPoints(50, 26) }), mk('polygon', { class: 's-fill', points: starPoints(36, 19) }),
+      mk('ellipse', { class: 's-shine', cx: '-15', cy: '-17', rx: '6', ry: '10', transform: 'rotate(-35 -15 -17)', fill: '#fff' }));
+    return el('span', { class: 'star' }, svg);
+  }
+
+  function buildResult() {
+    const stars = el('div', { class: 'stars', role: 'img', 'aria-label': '별 0개' }, makeStarEl(), makeStarEl(), makeStarEl());
+    const title = el('h2', { class: 'res-title', id: 'ui-res-title' });
+    const sub = el('p', { class: 'res-sub' }), badge = el('span', { class: 'badge', text: '무사망!', hidden: true });
+    const subRow = el('div', { class: 'res-sub-row' }, sub, badge);
+    const msg = el('p', { class: 'res-msg', role: 'status' });
+    const stats = el('ul', { class: 'stat-grid' });
+    const total = el('div', { class: 'total', 'aria-live': 'off' }, el('span', { text: '점수' }), el('b', { text: '0' }));
+    const card = el('div', { class: 'card res-card' }, stats), mid = el('div', { class: 'res-mid' }, card);
+    const saveText = el('span', { class: 'save-text', text: '저장 중…' });
+    const retry = el('button', { class: 'btn btn-small btn-pink', type: 'button', id: 'ui-retry', hidden: true, text: '다시 시도', onclick: () => { if (S.res) startSave(S.res.data); } });
+    const save = el('div', { class: 'save', role: 'status', 'aria-live': 'polite', 'data-state': 'saving' }, saveText, retry);
+    const again = el('button', { class: 'btn btn-mint', type: 'button', id: 'ui-again', 'data-first': '1', text: '🔄 다시 하기', onclick: () => restartRun() });
+    const home = el('button', { class: 'btn btn-sky', type: 'button', id: 'ui-toTitle', text: '🏠 처음으로', onclick: () => toTitle() });
+    const left = el('div', { class: 'res-left' }, title, subRow, stars, total, msg, mid, save, el('div', { class: 'res-btns' }, again, home));
+    const view = makeRankView();
+    const rank = el('div', { class: 'card rank-card' }, el('h3', { text: '🏆 랭킹 TOP 10' }), view.status, view.list);
+    const screen = el('section', { class: 'screen result', id: 'ui-result', 'aria-label': '결과 화면', hidden: true }, left, el('div', { class: 'res-right' }, rank));
+    S.els.root.append(screen);
+    Object.assign(S.els, { result: screen, resTitle: title, resSub: sub, resBadge: badge, resMsg: msg, resStats: stats, resTotal: total.querySelector('b'), resStars: stars, save, saveText, retry, againBtn: again, homeBtn2: home, resRank: view });
+  }
+
+  // 저장 상태 문구 (저장 중 → 저장됨 / 내 기기에만 / 실패)
+  const SAVE_TEXT = {
+    saving: '⏳ 저장 중…', saved: '✅ 저장됐어요!', local: '📱 내 기기에만 저장됐어요', failed: '⚠️ 저장 실패 — 다시 시도해 봐요',
+  };
+  function setSave(state) {
+    S.saveState = state;
+    const e = S.els;
+    e.save.setAttribute('data-state', state);
+    e.saveText.textContent = SAVE_TEXT[state] || '';
+    e.retry.hidden = state !== 'failed';
+  }
+  function startSave(res) {
+    const token = ++S.saveToken;
+    setSave('saving');
+    let done = false, timer = 0;
+    const finish = state => {
+      if (token !== S.saveToken || done) return;
+      done = true; clearTimeout(timer);
+      setSave(state);
+      S.els.resRank.load();                                                         // 저장이 끝나면(성공이든 실패든) 랭킹을 보여줘요
+    };
+    timer = setTimeout(() => finish('failed'), T.saveTimeoutMs);
+    const payload = {
+      nickname: Game.nickname || Store.get('nickname', ''), score: Math.max(0, Math.round(Number(res.score) || 0)),
+      stageId: String(res.stageId || ''), difficulty: String(res.difficulty || Game.difficulty),
+      stars: clamp(Math.round(Number(res.stars) || 0), 0, 3), cleared: !!res.cleared, timeSec: Math.max(0, Math.round((Number(res.timeFrames) || 0) / 60)),
+    };
+    let p = null;
+    try { if (hasFn(Server, 'saveScore')) p = Server.saveScore(payload); } catch (e) { p = null; }
+    if (!p || typeof p.then !== 'function') { finish('failed'); return; }
+    p.then(r => finish(r && r.ok === false ? 'failed' : (r && r.source === 'local' ? 'local' : 'saved')), () => finish('failed'));
+  }
+
+  // ===== 5. 터치 컨트롤 =====
+  function buildTouch() {
+    const root = S.els.touchRoot;
+    const knob = el('div', { class: 'tc-knob' }), base = el('div', { class: 'tc-base' }, knob);
+    const zone = el('div', { class: 'tc-stick', 'data-role': 'stick', role: 'group', 'aria-label': '움직이기 조이스틱' }, base);
+    const held = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ArrowDown: false };
+    let pid = null;
+    const setDir = (code, on) => {
+      if (held[code] === on) return;
+      held[code] = on;
+      if (on) Input.press(code); else Input.release(code);
+    };
+    function stickMove(e) {
+      const r = base.getBoundingClientRect(), R = Math.max(1, r.width / 2);
+      const dx = e.clientX - (r.left + R), dy = e.clientY - (r.top + r.height / 2);
+      const len = Math.hypot(dx, dy), lim = R * 0.92, k = len > lim ? lim / len : 1;
+      knob.style.transform = 'translate(' + (dx * k).toFixed(1) + 'px,' + (dy * k).toFixed(1) + 'px)';
+      const nx = dx / R, ny = dy / R, on = T.touch.stickOn, off = T.touch.stickOff;
+      setDir('ArrowLeft', held.ArrowLeft ? nx < -off : nx < -on);                    // 누를 땐 크게, 뗄 땐 작게 (경계에서 깜빡이지 않게)
+      setDir('ArrowRight', held.ArrowRight ? nx > off : nx > on);
+      setDir('ArrowUp', held.ArrowUp ? ny < -off : ny < -on);
+      setDir('ArrowDown', held.ArrowDown ? ny > off : ny > on);
+    }
+    function stickEnd() {
+      pid = null; zone.classList.remove('held'); knob.style.transform = '';
+      for (const c in held) setDir(c, false);
+    }
+    zone.addEventListener('pointerdown', e => {
+      if (pid !== null) return;                                                      // 조이스틱은 손가락 하나만
+      if (e.cancelable) e.preventDefault();
+      pid = e.pointerId; zone.classList.add('held');
+      try { zone.setPointerCapture(e.pointerId); } catch (err) { /* 가짜 포인터 등 */ }
+      stickMove(e);
+    });
+    zone.addEventListener('pointermove', e => { if (e.pointerId === pid) stickMove(e); });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(n => zone.addEventListener(n, e => { if (e.pointerId === pid) stickEnd(); }));
+    zone.addEventListener('contextmenu', e => e.preventDefault());
+
+    const mkBtn = (cls, code, ico, txt, label) => {
+      const sec = el('span', { class: 'tc-sec' }), cd = el('span', { class: 'tc-cd' });
+      const b = el('button', { class: 'tc-btn ' + cls, type: 'button', 'data-key': code, 'aria-label': label },
+        el('span', { class: 'tc-ico', text: ico }), txt ? el('span', { class: 'tc-txt', text: txt }) : null);
+      Input.bindButton(b, code);
+      return { root: b, ico: b.querySelector('.tc-ico'), sec, cd };
+    };
+    const atk = mkBtn('tc-atk', 'KeyZ', '⚔️', '공격', '공격 (Z)');
+    const jump = mkBtn('tc-jump', 'KeyX', '⬆️', '점프', '점프 (X)');
+    const skills = T.skillDefaults.map(d => {
+      const b = mkBtn('tc-skill', d.code, d.icon, '', d.label + ' (' + d.key + ')');
+      b.root.setAttribute('data-ready', '1');
+      b.root.append(b.cd, el('span', { class: 'tc-key', text: d.key }), b.sec);
+      return b;
+    });
+    const btns = el('div', { class: 'tc-btns' }, skills[0].root, skills[1].root, skills[2].root, jump.root, atk.root);
+    root.append(zone, btns);
+    root.addEventListener('contextmenu', e => e.preventDefault());
+    S.els.touchSkills = skills; S.els.stick = zone; S.els.stickEnd = stickEnd;
+    S.els.touchBtns = [atk, jump].concat(skills);
+  }
+  function releaseTouch() {
+    try { if (S.els.stickEnd) S.els.stickEnd(); } catch (e) { /* 무시 */ }
+    ['KeyZ', 'KeyX', 'KeyA', 'KeyS', 'KeyD'].forEach(c => Input.release(c));
+  }
+
+  // ===== 화면 맞추기: --u 계산, 세로 화면 안내, 터치 컨트롤/일시정지 오버레이 보이기 =====
+  function measure() {
+    const cv = $('game'), r = cv ? cv.getBoundingClientRect() : null;
+    const w = r && r.width > 0 ? r.width : Math.min(window.innerWidth, window.innerHeight * 16 / 9);
+    S.u = Math.max(0.2, w / W);
+    docEl.style.setProperty('--u', S.u.toFixed(4) + 'px');
+    let coarse = false;
+    try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) { coarse = false; }
+    const portrait = window.innerHeight > window.innerWidth && (window.innerWidth < 700 || coarse || !!Game.touch);
+    docEl.setAttribute('data-portrait', portrait ? '1' : '0');
+    const was = S.portrait;
+    S.portrait = portrait;
+    if (portrait && !was && Game.scene === 'play' && !Game.paused) Game.pause(true);      // 세로로 돌려진 동안 게임이 몰래 진행되지 않게
+    syncChrome();
+  }
+  // HUD 점수판이 오른쪽 위 버튼(일시정지/소리)과 겹치지 않게 비켜 줄 폭 (논리 단위)
+  function updateInset() {
+    const hb = S.els.hudBtns, cv = $('game');
+    if (!hb || !cv) return;
+    const r = cv.getBoundingClientRect(), br = hb.getBoundingClientRect();
+    if (r.width > 0 && br.width > 0) S.hudInset = clamp((r.right - br.left) / S.u + 8, 60, 220);
+  }
+
+  function syncChrome() {
+    const e = S.els;
+    if (!e.root) return;
+    const scene = Game.scene;
+    e.btnPause.hidden = scene !== 'play';
+    updateMuteBtn();
+    updateInset();
+    // 일시정지 오버레이
+    const showPause = scene === 'play' && !!Game.paused;
+    if (e.pauseModal.hidden === showPause) {
+      show(e.pauseModal, showPause);
+      if (showPause) { S.returnFocus = null; focusEl(e.resumeBtn); }
+      else { disarmConfirm(); blurIn(e.pauseModal); }
+    }
+    // 터치 컨트롤: 터치 기기 + 플레이 중 + 일시정지 아님 + 가로 화면
+    const on = touchActive() && scene === 'play' && !Game.paused && !S.portrait;
+    if (e.touchRoot.classList.contains('on') !== on) { e.touchRoot.classList.toggle('on', on); if (!on) releaseTouch(); }
+  }
+  function blurIn(container) { try { const a = doc.activeElement; if (a && container.contains(a)) a.blur(); } catch (err) { /* 무시 */ } }
+
+  // ===== 6. 씬 =====
+  // ---- 타이틀 ----
+  const JELLY_COLORS = [COLORS.pink, COLORS.mint, COLORS.sky, COLORS.yellow, COLORS.purple];
+
+  function drawTitleBG(ctx, t, calm) {
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, '#ffc9ef'); sky.addColorStop(0.5, '#c4ecff'); sky.addColorStop(1, '#e8ffd9');
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+    const glow = ctx.createRadialGradient(W / 2, 110, 10, W / 2, 110, 420);
+    glow.addColorStop(0, 'rgba(255,255,255,.75)'); glow.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+    // 구름
+    [[60, 70, 90, 0.35], [330, 40, 70, 0.22], [620, 100, 100, 0.3], [820, 52, 80, 0.4]].forEach(([bx, by, s, sp], i) => {
+      const x = calm ? bx : ((bx + t * sp) % (W + 300)) - 150;
+      drawCloud(ctx, x, by + (calm ? 0 : Math.sin(t * 0.02 + i) * 4), s, 0.8);
+    });
+    // 멀리 있는 언덕 + 막대사탕 나무
+    ctx.fillStyle = '#bff0c8'; ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 20) ctx.lineTo(x, 380 + Math.sin(x * 0.011 + 1) * 26 + Math.sin(x * 0.027) * 8);
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+    [[150, 392, 14, COLORS.pink, '#fff'], [310, 372, 11, COLORS.sky, '#fff'], [655, 378, 12, COLORS.yellow, '#fff'], [790, 396, 15, COLORS.purple, '#ffd6f3'], [520, 366, 9, COLORS.mint, '#fff']].forEach(([x, y, r, c1, c2]) => drawLolli(ctx, x, y - r * 2.2, r, 0.05, c1, c2));
+    // 가까운 언덕
+    const hill = ctx.createLinearGradient(0, 410, 0, H);
+    hill.addColorStop(0, '#8fe3a2'); hill.addColorStop(1, '#6fcf8b');
+    ctx.fillStyle = hill; ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 20) ctx.lineTo(x, 440 + Math.sin(x * 0.015 + 3) * 16);
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.28)';
+    for (let i = 0; i < 22; i++) { ctx.beginPath(); ctx.arc((i * 97) % W, 462 + (i * 37) % 70, 6 + (i % 3) * 2, 0, TAU); ctx.fill(); }
+    // 하늘에 둥둥 뜬 젤리 거품
+    [[70, 98, 22, 0], [892, 84, 20, 2], [250, 140, 14, 4], [740, 150, 15, 1]].forEach(([x, y, r, ci], i) => {
+      const fy = calm ? 0 : Math.sin(t * 0.03 + i * 1.7) * 9;
+      drawJelly(ctx, x, y + fy + r, r, JELLY_COLORS[ci], { alpha: 0.78, mood: 'cheer', tilt: calm ? 0 : Math.sin(t * 0.03 + i) * 0.1 });
+    });
+    // 통통 튀는 사탕 (양옆 하늘에서 트램펄린처럼)
+    [[38, 0.0, COLORS.pink, COLORS.yellow], [112, 0.5, COLORS.sky, COLORS.mint], [846, 0.25, COLORS.yellow, COLORS.pink], [922, 0.75, COLORS.mint, COLORS.sky]].forEach(([x, ph, c1, c2], i) => {
+      const b = calm ? { lift: 40 } : bounce(t, 70, 110, ph);
+      drawCandy(ctx, x, 392 - b.lift, 12, calm ? 0.2 : t * 0.05 * (i % 2 ? -1 : 1), c1, c2);
+    });
+    // 땅에서 통통 뛰는 젤리들
+    [[52, 32, COLORS.mint, 0.1, 'cheer'], [124, 44, COLORS.pink, 0.55, 'happy'], [836, 44, COLORS.sky, 0.3, 'happy'], [908, 32, COLORS.yellow, 0.75, 'cheer']].forEach(([x, r, c, ph, mood], i) => {
+      const b = calm ? { lift: 0, sx: 1, sy: 1 } : bounce(t, 58, 34, ph);
+      ctx.fillStyle = 'rgba(43,27,58,.16)'; ctx.beginPath(); ctx.ellipse(x, 486, r * (0.95 - b.lift * 0.004), r * 0.22, 0, 0, TAU); ctx.fill();
+      drawJelly(ctx, x, 486 - b.lift, r, c, { sx: b.sx, sy: b.sy, mood, look: calm ? 0 : Math.sin(t * 0.05 + i), tilt: calm ? 0 : Math.sin(t * 0.07 + i) * 0.05 });
+    });
+    // 반짝이
+    for (let i = 0; i < 12; i++) {
+      const tw = calm ? 0.8 : 0.5 + 0.5 * Math.sin(t * 0.06 + i * 2.1);
+      if (tw > 0.2) drawSparkle(ctx, (i * 157 + 40) % W, 30 + (i * 83) % 330, 4 + tw * 7, calm ? 0 : t * 0.02 + i, i % 2 ? '#fff' : '#fff6a8');
+    }
+  }
+
+  function drawTitleLogo(ctx, t, calm) {
+    const word = CFG.title || '젤리 던전', size = 96;
+    const pal = [[COLORS.pink, '#ffc2ee'], [COLORS.yellow, '#fff0a0'], [COLORS.mint, '#c4f5cf'], [COLORS.sky, '#c2efff'], [COLORS.purple, '#c9b3ff']];
+    ctx.save();
+    ctx.translate(W / 2, 112);
+    if (!calm) ctx.rotate(Math.sin(t * 0.03) * 0.028);
+    ctx.font = 'bold ' + size + 'px ' + CFG.font;
+    const chars = Array.from(word), widths = chars.map(c => ctx.measureText(c).width + (c === ' ' ? 8 : 4));
+    const total = widths.reduce((a, b) => a + b, 0);
+    let x = -total / 2;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.lineJoin = 'round'; ctx.miterLimit = 2;
+    chars.forEach((c, i) => {
+      const cx = x + widths[i] / 2; x += widths[i];
+      if (c === ' ') return;
+      const bob = calm ? 0 : Math.sin(t * 0.07 + i * 0.9) * 6, y = bob;
+      const [c1, c2] = pal[i % pal.length];
+      ctx.lineWidth = size * 0.15; ctx.strokeStyle = COLORS.ink; ctx.strokeText(c, cx, y + 7);                 // 아래 그림자 겸 굵은 윤곽
+      ctx.strokeText(c, cx, y);
+      ctx.lineWidth = size * 0.065; ctx.strokeStyle = '#fff'; ctx.strokeText(c, cx, y);                        // 스티커 같은 흰 테두리 (한글 속 빈 공간이 메워지지 않게 얇게)
+      const g = ctx.createLinearGradient(0, y - size * 0.75, 0, y);
+      g.addColorStop(0, c2); g.addColorStop(1, c1);
+      ctx.fillStyle = g; ctx.fillText(c, cx, y);
+    });
+    ctx.restore();
+    // 부제 리본
+    ctx.save();
+    ctx.font = 'bold 24px ' + CFG.font;
+    const sub = '귀여운 젤리 용사의 대모험!', sw = ctx.measureText(sub).width + 46, sy = 141;
+    Draw.roundRect(ctx, W / 2 - sw / 2, sy, sw, 32, 16); ctx.fillStyle = COLORS.cream; ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = COLORS.ink; ctx.stroke();
+    Draw.text(ctx, sub, W / 2, sy + 24, { size: 24, color: COLORS.ink, lw: 0 });
+    ctx.restore();
+  }
+
+  function focusTitle() {
+    const e = S.els;
+    if (Game.touch) return;                                                         // 터치 기기에선 키보드가 불쑥 뜨지 않게
+    focusEl(e.nick.value.trim() ? e.startBtn : e.nick);
+  }
+  Scenes.title = {
+    enter() {
+      if (Game.paused) Game.pause(false);
+      S.t = 0; S.starting = false;
+      const e = S.els;
+      showNickError('');
+      e.nick.value = Game.nickname || String(Store.get('nickname', '') || '');
+      const saved = Game.nickname ? Game.difficulty : Store.get('difficulty', 'normal');   // 한 판 하고 돌아왔으면 방금 난이도, 처음이면 마지막으로 고른 난이도
+      selectDiff(CFG.difficulty[saved] ? saved : 'normal', false);
+      show(e.title);
+      try { Music.play('title'); } catch (err) { /* 무시 */ }
+      syncChrome();
+      focusTitle();
+    },
+    exit() {
+      const e = S.els;
+      if (S.modal) closeModal(S.modal, true);
+      show(e.title, false);
+      blurIn(e.title);
+    },
+    update() { S.t++; },
+    draw(ctx) {
+      const calm = reduceMotion(), t = calm ? 40 : S.t;
+      drawTitleBG(ctx, t, calm);
+      drawTitleLogo(ctx, t, calm);
+    },
+  };
+
+  // ---- 결과 ----
+  function defaultResult() { return { cleared: false, score: Game.score || 0, stars: 0, timeFrames: Game.frame || 0, kills: Game.kills || 0, deaths: Game.deaths || 0, maxCombo: (Game.combo && Game.combo.max) || 0, difficulty: Game.difficulty, stageId: '', stageName: '', rooms: 0 }; }
+  function fillResult(res) {
+    const e = S.els, d = CFG.difficulty[res.difficulty] || Game.diff;
+    const stars = clamp(Math.round(Number(res.stars) || 0), 0, 3);
+    e.resTitle.textContent = res.cleared ? '스테이지 클리어!' : '아쉬워요!';
+    e.resSub.textContent = (res.stageName ? res.stageName + ' · ' : '') + (d ? d.label : '');
+    const msgs = res.cleared ? (T.clearMsgs[stars] || T.clearMsgs[1]) : T.overMsgs;
+    const idx = Math.abs(Math.round((Number(res.score) || 0) / 10) + (res.kills | 0) + (res.deaths | 0)) % msgs.length;
+    e.resMsg.textContent = msgs[idx];
+    e.resStats.textContent = '';
+    const rows = [['처치', (res.kills | 0) + '마리'], ['최고 콤보', (res.maxCombo | 0) + ' HIT'], ['걸린 시간', clock(res.timeFrames)], ['쓰러진 횟수', (res.deaths | 0) + '번']];
+    if (res.rooms !== undefined && res.rooms !== null) rows.push(['지나온 방', (res.rooms | 0) + '개']);
+    rows.forEach(([k, v]) => e.resStats.append(el('li', null, el('span', { class: 'stat-k', text: k }), el('b', { text: v }))));
+    e.resBadge.hidden = !(res.cleared && !(res.deaths | 0));                          // 한 번도 안 쓰러지고 클리어하면 뱃지
+    e.resTotal.textContent = '0';
+    const kids = e.resStars.children;
+    for (let i = 0; i < kids.length; i++) kids[i].classList.remove('on');
+    e.resStars.setAttribute('data-total', String(stars)); e.resStars.setAttribute('data-shown', '0');
+    e.resStars.setAttribute('aria-label', '별 3개 중 ' + stars + '개');
+    return stars;
+  }
+  function popStar(i) {
+    const e = S.els, node = e.resStars.children[i];
+    if (!node) return;
+    node.classList.add('on');
+    S.res.shown++;
+    e.resStars.setAttribute('data-shown', String(S.res.shown));
+    sfx('star', { rate: 1 + i * 0.14 });
+    try {                                                                           // 별이 터지는 위치에 반짝 입자
+      const cv = $('game').getBoundingClientRect(), r = node.getBoundingClientRect(), u = cv.width / W || 1;
+      FX.burst((r.left + r.width / 2 - cv.left) / u, (r.top + r.height / 2 - cv.top) / u, { kind: 'star', count: 10, speed: 6, life: 40, gravity: 0.12, size: 14 });
+      FX.burst((r.left + r.width / 2 - cv.left) / u, (r.top + r.height / 2 - cv.top) / u, { kind: 'ring', count: 1, size: 50, life: 22 });
+    } catch (err) { /* 입자는 없어도 돼요 */ }
+  }
+
+  function drawResultBG(ctx, t, cleared, calm) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    if (cleared) { g.addColorStop(0, '#ffe58a'); g.addColorStop(0.55, '#ffc2ee'); g.addColorStop(1, '#b9e7ff'); }
+    else { g.addColorStop(0, '#7b6bb5'); g.addColorStop(0.55, '#c79be0'); g.addColorStop(1, '#ffd0e6'); }
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // 햇살 / 달빛 줄기
+    ctx.save(); ctx.translate(W * 0.27, 170); if (!calm) ctx.rotate(t * 0.0035);
+    ctx.fillStyle = cleared ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.1)';
+    for (let i = 0; i < 12; i++) { ctx.rotate(TAU / 12); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(900, -70); ctx.lineTo(900, 70); ctx.closePath(); ctx.fill(); }
+    ctx.restore();
+    // 반짝이 (게임 오버에서는 별빛처럼 더 작고 조용하게)
+    for (let i = 0; i < 16; i++) {
+      const tw = calm ? 0.8 : 0.5 + 0.5 * Math.sin(t * 0.05 + i * 1.9);
+      if (tw > 0.25) drawSparkle(ctx, (i * 131 + 30) % W, 24 + (i * 71) % 460, (cleared ? 4 : 3) + tw * 6, calm ? 0 : t * 0.015 + i, i % 2 ? '#fff' : '#fff6a8');
+    }
+    // 아래쪽 언덕
+    ctx.fillStyle = cleared ? '#8fe3a2' : '#9d86c9'; ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 20) ctx.lineTo(x, 486 + Math.sin(x * 0.012 + 2) * 14);
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+    // 꽃가루(사탕/막대사탕) — 클리어에서만 떨어짐
+    if (cleared) {
+      for (let i = 0; i < 16; i++) {
+        const sp = 0.7 + (i % 5) * 0.22, x = (i * 67 + Math.sin(t * 0.02 + i) * 24 + 40) % W, y = calm ? (i * 61) % H : ((t * sp + i * 83) % (H + 80)) - 40;
+        const c1 = JELLY_COLORS[i % 5], c2 = JELLY_COLORS[(i + 2) % 5], rot = calm ? i : t * 0.04 * (i % 2 ? -1 : 1) + i;
+        if (i % 3 === 0) drawLolli(ctx, x, y, 8, rot * 0.3, c1, '#fff'); else if (i % 3 === 1) drawCandy(ctx, x, y, 8, rot, c1, c2); else drawSparkle(ctx, x, y, 8, rot, '#fff6a8');
+      }
+    }
+    // 응원하는 젤리 친구들
+    const b1 = calm ? { lift: 0, sx: 1, sy: 1 } : bounce(t, 64, 26, 0.1), b2 = calm ? { lift: 0, sx: 1, sy: 1 } : bounce(t, 64, 22, 0.6);
+    drawJelly(ctx, 26, 524 - b1.lift, 30, COLORS.mint, { sx: b1.sx, sy: b1.sy, mood: cleared ? 'cheer' : 'happy' });
+    drawJelly(ctx, 934, 524 - b2.lift, 28, COLORS.pink, { sx: b2.sx, sy: b2.sy, mood: cleared ? 'cheer' : 'happy' });
+  }
+
+  Scenes.result = {
+    enter() {
+      if (Game.paused) Game.pause(false);
+      const res = Game.result || defaultResult(), e = S.els;
+      S.res = { data: res, f: 0, shown: 0, total: 0, score: Math.max(0, Math.round(Number(res.score) || 0)), cleared: !!res.cleared, lastText: '0' };
+      S.res.total = fillResult(res);
+      try { FX.clear(); } catch (err) { /* 무시 */ }
+      show(e.result);
+      syncChrome();
+      if (!res.cleared) sfx('gameover');                                            // (클리어 팡파르는 stage 가 "CLEAR!" 배너에서 이미 울려요 — 겹치지 않게)
+      try { Music.play('title'); } catch (err) { /* 무시 */ }
+      startSave(res);
+      focusEl(e.againBtn);
+    },
+    exit() {
+      const e = S.els;
+      S.saveToken++; if (e.resRank) e.resRank.cancel();
+      show(e.result, false);
+      blurIn(e.result);
+    },
+    update() {
+      const r = S.res;
+      if (!r) return;
+      r.f++; S.t++;
+      const cf = T.result.countFrames, p = r.f >= cf ? 1 : easeOut(r.f / cf);
+      const txt = fmt(Math.round(r.score * p));
+      if (txt !== r.lastText) { r.lastText = txt; S.els.resTotal.textContent = txt; }
+      for (let i = 0; i < r.total; i++) if (r.f === T.result.startDelay + i * T.result.starGap) popStar(i);
+      if (r.cleared && r.total > 0 && r.f === T.result.startDelay + (r.total - 1) * T.result.starGap + 14) {   // 마지막 별 뒤에 사탕 폭죽
+        try { FX.burst(W * 0.27, 170, { kind: 'candy', count: 18, speed: 7, life: 60 }); } catch (err) { /* 무시 */ }
+      }
+      try { FX.update(); } catch (err) { /* 무시 */ }
+    },
+    draw(ctx) {
+      const calm = reduceMotion(), r = S.res, t = calm ? 40 : S.t;
+      drawResultBG(ctx, t, !r || r.cleared, calm);
+      try { FX.drawWorld(ctx); } catch (err) { /* 무시 */ }
+    },
+  };
+
+  // ===== 7. 이벤트 · 키 처리 · 휴식 알림 (파일을 읽을 때 딱 한 번 등록) =====
+  Events.on('paused', () => syncChrome());
+  Events.on('sceneChanged', () => { S.starting = false; syncChrome(); });
+  Events.on('touchDetected', () => measure());
+  Events.on('windowBlur', () => {                                                   // 창을 벗어나면 자동 일시정지
+    if (Game.scene === 'play' && !Game.paused) Game.pause(true);
+  });
+  Events.on('playerHit', () => { HUD.hitT = nowF(); });
+  Events.on('comboChanged', d => {
+    const c = d ? d.count | 0 : 0;
+    if (c > HUD.comboLast) HUD.comboPop = nowF();
+    else if (c === 0 && HUD.comboLast >= 3) HUD.ghost = { count: HUD.comboLast, t: nowF() };
+    HUD.comboLast = c;
+  });
+  Events.on('bossSpawned', () => { HUD.boss = null; });
+
+  const GAME_KEYS = /^(Arrow(Left|Right|Up|Down)|Key[ZXASD]|Space)$/;
+  // 터치 기기에서 손가락이 닿으면 다시 터치 모드로 (키보드로 바꿨다가 화면을 만지면 버튼이 돌아와요)
+  window.addEventListener('touchstart', () => { if (S.kbdUsed) { S.kbdUsed = false; syncChrome(); } }, { passive: true, capture: true });
+  // 키보드: 창 전체의 capture 단계에서 먼저 받아요 (Esc/P = 일시정지, M = 소리 — 이 한 곳에서만)
+  window.addEventListener('keydown', ev => {
+    if (ev.isComposing || ev.keyCode === 229) return;                               // 한글 조합 중
+    const t = ev.target, typing = isTyping(t), mods = ev.ctrlKey || ev.metaKey || ev.altKey;
+    if (ev.code === 'Tab' && (modalOpen() || !S.els.pauseModal.hidden)) { trapTab(ev); return; }
+    if (ev.isTrusted && Game.touch && !S.kbdUsed && !typing && Game.scene === 'play' && !Game.paused && GAME_KEYS.test(ev.code)) { S.kbdUsed = true; syncChrome(); }   // 물리 키보드로 플레이하면 터치 버튼은 치워요
+    if (!typing && !mods && !ev.repeat) {
+      if (ev.code === 'KeyM') toggleMute(true);
+      else if (ev.code === 'Escape') {
+        if (S.modal === 'rank') hideRanking();
+        else if (S.modal === 'help') closeModal('help');
+        else if (Game.scene === 'play' && !S.portrait) { if (Game.paused) resume(); else Game.pause(true); }
+      } else if (ev.code === 'KeyP' && Game.scene === 'play' && !S.portrait && !modalOpen()) { if (Game.paused) resume(); else Game.pause(true); }
+    }
+    // 난이도 카드에서 화살표 키로 고르기
+    if (t && t.classList && t.classList.contains('diff-card') && /^(Arrow(Left|Right|Up|Down)|Home|End)$/.test(ev.code)) {
+      const keys = S.els.diffCards.map(c => c.getAttribute('data-diff')), cur = keys.indexOf(S.diff);
+      let nx = cur;
+      if (ev.code === 'ArrowLeft' || ev.code === 'ArrowUp') nx = (cur + keys.length - 1) % keys.length;
+      else if (ev.code === 'ArrowRight' || ev.code === 'ArrowDown') nx = (cur + 1) % keys.length;
+      else if (ev.code === 'Home') nx = 0; else nx = keys.length - 1;
+      ev.preventDefault(); selectDiff(keys[nx], true); sfx('ui');
+      ev.stopPropagation(); return;
+    }
+    // 화면(오버레이)이 떠 있는 동안 포커스된 버튼의 Space/방향키는 게임 입력으로 보내지 않아요 → 버튼이 Space 로도 눌려요
+    if (overlayActive() && t && t.tagName === 'BUTTON' && S.els.root && S.els.root.contains(t)) ev.stopPropagation();
+  }, true);
+
+  function trapTab(ev) {                                                            // 모달(조작법/랭킹/일시정지) 안에서만 Tab 이 돌게
+    const m = S.modal ? S.els[S.modal + 'Modal'] : (S.els.pauseModal.hidden ? null : S.els.pauseModal);
+    if (!m) return;
+    const f = Array.from(m.querySelectorAll('button, [href], input, [tabindex]:not([tabindex="-1"])')).filter(x => !x.disabled && !x.hidden);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1], a = doc.activeElement;
+    if (!m.contains(a)) { ev.preventDefault(); focusEl(first); }
+    else if (ev.shiftKey && a === first) { ev.preventDefault(); focusEl(last); }
+    else if (!ev.shiftKey && a === last) { ev.preventDefault(); focusEl(first); }
+  }
+
+  // 휴식 알림: play 씬이 실제로 진행된 시간(틱)이 CFG.breakReminderMinutes 를 넘을 때마다 한 번씩 (히트스톱 중에도 시간은 흘러요)
+  Loop.hooks.push(() => {
+    if (Game.scene !== 'play' || Game.paused) return;
+    S.playTicks++;
+    const every = Math.max(1, Math.round((Number(CFG.breakReminderMinutes) || 30) * 3600));
+    if (S.playTicks >= (S.reminded + 1) * every) {
+      S.reminded = Math.floor(S.playTicks / every);
+      S.breakMsgs++;
+      toast(T.breakText, T.breakToastMs);
+    }
+  });
+
+  window.addEventListener('resize', () => { measure(); setTimeout(measure, 120); });
+  window.addEventListener('orientationchange', () => { setTimeout(measure, 150); setTimeout(measure, 500); });
+  try { if (window.ResizeObserver && $('app')) new ResizeObserver(() => measure()).observe($('app')); } catch (e) { /* 무시 */ }
+
+  // ===== 8. 공개 API =====
+  function showRanking() { S.els.rankView.load(); openModal('rank'); }
+  function hideRanking() { closeModal('rank'); S.els.rankView.cancel(); }
+
+  const api = {
+    drawHUD,
+    toast,
+    showRanking, hideRanking,
+    // --- 아래는 덤: 테스트/다른 모듈이 쓸 수 있는 것들 ---
+    validateNickname: validateNick,
+    startGame, restartRun, toTitle, resume, toggleMute,
+    resize: measure,
+    resetBreakTimer() { S.playTicks = 0; S.reminded = 0; },
+    state() {
+      const e = S.els;
+      return {
+        scene: Game.scene, modal: S.modal, paused: !!Game.paused, portrait: S.portrait, u: S.u, hudInset: S.hudInset,
+        difficulty: S.diff, nickError: e.nickErr ? e.nickErr.textContent : '', nickValue: e.nick ? e.nick.value : '',
+        titleVisible: !!e.title && !e.title.hidden, resultVisible: !!e.result && !e.result.hidden, pauseVisible: !!e.pauseModal && !e.pauseModal.hidden,
+        touchVisible: !!e.touchRoot && e.touchRoot.classList.contains('on'), kbdUsed: S.kbdUsed,
+        starsShown: S.res ? S.res.shown : 0, starsTotal: S.res ? S.res.total : 0, saveState: S.saveState,
+        playTicks: S.playTicks, breakMsgs: S.breakMsgs, motion: !reduceMotion(),
+      };
+    },
+  };
+
+  // 화면 부품은 파일을 읽는 즉시 만들어 둬요 (index.html 의 #ui / #touch 안에 JS 로 생성)
+  buildChrome(); buildTitle(); buildHelp(); buildRank(); buildPause(); buildResult(); buildTouch();
+  S.els.root.append(S.els.hudBtns, S.els.toasts, S.els.rotate);
+  selectDiff(CFG.difficulty[Store.get('difficulty', 'normal')] ? Store.get('difficulty', 'normal') : 'normal', false);
+  measure();
+  return api;
+})();
 </script>

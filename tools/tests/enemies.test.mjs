@@ -289,7 +289,6 @@ await section('구름 마커', async () => {
     check(`[${d}] 구름: 바닥 마커가 보였다`, !!r.m && r.m.shape === 'ellipse');
     check(`[${d}] 구름: 마커가 낙뢰 전에 45프레임 이상 보임 (>=45)`, r.m && r.m.frames >= 45, `${r.m && r.m.frames}프레임`);
     check(`[${d}] 구름: 낙뢰는 마커가 있던 자리(중심)에 떨어짐`, r.hb && r.lastPos && Math.abs((r.hb.x1 + r.hb.x2) / 2 - r.lastPos.x) < 0.5 && Math.abs(r.hb.y - r.lastPos.y) < 0.5, JSON.stringify([r.hb, r.lastPos]));
-    check(`[${d}] 구름: 판정은 눈에 보이는 마커 타원 안쪽 (가로·깊이 모두)`, r.hb && r.m && (r.hb.x2 - r.hb.x1) / 2 <= r.m.rx && r.hb.depth <= r.m.ry, `half=${r.hb && (r.hb.x2 - r.hb.x1) / 2}/${r.m && r.m.rx} depth=${r.hb && r.hb.depth}/${r.m && r.m.ry}`);
     check(`[${d}] 구름: 마지막 프레임들에는 마커가 멈춤 (피할 시간 ${r.lockedFrames}프레임 ≥ 24)`, r.lockedFrames >= 24 && r.stillLocked, `잠김 ${r.lockedFrames}`);
     check(`[${d}] 구름: 멈추기 전에는 플레이어를 따라 움직임`, r.movedBefore === true || r.m.frames > 0);
     check(`[${d}] 구름: 가만히 서 있으면 맞는다 (피해 ${r.wantDmg})`, r.hpLoss === r.wantDmg, `실제 ${r.hpLoss}`);
@@ -553,7 +552,7 @@ await section('보스 마커·피하기', async () => {
     }, d);
     check(`[${d}] 보스 점프 찍기: 착지 마커가 45프레임 이상 보임 (${r.m.frames})`, r.m.frames >= 45 && r.m.shape === 'ellipse');
     check(`[${d}] 보스 충격파는 마커 중심에 정확히 떨어지고 보스도 거기 착지 (z=0)`, Math.abs((r.hb.x1 + r.hb.x2) / 2 - r.last.x) < 0.5 && Math.abs(r.hb.y - r.last.y) < 0.5 && Math.abs(r.hb.ox - r.last.x) < 0.5 && Math.abs(r.hb.oy - r.last.y) < 0.5 && r.hb.oz === 0, JSON.stringify([r.hb, r.last]));
-    check(`[${d}] 보스 충격파 판정은 눈에 보이는 마커 안쪽, 낮게 점프하면 넘을 수 있음 (zMax ${r.hb.zMax})`, (r.hb.x2 - r.hb.x1) / 2 <= r.m.rx && r.hb.depth <= r.m.ry && r.hb.zMax <= 60, `half=${(r.hb.x2 - r.hb.x1) / 2}/${r.m.rx} depth=${r.hb.depth}/${r.m.ry}`);
+    check(`[${d}] 보스 충격파: 낮게 점프하면 넘을 수 있음 (판정 높이 zMax ${r.hb.zMax} ≤ 60)`, r.hb.zMax <= 60, `zMax=${r.hb.zMax}`);
     check(`[${d}] 보스 마커도 마지막 ${r.locked}프레임은 멈춰서 피할 시간이 있음 (≥24)`, r.locked >= 24 && r.stillLocked, `${r.locked}`);
     check(`[${d}] 가만히 있으면 충격파에 맞음 (피해 ${r.want})`, r.loss === r.want, `실제 ${r.loss}`);
   }
@@ -594,6 +593,38 @@ await section('보스 마커·피하기', async () => {
   check('보스 돌진: 길 위에 서 있으면 한 번만 맞는다 (관통 판정, 중복 피해 없음) 피해 12', c1.hits === 1 && c1.loss === 12 && c1.n > 5, JSON.stringify(c1));
   check('보스 돌진: 벽까지 달려가서 멈추고 어지러운 시간(≥100프레임)이 됨', Math.abs(c1.endX - c1.wall) < 3 && c1.recLen >= 100, `end=${c1.endX.toFixed(1)} wall=${c1.wall} rec=${c1.recLen}`);
   check('보스 돌진: 길(깊이) 밖으로 90 비키면 안 맞는다', c2.n > 5 && c2.hits === 0 && c2.loss === 0, JSON.stringify(c2));
+});
+
+// 둥근 판정: 번개·충격파는 눈에 보이는 마커 타원 "안"에서만 아프고 "밖"에서는 절대 안 아픔 (사각형 모서리가 삐져나오지 않음)
+await section('둥근 판정', async () => {
+  for (const type of ['cloud', 'jellyKing']) {
+    for (const d of ['normal', 'hard']) {
+      const r = await ev(({ type, d }) => {
+        const p = ET.setup(d, { px: 200, py: 420, width: 1920 });
+        const foe = Enemies.spawn(type, type === 'cloud' ? 520 : 700, 420); foe.cd = 0;
+        ET.until(`ET.byId(${foe.id}).marker && ET.byId(${foe.id}).marker.locked`, 2000);
+        const m = foe.marker, cx = m.x, cy = m.y, rx = m.rx, ry = m.ry;
+        const ds = [];
+        for (const k of [0.5, 0.8, 0.92, 1.0, 1.05, 1.2, 1.6]) for (let a = 0; a < 360; a += 15) {
+          const th = a * Math.PI / 180;
+          const q = Entities.add(Entities.make({ kind: 'dummy', team: 'player', persistent: true, clampWorld: false, shadow: false, x: cx + Math.cos(th) * rx * k, y: cy + Math.sin(th) * ry * k, w: 40, h: 80, hp: 1e6, maxHp: 1e6 }));
+          q.k = k; ds.push(q);
+        }
+        p.x = 1800; p.y = 500; Debug.god = false;
+        let hbN = 0; const orig = Combat.applyHitbox;
+        for (let i = 0; i < 90; i++) { Loop.step(1); if (!foe.marker) break; }
+        Loop.step(8);
+        const by = {};
+        for (const q of ds) { const o = by[q.k] || (by[q.k] = { n: 0, hit: 0, multi: 0 }); o.n++; const lost = 1e6 - q.hp; if (lost > 0) o.hit++; if (lost > Math.round(ENEMY_DEFS[type].atk * (type === 'cloud' ? 1 : ENEMY_DEFS.jellyKing.patterns.slam.damage) * CFG.difficulty[d].dmgTaken) * 1.5) o.multi++; }
+        return { by, rx, ry };
+      }, { type, d });
+      const ks = Object.keys(r.by).map(Number).sort((a, b) => a - b);
+      const inside = ks.filter(k => k <= 0.92), outside = ks.filter(k => k >= 1.0);
+      check(`[${d}] ${type}: 마커 타원 안쪽(반지름 92% 이내) 24방향 모두 맞음`, inside.every(k => r.by[k].hit === r.by[k].n), JSON.stringify(r.by));
+      check(`[${d}] ${type}: 마커 타원 바깥(100% 이상) 24방향 어디서도 안 맞음 — 대각선 모서리도 포함`, outside.every(k => r.by[k].hit === 0), JSON.stringify(r.by));
+      check(`[${d}] ${type}: 안쪽 대상은 한 번만 맞음 (여러 프레임 판정이어도 중복 피해 없음)`, inside.every(k => r.by[k].multi === 0), JSON.stringify(r.by));
+    }
+  }
 });
 
 await section('보스 2페이즈', async () => {
@@ -653,6 +684,35 @@ await section('보스 2페이즈', async () => {
   });
   check('2페이즈: 걷는 속도가 빨라짐 (×1.25)', sp.b.phase2 && sp.b.walk / sp.a.walk > 1.15 && sp.b.walk / sp.a.walk < 1.35, `${sp.a.walk.toFixed(3)} → ${sp.b.walk.toFixed(3)}`);
   check('2페이즈: 돌진이 빨라짐 (×1.25)', sp.b.maxV / sp.a.maxV > 1.15 && sp.b.maxV / sp.a.maxV < 1.35 && sp.a.maxV <= 9.01, `${sp.a.maxV.toFixed(2)} → ${sp.b.maxV.toFixed(2)}`);
+});
+
+// 2페이즈 + 난이도 곱: 어려움에서 예고·반격 하한(24/60/마커 45)이 그대로 지켜지고, 쉬움은 더 넉넉함
+await section('보스 2페이즈 하한(난이도별)', async () => {
+  const res = {};
+  for (const d of ['easy', 'normal', 'hard']) {
+    const r = await ev(d => {
+      const p = ET.setup(d, { px: 300, py: 420 });
+      const b = Enemies.spawn('jellyKing', 700, 420);
+      Combat.damage(b, Math.ceil(b.maxHp * 0.52), { team: 'player', owner: p, freeze: 0, stun: 0 });
+      const ph2 = b.phase2 === true;
+      ET.until(`ET.trans.filter(t => t.id === ${b.id} && t.to === 'recover').length >= 7`, 6000);
+      const tr = ET.transOf(b.id);
+      const rows = tr.filter(t => t.to === 'windup').slice(0, 6).map(w => {
+        const rec = tr.find(t => t.to === 'recover' && t.f > w.f);
+        const next = rec ? tr.find(t => t.f > rec.f && t.from === 'recover') : null;
+        let payload = null, marker = null;
+        if (w.pattern === 'summon') { const sp = ET.spawns.find(x => x.minion && x.f >= w.f); payload = sp ? sp.f : null; }
+        else { const h = ET.firstHb(b.id, w.f); payload = h ? h.f : null; const m = h ? ET.markerOf(b.id, h.f) : null; marker = m ? m.frames : null; }
+        return { pat: w.pattern, len: w.len, tele: payload !== null ? payload - w.f : null, rec: rec && next ? next.f - rec.f : null, marker };
+      });
+      return { ph2, rows, dmg: Game.diff.dmgTaken };
+    }, d);
+    res[d] = r;
+    check(`[${d}] 보스 2페이즈에서도 예고 ≥ 24, 실제 판정/소환까지 ≥ 24, 반격 시간 ≥ 60 (패턴 ${r.rows.length}개)`, r.ph2 && r.rows.length >= 6 && r.rows.every(x => x.len >= 24 && x.tele >= 24 && x.rec >= 60), JSON.stringify(r.rows));
+    check(`[${d}] 2페이즈 점프 찍기 마커는 여전히 45프레임 이상 보임`, r.rows.filter(x => x.pat === 'slam').length >= 2 && r.rows.filter(x => x.pat === 'slam').every(x => x.marker >= 45), JSON.stringify(r.rows.filter(x => x.pat === 'slam')));
+  }
+  const mean = (d, k) => { const a = res[d].rows.map(x => x[k]); return a.reduce((x, y) => x + y, 0) / a.length; };
+  check(`쉬움의 예고가 어려움보다 김 (평균 ${mean('easy', 'len').toFixed(1)} > ${mean('hard', 'len').toFixed(1)})`, mean('easy', 'len') > mean('normal', 'len') && mean('normal', 'len') > mean('hard', 'len'), '');
 });
 
 await section('보스 단단함', async () => {
@@ -994,6 +1054,215 @@ await section('결정성', async () => {
     return JSON.stringify({ foes: ET.foes().map(e => [e.id - ET.foes()[0].id, e.state, Math.round(e.x * 100), Math.round(e.y * 100), e.hp]), hp: p.hp, hbs: ET.hbs.length, f: ET.f, trans: ET.trans.length });
   });
   check('다른 시드(8)면 결과가 달라짐 (난수가 실제로 쓰임)', a !== c);
+});
+
+// ===========================================================================
+// 17-b. 벽 앞에서 끼지 않기 / 공격 차례 돌려막기 / 멀리서 자리 안 막기 / 긴 실행에서 떨림·멈춤 없음
+// ===========================================================================
+await section('벽 앞에서 끼지 않기', async () => {
+  for (const [label, px, ex] of [['왼쪽 벽', 50, 20], ['오른쪽 벽', 910, 940]]) {
+    for (const d of DIFFS) {
+      const r = await ev(({ px, ex, d }) => {
+        const p = ET.setup(d, { px, py: 420 });
+        const s = Enemies.spawn('soldier', ex, 420); s.cd = 0; s.alert = 0;
+        let maxEng = 0, cur = 0, crossed = false;
+        ET.onFrame = () => { p.x = px; p.kx = 0; p.stun = 0; cur = (s.state === 'chase' && s.engage) ? cur + 1 : 0; maxEng = Math.max(maxEng, cur); if ((ex < px) !== (s.x < px)) crossed = true; };
+        const n = ET.until(`ET.hbs.some(h => h.owner === ${s.id})`, 900);
+        const hb = ET.firstHb(s.id);
+        return { n, maxEng, crossed, face: hb && hb.face, ox: hb && hb.ox, wall: ex < px ? 'L' : 'R', ox2: hb && Math.abs(hb.ox - px) };
+      }, { px, ex, d });
+      check(`[${d}] 병정이 ${label}과 플레이어 사이에 끼어도 돌아서 나와 공격함 (${r.n}프레임)`, r.n > 0 && r.n < 500, JSON.stringify(r));
+      check(`[${d}] ${label}: 플레이어 반대편(열린 쪽)으로 건너가 창을 겨눔, 간격 50~104px`, r.crossed && r.ox2 >= 49 && r.ox2 <= 105, JSON.stringify(r));
+      check(`[${d}] ${label}: 공격 자리를 맡은 채 헛걸음하는 시간이 길지 않음 (최대 ${r.maxEng}프레임 < 200)`, r.maxEng < 200);
+    }
+  }
+  // 쉬움(공격자 1명): 벽에 끼인 병정이 있어도 다른 적이 굶지 않음
+  const e = await ev(() => {
+    const p = ET.setup('easy', { px: 50, py: 420 });
+    const s = Enemies.spawn('soldier', 20, 420), a = Enemies.spawn('slime', 320, 420), c = Enemies.spawn('cloud', 480, 420);
+    [s, a, c].forEach(x => { x.cd = 0; x.alert = 0; });
+    ET.onFrame = () => { p.x = 50; p.kx = 0; p.stun = 0; };
+    Loop.step(1200);
+    const first = id => { const h = ET.firstHb(id); return h ? h.f : -1; };
+    return { s: first(s.id), a: first(a.id), c: first(c.id) };
+  });
+  check('쉬움: 벽에 끼인 병정·슬라임·구름이 1200프레임 안에 모두 한 번 이상 공격 (한 명이 자리를 영영 막지 않음)', e.s > 0 && e.a > 0 && e.c > 0, JSON.stringify(e));
+});
+
+await section('공격 차례 돌려막기', async () => {
+  for (const d of DIFFS) {
+    const r = await ev(d => {
+      const p = ET.setup(d, { px: 480, py: 420 });
+      const types = ['slime', 'slime', 'soldier', 'soldier', 'cloud', 'cloud'];
+      const foes = types.map((t, i) => { const e = Enemies.spawn(t, i % 2 ? 640 + i * 30 : 320 - i * 30, 350 + i * 24); e.cd = 0; e.alert = 0; return e; });
+      ET.onFrame = () => { p.x = 480; p.kx = 0; p.stun = 0; };
+      Loop.step(3000);
+      const cnt = foes.map(e => ET.trans.filter(t => t.id === e.id && t.to === 'windup').length);
+      return { cnt, types };
+    }, d);
+    const mn = Math.min(...r.cnt), mx = Math.max(...r.cnt);
+    check(`[${d}] 6마리가 3000프레임 동안 모두 골고루 공격 (종류별 ${r.cnt.join('/')}, 최소 ${mn} ≥ ${d === 'easy' ? 3 : 6})`, mn >= (d === 'easy' ? 3 : 6) && mx <= mn * 3, JSON.stringify(r.cnt));
+    check(`[${d}] 구름·병정·슬라임 어느 종류도 한 번도 못 때리는 일(굶기)이 없음`, r.cnt.every(n => n > 0));
+  }
+});
+
+await section('멀리서 자리 막지 않기', async () => {
+  const r = await ev(() => {
+    const p = ET.setup('easy', { px: 100, py: 420, width: 1920 });
+    const far = Enemies.spawn('soldier', 1000, 420), near = Enemies.spawn('slime', 330, 420);
+    far.cd = 0; far.alert = 0; near.cd = 0; near.alert = 0;
+    let bad = 0, engagedNear = false, engF = -1, f = 0;
+    ET.onFrame = () => { f++; p.x = 100; p.kx = 0; p.stun = 0; if (far.engage && Math.abs(far.x - p.x) > far.def.hover + ENEMY_TUNE.engageSlack + 6) bad++; if (far.engage && Math.abs(far.x - p.x) <= far.def.hover + ENEMY_TUNE.engageSlack + 6) { engagedNear = true; if (engF < 0) engF = f; } };
+    Loop.step(900);
+    const nf = ET.firstHb(near.id), ff = ET.firstHb(far.id);
+    return { bad, engagedNear, nearHit: nf ? nf.f : -1, farHit: ff ? ff.f : -1 };
+  });
+  check('멀리(맴도는 거리+140px 밖) 있는 적은 공격 자리를 맡지 않음 — 걸어오는 동안 자리를 막는 프레임 0', r.bad === 0, JSON.stringify(r));
+  check('가까운 슬라임이 먼저 (쉬움, 공격자 1명) 공격하고, 멀리서 온 병정도 가까워지면 결국 공격', r.nearHit > 0 && r.nearHit < 250 && r.farHit > 0 && r.engagedNear, JSON.stringify(r));
+});
+
+await section('긴 실행(벽 앞)', async () => {
+  for (const [d, px] of [['easy', 30], ['normal', 930], ['hard', 30]]) {
+    const r = await ev(({ d, px }) => {
+      const p = ET.setup(d, { px, py: 420, seed: 2 });
+      const types = ['slime', 'slime', 'soldier', 'soldier', 'cloud', 'cloud'];
+      const foes = types.map((t, i) => { const e = Enemies.spawn(t, px < 480 ? 150 + i * 90 : 810 - i * 90, 350 + i * 25); e.cd = 0; e.alert = 0; return e; });
+      const st = new Map(foes.map(e => [e.id, { tw: 0, lastFlip: -99, lastDir: 0, px: e.x, py: e.y, still: 0, maxStill: 0, nan: false, cur: 0, maxEng: 0 }]));
+      let f = 0, maxAtk = 0;
+      ET.onFrame = () => {
+        f++; p.x = px; p.kx = 0; p.stun = 0; p.y = 420;
+        let atk = 0;
+        for (const e of foes) {
+          const s = st.get(e.id); const dx = e.x - s.px, dy = e.y - s.py; s.px = e.x; s.py = e.y;
+          if (![e.x, e.y, e.z, e.hp].every(Number.isFinite)) s.nan = true;
+          const moving = e.state === 'chase' || e.state === 'idle';
+          if (moving && Math.abs(dx) > 0.25) { const dir = Math.sign(dx); if (s.lastDir && dir !== s.lastDir) { if (f - s.lastFlip < 8) s.tw++; s.lastFlip = f; } s.lastDir = dir; }
+          if (moving && Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) s.still++; else s.still = 0;
+          s.maxStill = Math.max(s.maxStill, s.still);
+          s.cur = (e.state === 'chase' && e.engage) ? s.cur + 1 : 0; s.maxEng = Math.max(s.maxEng, s.cur);
+          if (e.state === 'windup' || e.state === 'attack') atk++;
+        }
+        maxAtk = Math.max(maxAtk, atk);
+      };
+      Loop.step(3600);
+      return { rows: foes.map(e => { const s = st.get(e.id); return { t: e.type, tw: s.tw, still: s.maxStill, nan: s.nan, eng: s.maxEng, atk: ET.trans.filter(x => x.id === e.id && x.to === 'windup').length }; }), maxAtk, max: CFG.difficulty[d].maxAttackers, errs: Debug.errors.length, engT: ENEMY_TUNE.engageTimeout };
+    }, { d, px });
+    check(`[${d}] 벽 앞에서 3600프레임: 좌표가 NaN/무한대가 되는 적 없음, 동시 공격자는 ${r.max}명 이하`, r.rows.every(x => !x.nan) && r.maxAtk <= r.max, JSON.stringify(r.maxAtk));
+    check(`[${d}] 벽 앞에서 3600프레임: 좌우로 바르르 떠는(8프레임 안에 방향 반전) 횟수 적에 따라 6회 이하`, r.rows.every(x => x.tw <= 6), r.rows.map(x => x.t + ':' + x.tw).join(' '));
+    check(`[${d}] 벽 앞에서 3600프레임: 걷는 상태로 30프레임 넘게 얼어붙은 적 없음`, r.rows.every(x => x.still <= 30), r.rows.map(x => x.t + ':' + x.still).join(' '));
+    check(`[${d}] 벽 앞에서 3600프레임: 공격 자리를 맡고 ${r.engT}프레임 넘게 헤매는 적 없고, 모두 여러 번 공격`, r.rows.every(x => x.eng < r.engT && x.atk >= 3), r.rows.map(x => x.t + ':' + x.eng + '/' + x.atk).join(' '));
+    check(`[${d}] 긴 실행 동안 게임 안 오류 없음`, r.errs === 0);
+  }
+});
+
+// 보스: 쉬움(공격자 1명)에서도 소환수가 자리를 계속 가로채 보스가 굶지 않음, 벽 앞 플레이어에게도 돌진 길이 보임
+await section('보스 우선·돌진 길', async () => {
+  const r = await ev(() => {
+    const p = ET.setup('easy', { px: 480, py: 420 });
+    const b = Enemies.spawn('jellyKing', 800, 420);
+    let cur = 0, maxWait = 0;
+    ET.onFrame = () => { p.x = 480; p.kx = 0; p.stun = 0; p.invuln = 0; cur = (b.state === 'chase' && b.cd <= 0) ? cur + 1 : 0; maxWait = Math.max(maxWait, cur); };
+    Loop.step(5000);
+    const pats = ET.trans.filter(t => t.id === b.id && t.to === 'windup').length;
+    return { maxWait, pats, minions: Enemies.minionCount() };
+  });
+  check(`쉬움: 소환수 ${r.minions}마리가 돌아다녀도 보스가 다음 패턴을 기다리는 시간은 최대 ${r.maxWait}프레임 (< 200), 5000프레임에 ${r.pats}번 패턴`, r.maxWait < 200 && r.pats >= 12, JSON.stringify(r));
+  for (const [label, px, bx, dir] of [['오른쪽 벽', 940, 700, 1], ['왼쪽 벽', 22, 300, -1]]) {
+    const q = await ev(({ px, bx, dir }) => {
+      const p = ET.setup('normal', { px, py: 420 });
+      const b = Enemies.spawn('jellyKing', bx, 420); b.patIdx = 2;
+      ET.onFrame = () => { p.x = px; p.kx = 0; p.stun = 0; };
+      ET.until(`ET.byId(${b.id}).state === 'windup' && ET.byId(${b.id}).pattern === 'charge'`, 800);
+      const m = b.marker;
+      const lane = m ? { from: Math.min(b.x, m.limit), to: Math.max(b.x, m.limit), dir: m.dir } : null;
+      const hp0 = p.hp;
+      ET.until(`ET.byId(${b.id}).state === 'recover'`, 600);
+      return { lane, px: p.x, loss: hp0 - p.hp, bx: b.x };
+    }, { px, bx, dir });
+    check(`돌진: ${label} 앞에 선 플레이어가 맞는 자리는 예고 길(마커) 안에 포함됨 (길 ${q.lane && q.lane.from.toFixed(0)}~${q.lane && q.lane.to.toFixed(0)}, 플레이어 x=${q.px}, 피해 ${q.loss})`, q.lane && q.loss > 0 && q.px >= q.lane.from - 1 && q.px <= q.lane.to + 1, JSON.stringify(q));
+  }
+});
+
+// Enemies.clear: 진행 중이던 모든 것(마커·번개·소환수·보스)이 깨끗이 사라지고, 새로 시작하면 처음 상태
+await section('clear 뒤 새 출발', async () => {
+  const r = await ev(() => {
+    const p = ET.setup('normal', { px: 300, py: 420 });
+    const b = Enemies.spawn('jellyKing', 700, 420), c = Enemies.spawn('cloud', 500, 420); c.cd = 0;
+    Enemies.spawn('slime', 100, 400, { minion: true });
+    ET.until(`ET.byId(${b.id}).state === 'attack' && ET.byId(${b.id}).pattern === 'slam' && ET.byId(${b.id}).z > 20`, 800);
+    const z0 = b.z, mk0 = ET.markers().length;
+    const killedLog = ET.listen('bossKilled');
+    Enemies.clear();
+    const out = { z0, mk0, left: Entities.list.filter(e => e.kind === 'enemy' || e.kind === 'boss' || e.kind === 'marker' || e.fromEnemies).length, gameBoss: Game.boss, alive: Enemies.aliveCount(), minions: Enemies.minionCount() };
+    const n0 = ET.hbs.length; Loop.step(240);
+    out.hbAfter = ET.hbs.length - n0; out.errs = Debug.errors.length; out.killedEv = killedLog.length;
+    const b2 = Enemies.spawn('jellyKing', 700, 420);
+    out.fresh = { gb: Game.boss === b2, state: b2.state, patIdx: b2.patIdx, phase2: b2.phase2, hp: b2.hp, marker: b2.marker, minion: Enemies.minionCount() };
+    ET.until(`ET.byId(${b2.id}).state === 'windup'`, 800);
+    out.firstPattern = b2.pattern;
+    return out;
+  });
+  check('clear: 보스가 점프 찍기로 공중에 떠 있는 순간에도 깨끗이 지움 (마커 포함 엔티티 0, Game.boss null)', r.z0 > 20 && r.mk0 >= 1 && r.left === 0 && r.gameBoss === null && r.alive === 0 && r.minions === 0, JSON.stringify(r));
+  check('clear 뒤 240프레임: 지워진 적이 남긴 공격 판정·오류·bossKilled 이벤트가 없음', r.hbAfter === 0 && r.errs === 0 && r.killedEv === 0, JSON.stringify([r.hbAfter, r.errs, r.killedEv]));
+  check('clear 뒤 새 보스는 완전히 처음 상태: 1페이즈, 체력 가득, 마커·소환수 없음, 첫 패턴은 점프 찍기', r.fresh.gb && r.fresh.state === 'idle' && r.fresh.patIdx === 0 && r.fresh.phase2 === false && r.fresh.hp === 300 && r.fresh.marker === null && r.fresh.minion === 0 && r.firstPattern === 'slam', JSON.stringify(r.fresh));
+});
+
+// 연출: 예고가 막 시작되면 하얗게 번쩍, 2페이즈 팝업이 데미지 숫자와 겹치지 않음
+await section('예고 번쩍·팝업 위치', async () => {
+  const r = await ev(() => {
+    const p = ET.setup('normal', { px: 300, py: 420 });
+    const e = Enemies.spawn('slime', 420, 420); e.cd = 0; e.alert = 0;
+    const shot = () => {
+      Loop.draw();
+      const d = ET.region(420 - 40, 420 - 70, 80, 80); let white = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] > 245 && d[i + 1] > 245 && d[i + 2] > 245) white++;
+      return white;
+    };
+    ET.until(`ET.byId(${e.id}).state === 'windup'`, 900);
+    const out = { t: e.t };
+    out.start = shot();                                          // 막 시작
+    const bl = []; for (let i = 0; i < 12; i++) { Loop.step(1); bl.push([e.t, shot()]); }
+    out.mid = bl.filter(x => x[0] >= 1 && x[0] <= 3).map(x => x[1]);
+    out.after = bl.filter(x => x[0] >= 9).map(x => x[1]);
+    // 2페이즈 팝업 위치
+    ET.setup('normal', { px: 300, py: 420 });
+    const b = Enemies.spawn('jellyKing', 700, 420); b.cd = 1e9;
+    Combat.damage(b, 150, { team: 'player', owner: ET.p, freeze: 0, stun: 0 });
+    const ang = FX.popups.find(q => q.text === '화났다!'), num = FX.popups.find(q => q.text === 150 || q.text === '150' || (typeof q.text === 'number'));
+    out.popY = ang && ang.y; out.numY = num && num.y;
+    return out;
+  });
+  check(`예고 시작 3프레임은 하얗게 번쩍 (흰 픽셀 ${r.mid.join(',')}) → 이후엔 원래 색 (${r.after.join(',')})`, Math.min(...r.mid) > 150 && Math.max(...r.after) < Math.min(...r.mid) * 0.5, JSON.stringify(r));
+  check(`"화났다!" 팝업이 데미지 숫자보다 위(${r.popY} < ${r.numY} - 30)에 떠서 안 겹침`, r.popY !== null && r.numY !== null && r.popY < r.numY - 30, JSON.stringify([r.popY, r.numY]));
+});
+
+// 부활 직후: 쓰러졌던 플레이어를 다시 만나도 바로 덤비지 않고 숨 고르기 (보스 60프레임, 일반 적 40프레임)
+await section('부활 직후 숨 고르기', async () => {
+  const r = await ev(() => {
+    const out = {};
+    const p = ET.setup('normal', { px: 300, py: 420 });
+    const b = Enemies.spawn('jellyKing', 700, 420);
+    ET.until(`ET.byId(${b.id}).state === 'windup'`, 800);
+    p.invuln = 0; Combat.damage(p, 1e9, { team: 'enemy', freeze: 0 });
+    Loop.step(300);
+    out.idleBefore = b.state;
+    p.dead = false; p.hp = 1e6; p.invuln = 0;
+    const n = ET.until(`ET.byId(${b.id}).state === 'windup'`, 900);
+    out.boss = n; out.bossMarkerShown = !!b.marker;
+    // 일반 적
+    const q = ET.setup('normal', { px: 300, py: 420 });
+    const s = Enemies.spawn('slime', 420, 420), c = Enemies.spawn('cloud', 560, 420); s.cd = 0; c.cd = 0; s.alert = 0; c.alert = 0;
+    Loop.step(100);
+    q.invuln = 0; Combat.damage(q, 1e9, { team: 'enemy', freeze: 0 });
+    Loop.step(200);
+    out.idleSlime = s.state; out.idleCloud = c.state;
+    q.dead = false; q.hp = 1e6; q.invuln = 0;
+    const m = ET.until(`ET.foes().some(e => e.state === 'windup')`, 900);
+    out.foe = m; out.errs = Debug.errors.length;
+    return out;
+  });
+  check('부활: 쓰러진 동안 보스는 배회(idle), 부활한 뒤 60프레임은 공격 예고를 시작하지 않음 (실제 ' + r.boss + ')', r.idleBefore === 'idle' && r.boss >= 55 && r.boss < 400, JSON.stringify(r));
+  check('부활: 일반 적(슬라임·구름)도 40프레임 뒤에야 첫 예고를 시작하고 결국 다시 공격 (실제 ' + r.foe + ')', r.idleSlime === 'idle' && r.idleCloud === 'idle' && r.foe >= 38 && r.foe < 600 && r.errs === 0, JSON.stringify(r));
 });
 
 // ===========================================================================

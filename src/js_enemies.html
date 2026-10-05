@@ -14,6 +14,10 @@
      3. 몸에 닿기만 해서는 피해가 없어요. 오직 "공격 판정(Combat.applyHitbox)"만 아파요.
      4. 한꺼번에 덤비지 않아요 (난이도별 maxAttackers 명까지만 동시에 공격).
      5. 보스는 패턴이 끝날 때마다 60프레임 이상 "어지러운 시간"이 있어서 반격할 수 있어요.
+     6. 번개·충격파는 "둥근 마커 안"에서만 아파요. 마커 밖(대각선 모서리까지)에서는 절대 안 맞아요.
+     7. 공격 차례는 돌아가며: 가까운 적 + "오래 기다린 적"이 먼저라서 한 종류만 계속 때리지 않아요.
+        벽 앞에 몰려 물러설 곳이 없으면 플레이어 반대편으로 돌아 나와서 공격해요 (끼어서 멈추지 않음).
+     8. 쓰러졌던 플레이어가 부활하면 바로 덤비지 않고 잠깐(40~60프레임) 숨을 골라요.
 
    ※ 전역 이름은 ENEMY_TUNE · ENEMY_DEFS · Enemies 세 개뿐이에요. 나머지는 Enemies 함수 안에 숨겨 두었어요.
    ※ 다른 모듈(Player, Stage …)은 부르지 않아요. Game.player 와 Events 로만 소통합니다.
@@ -23,6 +27,7 @@
 const ENEMY_TUNE = {
   minWindup: 24,          // 예고(windup)는 어떤 난이도에서도 이 프레임보다 짧을 수 없음 (0.4초)
   minMarker: 45,          // 번개/내려찍기 바닥 마커가 보이는 최소 프레임 (0.75초)
+  zoneScale: 0.95,        // 번개·충격파가 실제로 아픈 둥근 영역 = 보이는 마커 타원 × 이 값 (마커 밖에서는 절대 안 맞음)
   markerLock: 30,         // 마커가 "멈추는" 마지막 프레임 수 (이때 움직이면 피할 수 있음)
   markerSpeed: 3.2,       // 마커가 플레이어를 따라가는 속도 (플레이어 걷기 4px 보다 느림)
   minBossRecover: 60,     // 보스 패턴 뒤 반격 시간 최소 (1초)
@@ -33,8 +38,13 @@ const ENEMY_TUNE = {
   bossDeathFrames: 72,    // 보스 "펑!" 연출 길이
   minionCap: 4,           // 보스가 불러낸 슬라임이 동시에 이 수를 넘지 않게
   hpBarFrames: 150,       // 맞은 뒤 체력바가 보이는 시간
+  regroup: 40,            // 플레이어가 부활해서 다시 만났을 때, 공격을 시작하기 전에 숨 고르는 프레임
+  bossRegroup: 60,        // 보스는 조금 더 오래
   hurtCooldown: 36,       // 맞고 난 뒤 다시 공격하기까지 쉬는 프레임 (때려서 끊는 보람!)
-  engageTimeout: 360,     // 공격 자리를 맡아 놓고 이 시간 동안 못 가면 포기
+  engageTimeout: 300,     // 공격 자리를 맡아 놓고 이 시간 동안 못 가면 포기
+  engageSlack: 140,       // 맴도는 거리 + 이만큼 안으로 들어와야 공격 자리를 맡을 수 있음 (멀리서 자리만 막고 있지 않게)
+  waitBonus: 0.5,         // 공격 차례를 기다린 프레임 1당 "가까운 것처럼 쳐 주는" 거리(px) — 오래 기다린 적이 먼저
+  waitCap: 600,           // 위 보너스가 쌓이는 최대 프레임
   sep: { depth: 18, push: 1.6, flyGap: 40 },   // 적끼리 겹치지 않게 밀어내기 (깊이 두께 / 힘 / 공중-지상 구분 높이)
   chain: { hits: 4, frames: 50, armor: 40 },   // 보스: 50프레임 안에 4번 맞으면 "흔들어 털기" (무한 경직 방지)
 };
@@ -124,7 +134,13 @@ const Enemies = (() => {
   function enter(e, state, len) {
     e.state = state; e.t = 0; e.len = len || 0;
     e.engage = false;
+    if (state === 'idle') e.lost = !getTarget();                   // 플레이어를 놓쳐서(쓰러짐/없음) 배회하는 중인지 기억
     if (state !== 'windup' && state !== 'attack') dropMarker(e);   // 예고/공격이 끝나면 바닥 마커도 같이 사라짐
+  }
+
+  // 놓쳤던 플레이어를 다시 만나면(부활!) 바로 덤비지 않고 잠깐 숨 고르기
+  function regroup(e, frames) {
+    if (e.lost) { e.lost = false; e.cd = Math.max(e.cd, frames); }
   }
 
   // 공격 "자리표(토큰)": windup/attack 중이거나, 공격하려고 다가가는 중(engage)이면 자리를 차지한 것
@@ -136,25 +152,42 @@ const Enemies = (() => {
     return n;
   }
 
-  // 공격 자리를 얻을 수 있나? 자리가 남아 있어도 "플레이어와 가장 가까운 후보" 순서로 줘요
+  // 공격 순서 점수 (작을수록 먼저): 가까울수록 먼저, 그리고 "오래 기다린 적"일수록 먼저.
+  //   → 가까운 슬라임만 계속 때리고 구름·병정은 영영 차례가 안 오는 일을 막아요.
+  const turnScore = (o, p) => dist(o, p) - T.waitBonus * Math.min(o.waitT || 0, T.waitCap);
+  // 자리를 맡으려면 이미 가까이 와 있어야 해요 (멀리서 걸어오는 동안 자리를 막고 있으면 안 되니까)
+  const nearEnough = (o, p) => Math.abs(o.x - p.x) <= (o.def.hover || 150) + T.engageSlack;
+
+  // 공격 자리를 얻을 수 있나? 자리가 남아 있어도 "순서 점수가 가장 좋은 후보" 순서로 줘요
   function canEngage(e, p) {
     const free = Game.diff.maxAttackers - slotsTaken(e);
     if (free <= 0) return false;
-    const dMe = dist(e, p);
-    let nearer = 0;
+    const sMe = turnScore(e, p);
+    let ahead = 0;
     for (const o of Entities.list) {
-      if (o === e || !isLive(o) || o.boss || holdsSlot(o) || o.state !== 'chase' || o.cd > 0) continue;
-      const d = dist(o, p);
-      if (d < dMe || (d === dMe && o.id < e.id)) nearer++;
+      if (o !== e && isLive(o) && o.boss && o.state === 'chase' && o.cd <= 0) { ahead++; continue; }   // 패턴 차례가 된 보스가 최우선 (소환수가 자리를 계속 가로채지 못하게)
+      if (o === e || !isLive(o) || o.boss || holdsSlot(o) || o.state !== 'chase' || o.cd > 0 || !nearEnough(o, p)) continue;
+      const s = turnScore(o, p);
+      if (s < sMe || (s === sMe && o.id < e.id)) ahead++;
     }
-    return nearer < free;
+    return ahead < free;
   }
 
   function wantsAttack(e, p) {
     if (e.engage) return true;
-    if (e.cd > 0 || !canEngage(e, p)) return false;
+    if (e.cd > 0 || !nearEnough(e, p) || !canEngage(e, p)) return false;
     e.engage = true; e.engageT = 0;
     return true;
+  }
+
+  // 플레이어 곁 d 만큼 떨어진 "서 있을 자리"(x). 지금 서 있는 쪽을 기본으로 하되,
+  // 벽에 막혀 물러설 수 없으면 반대편으로 돌아가요 (플레이어 몸은 그냥 통과). → 벽 앞에서 끼어 영영 못 때리는 일 없음
+  function standX(e, p, d) {
+    const lo = e.w / 2 + 4, hi = Game.world.width - e.w / 2 - 4;
+    const side = Math.abs(e.x - p.x) > 4 ? sign(e.x - p.x) : -e.face;
+    let x = p.x + side * d;
+    if (x < lo || x > hi) x = p.x - side * d;
+    return clamp(x, lo, hi);
   }
 
   // 목표 지점으로 걸어가기 (도착하면 멈춤). 깊이(y) 이동은 조금 느리게
@@ -168,13 +201,13 @@ const Enemies = (() => {
 
   const faceTo = (e, dx) => { if (Math.abs(dx) > 4) e.face = sign(dx); };
 
-  // 맞은 편에서 "맴돌며 대기": 있던 쪽에 머물면서 천천히 오르락내리락 (자리가 없을 때)
+  // 있던 쪽에서 "맴돌며 대기": 천천히 오르락내리락 (자리가 없을 때). 벽에 막히면 반대편으로 돌아감
   function hover(e, p, R, sp) {
-    if (!e.side || Math.abs(e.x - p.x) > 30) e.side = sign(e.x - p.x);
     const ph = e.age * 0.022 + e.phase;
-    const gx = p.x + e.side * (R + Math.sin(ph * 0.7) * 25);
+    const gx = standX(e, p, R + Math.sin(ph * 0.7) * 25);
     const gy = clamp(p.y + Math.sin(ph) * 55, FLOOR_TOP, FLOOR_BOTTOM);
-    moveToward(e, gx, gy, sp * 0.75);
+    const far = Math.abs(e.x - p.x) > R + 60;                           // 멀리서는 제 속도로 다가오고, 가까워지면 느릿느릿 맴돎
+    moveToward(e, gx, gy, far ? sp : sp * 0.75);
   }
 
   // 플레이어가 없거나 쓰러져 있을 때: 제자리 근처를 느릿느릿 배회
@@ -241,8 +274,22 @@ const Enemies = (() => {
     m.x = clamp(m.x, minX, maxX);
     m.y = clamp(m.y, FLOOR_TOP, FLOOR_BOTTOM);
   }
-  // 마커(눈에 보이는 타원) 안쪽에 들어오는 실제 판정 크기: 마커 밖에서 맞는 일이 없게
-  function zoneOf(rx, ry) { return { half: Math.max(8, (rx - 20) * 0.85), depth: ry * 0.85 }; }
+  // 둥근 판정: 마커(눈에 보이는 타원) 안에 "발 위치"가 들어온 상대만 맞고, 마커 밖에서는 절대 안 맞아요.
+  //   Combat 은 사각형만 알기 때문에, 타원 밖에 있는 상대는 hitSet 에 미리 넣어 건너뛰게 하고
+  //   (이 호출에서만 쓰는 임시 목록), 실제로 맞은 상대만 원래 hitSet 에 돌려놓아요 (한 번 휘두를 때 한 번만 맞게).
+  function strikeRound(owner, cx, cy, rx, ry, hb) {
+    const real = hb.hitSet, skip = new Set(real), R = T.zoneScale;
+    for (const t of Entities.list) {
+      if (t === owner || t.dead || t.team === owner.team || t.team === 'neutral') continue;
+      const nx = (t.x - cx) / (rx * R), ny = (t.y - cy) / (ry * R);
+      if (nx * nx + ny * ny > 1) skip.add(t);
+    }
+    hb.hitSet = skip;
+    const hits = Combat.applyHitbox(Object.assign({ owner, team: owner.team, x1: cx - rx - 40, x2: cx + rx + 40, y: cy, depth: ry + 1 }, hb));
+    hb.hitSet = real;
+    for (const h of hits) real.add(h);
+    return hits;
+  }
 
   // 번개 이펙트 (짧게 살아 있다 사라지는 엔티티. 항상 맨 앞에 그려짐)
   function addBolt(fromX, fromY, toX, toY) {
@@ -280,7 +327,7 @@ const Enemies = (() => {
       const adx = Math.abs(p.x - e.x);
       faceTo(e, p.x - e.x);
       if (wantsAttack(e, p)) {
-        moveToward(e, p.x - e.face * def.spacing, p.y, e.speed);       // 너무 가까우면 뒤로 물러나 간격을 맞춤
+        moveToward(e, standX(e, p, def.spacing), p.y, e.speed);        // 너무 가까우면 뒤로 물러나 간격을 맞춤 (벽이면 반대편으로)
         if (adx >= def.startMin && adx <= def.startMax && Math.abs(p.y - e.y) <= def.alignY) startWindup(e, def.windup);
       } else hover(e, p, def.hover, e.speed);
     },
@@ -313,7 +360,6 @@ const Enemies = (() => {
     onAttack(e, p, def) {
       const m = e.marker;
       const mx = m ? m.x : e.x, my = m ? m.y : e.y;
-      const zone = zoneOf(def.markerRx, def.markerRy);
       addBolt(e.x, e.y - e.z - 8, mx, my);
       dropMarker(e);
       SFX.play('hitBig', { rate: 1.6, vol: 0.7 });
@@ -321,8 +367,7 @@ const Enemies = (() => {
       FX.burst(mx, my - 4, { kind: 'ring', count: 1, size: def.markerRx * 0.9, colors: [COLORS.yellow] });
       FX.shake(3, 8);
       e.strikeAt = { x: mx, y: my };
-      strike({
-        owner: e, team: 'enemy', x1: mx - zone.half, x2: mx + zone.half, y: my, depth: zone.depth,
+      strikeRound(e, mx, my, def.markerRx, def.markerRy, {
         zMin: -10, zMax: def.zMax, damage: def.atk, knock: def.knock, launch: def.launch, stun: def.stun,
         freeze: 4, shake: 5, sfx: 'hitBig', fx: 'spark', hitSet: e.hitSet,
       });
@@ -341,6 +386,7 @@ const Enemies = (() => {
     const len = forceLen || windupFrames(base);
     enter(e, 'windup', len);
     e.windupLen = len;
+    e.waitT = 0;                                                       // 차례가 왔으니 기다린 시간은 0부터 다시
     SFX.play('ui', { rate: 1.5, vol: 0.45 });                         // "삐릭!" 작은 예고음
   }
 
@@ -370,7 +416,7 @@ const Enemies = (() => {
         e.cd = Math.max(e.cd, T.hurtCooldown);
         break;
       case 'idle':
-        if (p && e.t >= e.alert && dist(e, p) < T.aggroRange) enter(e, 'chase');
+        if (p && e.t >= e.alert && dist(e, p) < T.aggroRange) { enter(e, 'chase'); regroup(e, T.regroup); }
         else { wander(e); separate(e); }
         break;
       case 'chase':
@@ -408,6 +454,7 @@ const Enemies = (() => {
     if (e.hitT > 0) e.hitT--;
     if (e.hpBarT > 0) e.hpBarT--;
     if (e.landT > 0) e.landT--;
+    if (e.state === 'chase' && !e.engage) e.waitT++;                    // 공격 차례를 기다린 시간 (오래 기다린 적이 먼저)
     if (e.dead) {
       e.deathT++;
       if (e.boss && e.deathT < T.bossDeathFrames - 14 && e.deathT % 5 === 0) bossDeathFx(e);
@@ -564,7 +611,7 @@ const Enemies = (() => {
         if (e.t >= T.landFrames) enter(e, 'idle');
         break;
       case 'idle':                                                     // 등장 직후 으스대는 시간 / 플레이어가 없을 때
-        if (p && e.cd <= 0) enter(e, 'chase');
+        if (p && e.cd <= 0) { enter(e, 'chase'); regroup(e, T.bossRegroup); }
         else { e.vx += Math.sin(e.age * 0.03) * 0.2; }
         break;
       case 'chase': {
@@ -620,7 +667,7 @@ const Enemies = (() => {
       e.face = sign(p.x - e.x);
       e.limitX = e.face > 0 ? maxX : minX;
       const lock = Math.min(T.markerLock - 8, W - 6);
-      addMarker(e, 'lane', { style: 'charge', x: e.x, y: e.y, rx: 0, ry: P.depth, total: W, lockAt: W - lock, dir: e.face, limit: e.limitX });
+      addMarker(e, 'lane', { style: 'charge', x: e.x, y: e.y, rx: 0, ry: P.depth, total: W, lockAt: W - lock, dir: e.face, limit: e.face > 0 ? Game.world.width : 0 });   // 길은 벽 끝까지 보여 줌 (벽 앞에 서 있어도 판정 자리가 길에 포함됨)
     }
     enter(e, 'windup', W);
     SFX.play(name === 'summon' ? 'bossHit' : 'warn', { rate: name === 'summon' ? 0.55 : 0.7, vol: 0.7 });
@@ -694,9 +741,8 @@ const Enemies = (() => {
         FX.burst(mx, my - 6, { kind: 'puff', count: 12, speed: 5, size: 30 });
         FX.burst(mx, my - 20, { kind: 'star', count: 6, speed: 6 });
       }
-      const zone = zoneOf(P.rx, P.ry), at = e.impactAt;
-      strike({
-        owner: e, team: 'enemy', x1: at.x - zone.half, x2: at.x + zone.half, y: at.y, depth: zone.depth,
+      const at = e.impactAt;
+      strikeRound(e, at.x, at.y, P.rx, P.ry, {
         zMin: -10, zMax: P.zMax, damage: Math.round(def.atk * P.damage), knock: 10, stun: 26, freeze: 6, shake: 10,
         sfx: 'hitBig', fx: 'star', hitSet: e.hitSet,
       });
@@ -757,7 +803,7 @@ const Enemies = (() => {
   function enterPhase2(e) {
     e.phase2 = true;
     SFX.play('warn');
-    FX.popup(e.x, e.y - e.h - 30, '화났다!', { color: COLORS.red, size: 42, life: 80, vy: -0.5 });
+    FX.popup(e.x, e.y - e.h - 74, '화났다!', { color: COLORS.red, size: 42, life: 80, vy: -0.5 });   // 데미지 숫자보다 위에 떠서 안 겹침
     FX.shake(6, 18);
     FX.burst(e.x, e.y - e.h * 0.5, { kind: 'puff', count: 12, speed: 4, size: 32 });
   }
@@ -779,7 +825,7 @@ const Enemies = (() => {
     const drop = !!opts.drop;
     const maxHp = Math.max(1, Math.round(def.hp * Game.diff.enemyHp * num(opts.hpMul, 1)));
     const e = Entities.make({
-      kind: def.boss ? 'boss' : 'enemy', team: 'enemy', type,
+      kind: def.boss ? 'boss' : 'enemy', team: 'enemy', type, name: def.name,       // name: HUD 가 이름을 그릴 때 쓸 수 있게
       boss: def.boss ? true : undefined,
       x: clamp(num(x, W / 2), def.w / 2, Game.world.width - def.w / 2),
       y: clamp(num(y, 420), FLOOR_TOP, FLOOR_BOTTOM),
@@ -796,7 +842,7 @@ const Enemies = (() => {
     e.state = drop ? 'drop' : 'idle'; e.t = 0; e.len = 0; e.age = 0;
     e.cd = def.boss ? 80 : randInt(10, 40);                            // 처음엔 잠깐 있다가 공격
     e.alert = def.boss ? 0 : randInt(4, 24);
-    e.engage = false; e.engageT = 0; e.side = 0;
+    e.engage = false; e.engageT = 0; e.waitT = 0;
     e.phase = rand() * TAU;                                            // 저마다 다른 맴도는 박자 (게임 난수로 정함 → 시드가 같으면 똑같이 재현)
     e.marker = null; e.hitSet = null;
     e.px = e.x; e.py = e.y; e.walk = 0; e.sx = 1; e.sy = 1;
@@ -927,7 +973,9 @@ const Enemies = (() => {
       if (p >= 1) return;
       death = p;
     }
-    const white = e.flash > 0 || (death !== null && death < 0.45);
+    // 하얗게 번쩍: 맞았을 때(e.flash) / 죽을 때 / 그리고 예고가 막 시작된 3프레임 ("곧 공격한다!" 신호)
+    const blink = e.state === 'windup' && e.t >= 1 && e.t <= 3;
+    const white = e.flash > 0 || blink || (death !== null && death < 0.45);
     ctx.save();
     ctx.translate(e.x, e.y - e.z);
     if (death !== null) {                                              // 펑! : 부풀었다가 → 작아지며 사라짐
