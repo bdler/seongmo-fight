@@ -1,9 +1,10 @@
 // core 커널 테스트 (src/js_core.html, src/js_main.html, tools/test-all.mjs)
 //   실행: node tools/build-local.mjs --out dist/_core.html && GAME_HTML=dist/_core.html node tools/tests/core.test.mjs
+//   일부 구역만: CORE_ONLY='Loop|HiDPI' (구역 이름에 이 정규식이 들어간 것만 실행 — 고치는 중에 빠르게 돌려 볼 때)
 //   디버그 씬 스크린샷은 SHOT_DIR (기본: 임시 폴더/jd-core-shots) 에 저장됩니다. 저장소 안에는 쓰지 않아요.
-import { openGame, step, launch, gameUrl } from '../lib/browser.mjs';
+import { openGame, step, launch, gameUrl, simulateFrames } from '../lib/browser.mjs';
 import { check, finish } from '../lib/check.mjs';
-import { readFileSync, mkdirSync, writeFileSync, mkdtempSync, copyFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, mkdtempSync, copyFileSync, existsSync, statSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +15,10 @@ const SHOT_DIR = process.env.SHOT_DIR || join(tmpdir(), 'jd-core-shots');
 mkdirSync(SHOT_DIR, { recursive: true });
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
+const tmpDirs = [];                              // 임시 저장소 복사본들 (끝에 지움)
+const mkTmp = prefix => { const d = mkdtempSync(join(tmpdir(), prefix)); tmpDirs.push(d); return d; };
 const section = async (name, fn) => {            // 한 구역이 예외로 죽어도 나머지는 계속
+  if (process.env.CORE_ONLY && !new RegExp(process.env.CORE_ONLY).test(name)) return;
   try { await fn(); } catch (e) { check(`[${name}] 구역이 예외 없이 끝남`, false, String(e && e.stack || e).split('\n').slice(0, 3).join(' | ')); }
 };
 
@@ -666,8 +670,8 @@ await section('Combat.damage: 8단계 파이프라인', async () => {
   check('±10%: amount=10 → 9~11 (정수만), 세 값이 다 나옴', v.v10[0] === 9 && v.v10[1] === 11 && v.v10[2] === '9,10,11', JSON.stringify(v.v10));
   check('±10%: amount=1 → 늘 1 (최소 1)', v.v1[0] === 1 && v.v1[1] === 1);
   check('같은 시드 → 같은 피해량 순서 (재현 가능)', v.reproducible);
-  check('dmgTaken: 플레이어팀만 배율 (easy 0.5 / normal 1 / hard 1.5), 적은 항상 그대로', JSON.stringify(v.dmgTaken) === '{"easy":[5,10,50],"normal":[10,10,100],"hard":[15,10,150]}', JSON.stringify(v.dmgTaken));
-  check('dmgTaken 은 team==="player" 기준 (kind 가 달라도)', v.allyHard === 15, String(v.allyHard));
+  check('dmgTaken: 플레이어팀만 배율 (easy 0.5 / normal 1 / hard 1.7), 적은 항상 그대로', JSON.stringify(v.dmgTaken) === '{"easy":[5,10,50],"normal":[10,10,100],"hard":[17,10,170]}', JSON.stringify(v.dmgTaken));
+  check('dmgTaken 은 team==="player" 기준 (kind 가 달라도)', v.allyHard === 17, String(v.allyHard));
 
   // 반응: 넉백·경직·띄우기·슈퍼아머·헤비·저글링
   const rx = await ev(() => {
@@ -1546,6 +1550,14 @@ await section('Game: 씬 전환 · 일시정지 · 새 런', async () => {
     o.diff = [Game.diff.label, Game.diff.dmgTaken]; Game.difficulty = 'weird'; o.diffFallback = Game.diff.label; Game.difficulty = 'normal';
     Game.score = 0; Game.addScore(10.4); Game.addScore(10.6); Game.addScore(NaN); Game.addScore('abc'); Game.addScore(-3); Game.addScore(undefined); o.score = Game.score;
     o.cfg = [CFG.difficulty.easy.lives === Infinity, CFG.difficulty.normal.lives, CFG.difficulty.hard.lives, CFG.difficulty.easy.maxAttackers, CFG.difficulty.normal.maxAttackers, CFG.difficulty.hard.maxAttackers, CFG.difficulty.hard.windupMul, CFG.difficulty.easy.revivePenalty];
+    // 난이도 숫자표 전체 (밸런스 결정: hard 는 받는 피해 1.7배 · 적 체력은 그대로 1.0 · poise 0.5)
+    o.table = {}; for (const k of ['easy', 'normal', 'hard']) { const d = CFG.difficulty[k]; o.table[k] = [d.dmgTaken, d.enemyHp, d.enemySpeed, d.windupMul, d.maxAttackers, d.poise]; }
+    // poise: 표에 없거나 이상한 값이어도 Game.diff.poise 는 항상 0~1 숫자 (없으면 0)
+    const nm = CFG.difficulty.normal, saved = nm.poise, pz = [];
+    delete nm.poise; Game.difficulty = 'normal'; pz.push(Game.diff.poise);
+    for (const bad of [NaN, 'abc', null, -2, 7, undefined]) { nm.poise = bad; pz.push(Game.diff.poise); }
+    nm.poise = 0.25; pz.push(Game.diff.poise);
+    nm.poise = saved; o.poiseSafe = pz; o.poiseRestored = nm.poise;
     return o;
   });
   check('resetRun: score/kills/deaths/frame/boss/result/combo 초기화, 난이도·닉네임 설정, lives=난이도 값, Entities/FX 는 그대로', JSON.stringify(rr.hard) === '["hard","젤리",0,0,0,0,1,null,null,"{\\"count\\":0,\\"timer\\":0,\\"max\\":0}",true,true,1]', JSON.stringify(rr.hard));
@@ -1553,6 +1565,9 @@ await section('Game: 씬 전환 · 일시정지 · 새 런', async () => {
   check('Game.diff: 현재 난이도 설정, 알 수 없는 난이도는 normal 로', rr.diff[0] === '보통' && rr.diff[1] === 1 && rr.diffFallback === '보통');
   check('Game.addScore: 반올림해서 더함 (10.4+10.6 → 10+11), NaN/문자/undefined 무시', rr.score === 18, String(rr.score));
   check('CFG.difficulty 값이 계약서와 같음 (lives/maxAttackers/windupMul/revivePenalty)', JSON.stringify(rr.cfg) === '[true,3,1,1,2,3,0.8,0.1]', JSON.stringify(rr.cfg));
+  check('난이도 숫자표 [dmgTaken, enemyHp, enemySpeed, windupMul, maxAttackers, poise]: easy 0.5/0.8/0.9/1.3/1/0, normal 1/1/1/1/2/0, hard 1.7/1.0/1.1/0.8/3/0.5',
+    JSON.stringify(rr.table) === '{"easy":[0.5,0.8,0.9,1.3,1,0],"normal":[1,1,1,1,2,0],"hard":[1.7,1,1.1,0.8,3,0.5]}', JSON.stringify(rr.table));
+  check('Game.diff.poise: 표에 없거나(NaN/문자/null/음수/undefined) 범위 밖이면 0~1 로 보정, 정상 값은 그대로', JSON.stringify(rr.poiseSafe) === '[0,0,0,0,0,1,0,0.25]' && rr.poiseRestored === 0, JSON.stringify([rr.poiseSafe, rr.poiseRestored]));
 });
 
 await section('부팅 · 오류 처리', async () => {
@@ -1585,36 +1600,96 @@ await section('부팅 · 오류 처리', async () => {
 });
 
 // =====================================================================
-await section('HiDPI 캔버스', async () => {
-  let cssBase = null;
-  for (const [dsf, want] of [[1, 1], [2, 2], [3, 2], [1.5, 1.5]]) {
-    const t = await openCustom({ contextOpts: { deviceScaleFactor: dsf } });
+await section('HiDPI 캔버스: 백버퍼 배율 = clamp(보이는 폭(실제 화소) / 960, 1, 2)', async () => {
+  // [뷰포트, devicePixelRatio, 기대 배율]. #app 은 16:9 레터박스라 캔버스 CSS 폭 = min(뷰포트 폭, 높이*16/9).
+  // 배율은 1/60 단위로 반올림 (960*k/60 × 540*k/60 이 정수) → 1280x720 창(dpr 1)은 1280x720 백버퍼로 화소가 1:1
+  const cases = [
+    [[1280, 720], 1, 80 / 60], [[1280, 720], 1.5, 2], [[1280, 720], 2, 2], [[1280, 720], 3, 2],       // 큰 화면은 dpr 이 얼마든 최대 2배(1920x1080)
+    [[1920, 1080], 1, 2], [[2560, 1440], 1, 2], [[2560, 1440], 2, 2],                                   // R-10: 1080p/1440p 를 dpr 1 로 봐도 또렷하게, 비용은 1920x1080 까지
+    [[800, 450], 1, 1], [[640, 360], 2, 1280 / 960],                                                    // 작은 창은 1배 밑으로 내려가지 않음 / dpr 2 면 1280x720
+    [[1366, 768], 1, 85 / 60],                                                                          // 흔한 노트북 (CSS 폭 1365.33 → 1/60 단위로 85)
+    [[390, 844], 3, 73 / 60],                                                                           // 세로로 든 폰: 390css x3 = 1170 화소 → 1.2167배 (1168x657)
+  ];
+  const cssBase = {};
+  for (const [[vw, vh], dsf, want] of cases) {
+    const t = await openCustom({ contextOpts: { viewport: { width: vw, height: vh }, deviceScaleFactor: dsf } });
     await t.page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
     const r = await t.page.evaluate(() => {
-      const c = document.getElementById('game'), ctx = c.getContext('2d'), tr = ctx.getTransform();
+      const c = document.getElementById('game'), ctx = c.getContext('2d');
       Scenes.P = { draw(ctx) { ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, W, H); ctx.fillStyle = '#0000ff'; ctx.fillRect(W - 10, H - 10, 10, 10); } }; Game.scene = 'P'; Loop.draw();
+      const tr = ctx.getTransform();
       const px = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data.slice(0, 3)).join();
       const box = c.getBoundingClientRect();
       return { w: c.width, h: c.height, a: tr.a, d: tr.d, dpr: window.devicePixelRatio, loopDpr: Loop.dpr, corner: px(c.width - 2, c.height - 2), origin: px(1, 1), mid: px(Math.round(c.width / 2), Math.round(c.height / 2)), cssW: box.width, cssH: box.height };
     });
-    check(`DPR ${dsf} → 캔버스 ${Math.round(960 * want)}×${Math.round(540 * want)} (최대 2배), 변환 ${want}배`, r.w === Math.round(960 * want) && r.h === Math.round(540 * want) && near(r.a, want, 1e-9) && near(r.d, want, 1e-9) && near(r.loopDpr, want), JSON.stringify(r));
-    if (cssBase === null) cssBase = r.cssW;
-    check(`  └ DPR ${dsf}: 논리 좌표(960×540)로 그리면 캔버스 전체가 채워짐`, r.corner === '0,0,255' && r.origin === '255,0,0' && r.mid === '255,0,0', JSON.stringify({ c: r.corner, o: r.origin }));
-    check(`  └ DPR ${dsf}: 화면에 보이는 크기(CSS px)는 DPR 과 무관하게 같고 16:9`, Math.abs(r.cssW - cssBase) < 1 && Math.abs(r.cssW / r.cssH - 16 / 9) < 0.01, JSON.stringify([r.cssW, r.cssH, cssBase]));
-    check(`  └ DPR ${dsf}: 오류 없음`, t.errors.length === 0, t.errors.join('|'));
+    const tag = `${vw}x${vh} dpr ${dsf}`;
+    const ww = Math.round(960 * want), hh = Math.round(540 * want);
+    check(`[${tag}] 캔버스 ${ww}×${hh} (배율 ${want.toFixed(4)}), 변환도 같은 배율, Loop.dpr 도 같음`, r.w === ww && r.h === hh && near(r.a, want, 1e-6) && near(r.d, want, 1e-6) && near(r.loopDpr, want, 1e-6) && r.a === r.loopDpr && r.d === r.loopDpr, JSON.stringify(r));
+    check(`  └ [${tag}] 백버퍼는 1920x1080 을 넘지 않고 960x540 밑으로도 안 내려감 (비용 상한)`, r.w <= 1920 && r.h <= 1080 && r.w >= 960 && r.h >= 540);
+    check(`  └ [${tag}] 논리 좌표(960×540)로 그리면 캔버스 전체가 채워짐`, r.corner === '0,0,255' && r.origin === '255,0,0' && r.mid === '255,0,0', JSON.stringify({ c: r.corner, o: r.origin }));
+    const key = `${vw}x${vh}`; if (cssBase[key] === undefined) cssBase[key] = r.cssW;
+    check(`  └ [${tag}] 화면에 보이는 크기(CSS px)는 dpr 과 무관하게 같고 16:9`, Math.abs(r.cssW - cssBase[key]) < 1 && Math.abs(r.cssW / r.cssH - 16 / 9) < 0.01, JSON.stringify([r.cssW, r.cssH, cssBase[key]]));
+    if (want >= 1 && want <= 2) {
+      const ratio = r.w / (r.cssW * dsf);
+      check(`  └ [${tag}] 백버퍼 화소 ÷ 화면 실제 화소 = ${ratio.toFixed(3)} (한도 안에서는 1:1 에 가까움 → 또렷)`, Math.abs(ratio - 1) < 0.012 || (want === 2 && ratio < 1) || (want === 1 && ratio > 1), `${r.w} / ${(r.cssW * dsf).toFixed(1)}`);
+    }
+    check(`  └ [${tag}] 오류 없음`, t.errors.length === 0, t.errors.join('|'));
     await t.close();
   }
-  // 실행 중에 DPR 이 바뀌어도(브라우저 확대/모니터 이동) 다음 그리기에서 따라감
-  const t = await openCustom({ contextOpts: { deviceScaleFactor: 1 } });
+
+  // 창 크기가 바뀌면 다시 계산 (resize 이벤트) — 뷰포트를 바꾸고 다음 그리기에서 따라감, 다시 돌아오면 원래 크기
+  const t = await openCustom({ contextOpts: { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 } });
+  const frames = () => t.page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const bw = () => t.page.evaluate(() => [Loop.canvas.width, Loop.canvas.height, Loop.dpr, Loop.ctx.getTransform().a]);
+  const got = [];
+  for (const [w, h] of [[1280, 720], [1920, 1080], [640, 360], [1600, 900], [1280, 720]]) { await t.page.setViewportSize({ width: w, height: h }); await frames(); got.push(await bw()); }
+  check('창 크기를 1280→1920→640→1600→1280 으로 바꾸면 캔버스가 1280x720 → 1920x1080 → 960x540 → 1600x900 → 1280x720 으로 따라감', JSON.stringify(got.map(g => [g[0], g[1]])) === '[[1280,720],[1920,1080],[960,540],[1600,900],[1280,720]]', JSON.stringify(got));
+  check('  └ 그때마다 변환 배율 = Loop.dpr = 캔버스 폭/960 (변환 행렬이 32비트라 getTransform().a 와 Loop.dpr 은 정확히 같음)', got.every(g => near(g[2], g[0] / 960, 1e-6) && g[3] === g[2]), JSON.stringify(got));
+  // 실행 중에 DPR 이 바뀌어도(브라우저 확대/모니터 이동) 다음 그리기에서 따라감 (뷰포트 1280x720 고정: 1 → 1280, 1.5/2 → 상한 1920)
   const cdp = await t.context.newCDPSession(t.page);
   const sizes = [];
   for (const f of [1, 2, 1.5, 1]) {
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: f, mobile: false });
-    await t.page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await frames();
     sizes.push(await t.page.evaluate(() => { const c = document.getElementById('game'); return [c.width, c.height, window.devicePixelRatio, c.getContext('2d').getTransform().a]; }));
   }
-  check('실행 중 DPR 이 1→2→1.5→1 로 바뀌어도 캔버스 크기와 변환이 따라감', JSON.stringify(sizes.map(s => [s[0], s[3]])) === '[[960,1],[1920,2],[1440,1.5],[960,1]]', JSON.stringify(sizes));
+  check('실행 중 DPR 이 1→2→1.5→1 로 바뀌어도 캔버스 크기와 변환이 따라감 (1280→1920→1920→1280)', JSON.stringify(sizes.map(s => [s[0], Math.round(s[3] * 1000) / 1000])) === '[[1280,1.333],[1920,2],[1920,2],[1280,1.333]]', JSON.stringify(sizes));
+  // 그리기 비용: 가장 큰 백버퍼(1920x1080)에서도 한 프레임 그리기가 느려지지 않음 (넉넉한 상한 — 소프트웨어 렌더링 헤드리스 기준)
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
+  await frames();
+  const cost = await t.page.evaluate(() => {
+    Scenes.P2 = { draw(ctx) { const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#9be3ff'); g.addColorStop(1, '#ffd6f2'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); Draw.text(ctx, '젤리 던전', W / 2, 200, { size: 60 }); } }; Game.scene = 'P2';
+    Loop.draw(); const t0 = performance.now(); for (let i = 0; i < 20; i++) Loop.draw(); return { ms: (performance.now() - t0) / 20, w: Loop.canvas.width };
+  });
+  check(`1920x1080 백버퍼(${cost.w}px)에서 Loop.draw 한 번이 평균 ${cost.ms.toFixed(1)}ms (< 25ms, 컨텍스트 초기화 포함)`, cost.w === 1920 && cost.ms < 25, JSON.stringify(cost));
+  check('창/DPR 이 바뀌는 동안 페이지 오류 없음', t.errors.length === 0, t.errors.join('|'));
   await t.close();
+
+  // 창 크기가 아니라 CSS 만 바뀌어도(예: 화면 레이아웃이 #app 크기를 바꿈) ResizeObserver 가 같은 프레임 안에 따라감
+  const grow = (page, css) => page.evaluate(css => { document.getElementById('app').style.cssText += css; }, css);
+  const waitFrames = (page, n) => page.evaluate(n => new Promise(r => { const f = k => (k <= 0 ? r() : requestAnimationFrame(() => f(k - 1))); f(n); }), n);
+  let t2 = await openCustom({ contextOpts: { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 } });
+  await waitFrames(t2.page, 2);
+  const w0 = await t2.page.evaluate(() => Loop.canvas.width);
+  await grow(t2.page, ';width:1920px;height:1080px');
+  await waitFrames(t2.page, 2);
+  const w1 = await t2.page.evaluate(() => [Loop.canvas.width, Loop.canvas.height]);
+  check('창 크기는 그대로 #app 의 CSS 크기만 1280→1920 으로 바뀌어도 (resize 이벤트 없이) 2프레임 안에 캔버스가 1920x1080 으로 따라감', w0 === 1280 && w1[0] === 1920 && w1[1] === 1080, JSON.stringify([w0, w1]));
+  await t2.close();
+  // ResizeObserver 가 없는 브라우저: resize 이벤트는 바로 반영하고, CSS 만 바뀐 경우는 30프레임 안에 다시 재서 반영
+  t2 = await openCustom({ contextOpts: { viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 }, init: () => { delete window.ResizeObserver; } });
+  await waitFrames(t2.page, 2);
+  check('(ResizeObserver 없음) 기준 크기 1280', await t2.page.evaluate(() => typeof window.ResizeObserver === 'undefined' && Loop.canvas.width) === 1280);
+  await t2.page.setViewportSize({ width: 1920, height: 1080 });
+  await waitFrames(t2.page, 2);
+  check('(ResizeObserver 없음) 창을 키우면 resize 이벤트로 바로 1920 으로', await t2.page.evaluate(() => Loop.canvas.width) === 1920);
+  await t2.page.setViewportSize({ width: 1280, height: 720 });
+  await waitFrames(t2.page, 2);
+  await grow(t2.page, ';width:1920px;height:1080px');
+  await waitFrames(t2.page, 45);
+  check('(ResizeObserver 없음) CSS 만 바뀌면 30프레임 안에 다시 재서 따라감', await t2.page.evaluate(() => Loop.canvas.width) === 1920);
+  check('(ResizeObserver 없음) 오류 없음', t2.errors.length === 0, t2.errors.join('|'));
+  await t2.close();
 });
 
 // =====================================================================
@@ -1674,8 +1749,364 @@ await section('디버그 씬 스크린샷 (눈으로 확인)', async () => {
 });
 
 // =====================================================================
+await section('FX.reduceMotion: 저장된 설정이 없으면 OS 의 동작 줄이기(prefers-reduced-motion)를 따라감', async () => {
+  // 페이지 안에서: OS 설정(mq) / FX.reduceMotion / 흔들림 최대 폭 / 번쩍임 진하기
+  const probe = t => t.page.evaluate(() => {
+    const mq = matchMedia('(prefers-reduced-motion: reduce)').matches, rm = FX.reduceMotion;
+    FX.clear(); FX.shake(10, 30); let sh = 0; for (let i = 0; i < 30; i++) { sh = Math.max(sh, Math.abs(FX.shakeOff.x), Math.abs(FX.shakeOff.y)); FX.update(); }
+    FX.clear(); FX.flash('#fff', 20); const fl = FX.flashAlpha; FX.clear();
+    return { mq, rm, sh, fl };
+  });
+  // 1) OS 가 '동작 줄이기' + 저장된 값 없음 → 켜짐: 흔들림 ≤ 3px, 번쩍임 ≤ 0.25
+  let t = await openCustom({ contextOpts: { reducedMotion: 'reduce' } });
+  const a = await probe(t);
+  check('OS 동작 줄이기 + 저장 없음 → FX.reduceMotion = true, 흔들림 ≤ 3px, 번쩍임 ≤ 0.25', a.mq === true && a.rm === true && a.sh <= 3 && a.fl > 0 && a.fl <= 0.25, JSON.stringify(a));
+  const plain = await t.page.evaluate(() => { const d = Object.getOwnPropertyDescriptor(FX, 'reduceMotion'); FX.reduceMotion = false; const x = FX.reduceMotion; FX.reduceMotion = true; return { plain: 'value' in d && d.writable, x, y: FX.reduceMotion }; });
+  check('reduceMotion 은 그냥 대입 가능한 값 (getter 아님): false 로 바꿨다가 true 로', plain.plain && plain.x === false && plain.y === true, JSON.stringify(plain));
+  check('  └ 오류 없음', t.errors.length === 0, t.errors.join('|')); await t.close();
+  // 2) OS 설정이 없으면(기본) 꺼짐: 흔들림이 크게(>3px), 번쩍임이 진하게(>0.4)
+  t = await openCustom({ contextOpts: { reducedMotion: 'no-preference' } });
+  const b = await probe(t);
+  check('OS 설정 없음 + 저장 없음 → FX.reduceMotion = false, 흔들림 > 3px, 번쩍임 > 0.4 (기존과 같음)', b.mq === false && b.rm === false && b.sh > 3 && b.fl > 0.4, JSON.stringify(b));
+  await t.close();
+  // 3) 저장된 설정이 있으면 그 값이 OS 보다 우선 (설정 화면에서 사용자가 고른 값)
+  t = await openCustom({ contextOpts: { reducedMotion: 'reduce' }, init: () => { try { localStorage.setItem('jd:reduceMotion', 'false'); } catch (e) { /* 무시 */ } } });
+  const c = await probe(t);
+  check('저장된 reduceMotion=false 는 OS 동작 줄이기보다 우선 (OS 는 줄이기인데 FX 는 꺼짐)', c.mq === true && c.rm === false && c.sh > 3 && c.fl > 0.4, JSON.stringify(c));
+  await t.close();
+  t = await openCustom({ contextOpts: { reducedMotion: 'no-preference' }, init: () => { try { localStorage.setItem('jd:reduceMotion', 'true'); } catch (e) { /* 무시 */ } } });
+  const d = await probe(t);
+  check('저장된 reduceMotion=true 는 OS 설정이 없어도 켜짐', d.mq === false && d.rm === true && d.sh <= 3 && d.fl <= 0.25, JSON.stringify(d));
+  await t.close();
+  // 4) 게임 도중 OS 설정이 바뀌면 따라감 (저장된 값이 없을 때만)
+  t = await openCustom({ contextOpts: { reducedMotion: 'no-preference' } });
+  const flip = async mode => { await t.page.emulateMedia({ reducedMotion: mode }); await t.page.waitForTimeout(80); return t.page.evaluate(() => FX.reduceMotion); };
+  const live = [await t.page.evaluate(() => FX.reduceMotion), await flip('reduce'), await flip('no-preference'), await flip('reduce')];
+  check('게임 도중 OS 설정이 바뀌면 FX.reduceMotion 이 따라감 (꺼짐 → 켜짐 → 꺼짐 → 켜짐)', JSON.stringify(live) === '[false,true,false,true]', JSON.stringify(live));
+  // 사용자가 설정 화면에서 직접 고르면(Store 에 저장 + FX.reduceMotion 대입) 그 뒤로는 OS 가 바뀌어도 그 값을 지킴
+  await t.page.evaluate(() => { Store.set('reduceMotion', false); FX.reduceMotion = false; });
+  const pinnedOff = [await flip('reduce'), await flip('no-preference'), await flip('reduce')];
+  check('사용자가 "끔"으로 저장했으면 OS 가 동작 줄이기로 바뀌어도 꺼진 채 유지', JSON.stringify(pinnedOff) === '[false,false,false]', JSON.stringify(pinnedOff));
+  await t.page.evaluate(() => { Store.set('reduceMotion', true); FX.reduceMotion = true; });
+  const pinnedOn = [await flip('no-preference'), await flip('reduce'), await flip('no-preference')];
+  check('사용자가 "켬"으로 저장했으면 OS 설정이 없어져도 켜진 채 유지', JSON.stringify(pinnedOn) === '[true,true,true]', JSON.stringify(pinnedOn));
+  check('  └ 오류 없음', t.errors.length === 0, t.errors.join('|')); await t.close();
+});
+
+// =====================================================================
+await section('Input: Ctrl/Cmd/Alt 가 눌린 키는 브라우저 단축키라 게임 키가 아님', async () => {
+  await reset(); await ev(() => { Input.clear(); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); document.body.focus(); });
+  const snap = () => ev(() => ({ down: Object.keys(Input.down).sort().join(), pressed: Object.keys(Input.pressed).sort().join() }));
+  // 대조군: 진짜 키보드 이벤트가 이 페이지까지 오는지 (안 오면 아래 "기록 안 됨" 검사가 공짜로 통과해 버림)
+  await page.keyboard.press('KeyQ');
+  check('대조군: 수정키 없이 누른 Q 는 Input 에 기록됨 (키보드 이벤트가 실제로 도착함)', (await snap()).pressed === 'KeyQ', JSON.stringify(await snap()));
+  await ev(() => Input.clear());
+  for (const combo of ['Control+KeyD', 'Control+KeyS', 'Control+KeyA', 'Meta+KeyD', 'Alt+KeyD', 'Control+Shift+KeyD', 'Control+Space', 'Control+KeyM']) {
+    await page.keyboard.press(combo);
+    const r = await snap();
+    check(`${combo}: 게임 키로 기록되지 않음 (Ctrl+D 가 30초 궁극기를 쓰지 않게)`, r.down === '' && r.pressed === '', JSON.stringify(r));
+  }
+  // 조합이 아닌 평소 키는 그대로, Shift 는 단축키가 아님
+  await page.keyboard.press('KeyD'); const plain = await snap();
+  await page.keyboard.press('Shift+KeyZ'); const sh = await ev(() => Input.wasPressed('KeyZ'));
+  check('Ctrl 없이 누른 D 는 평소처럼 기록됨, Shift+Z(대문자 입력)도 공격 키로 동작', plain.pressed === 'KeyD' && sh === true, JSON.stringify([plain, sh]));
+  await ev(() => Input.clear());
+  // 방향키는 예외: 달리는 중에 Ctrl/Alt/Cmd 를 스치듯 눌러도 멈추지 않음 (preventDefault 도 그대로)
+  await page.keyboard.down('Control'); await page.keyboard.down('ArrowRight');
+  const arrow = await ev(() => ({ r: Input.isDown('ArrowRight'), ctrl: Input.isDown('ControlLeft') }));
+  await page.keyboard.up('ArrowRight'); await page.keyboard.up('Control');
+  check('Ctrl 을 누른 채 방향키 → 방향키는 여전히 눌림으로 기록 (Ctrl 자체는 기록 안 함)', arrow.r === true && arrow.ctrl === false, JSON.stringify(arrow));
+  // 고착 방지: 이미 눌려 있던 (방향키 아닌) 키는 수정키가 눌리는 순간 놓음 — Mac 은 Cmd 를 누른 동안 keyup 이 오지 않음
+  await ev(() => Input.clear());
+  await page.keyboard.down('KeyA'); await page.keyboard.down('ArrowLeft');
+  const before = await snap();
+  await page.keyboard.down('Meta');
+  const after = await snap();
+  await page.keyboard.up('Meta'); await page.keyboard.up('KeyA'); await page.keyboard.up('ArrowLeft');
+  check('A 와 ← 를 누른 채 Cmd 를 누르면 A 만 놓임 (← 는 유지)', before.down === 'ArrowLeft,KeyA' && after.down === 'ArrowLeft', JSON.stringify([before, after]));
+  await ev(() => Input.clear());
+  await page.keyboard.press('KeyZ'); await page.keyboard.press('KeyX');
+  check('수정키를 뗀 뒤에는 게임 키가 다시 정상 동작', await ev(() => Input.wasPressed('KeyZ') && Input.wasPressed('KeyX')) === true);
+  await ev(() => Input.clear());
+});
+
+// =====================================================================
+await section('오류 격리: Events.emit 과 Entities.updateAll 은 한 곳의 예외가 다른 곳을 멈추지 않음', async () => {
+  await reset();
+  const r = await ev(() => {
+    const o = {};
+    // Events: 던지는 핸들러 뒤의 핸들러도 돌고, emit 은 던지지 않고, 같은 오류는 한 번만 기록
+    Events.clear(); let ran = 0, first = 0;
+    Events.on('zz.격리', () => { first++; throw new Error('핸들러 폭발 격리'); });
+    Events.on('zz.격리', () => ran++);
+    TT.grabErrors(); let thrown = false;
+    try { Events.emit('zz.격리', {}); Events.emit('zz.격리', {}); Events.emit('zz.격리', {}); } catch (e) { thrown = true; }
+    const e1 = TT.releaseErrors();
+    o.events = { first, ran, thrown, errs: e1.length, msg: e1[0] || '' };
+    // 같은 이벤트에 다른 오류가 나면 새로 기록됨
+    TT.grabErrors(); Events.clear('zz.격리'); Events.on('zz.격리', () => { throw new Error('다른 오류 격리'); }); Events.emit('zz.격리', {}); o.newMsg = TT.releaseErrors().length;
+    // Entities: update/tick 이 던지는 엔티티가 있어도 나머지는 계속 돌고 updateAll 은 던지지 않음
+    Entities.clear(); let u = 0, t = 0, moved = 0;
+    TT.mk({ type: '격리A', x: 100, y: 400, update() { throw new Error('update 격리'); } });
+    TT.mk({ type: '격리B', x: 200, y: 400, tick() { throw new Error('tick 격리'); } });
+    const ok = TT.mk({ x: 300, y: 400, update(e) { u++; e.vx = 1; }, tick() { t++; } });
+    const thrower = TT.mk({ type: '격리C', x: 50, y: 400, update(e) { e.vx = 2; throw new Error('물리 격리'); } });
+    TT.grabErrors(); let thrown2 = false;
+    try { for (let i = 0; i < 5; i++) Entities.updateAll(); } catch (e) { thrown2 = true; }
+    const e2 = TT.releaseErrors();
+    o.ents = { u, t, thrown2, errs: e2.length, x: ok.x, thrownX: thrower.x };
+    // 씬 수준: update 가 던지는 적이 있어도 updateAll 뒤의 코드(= Stage 진행)가 매 틱 실행됨 (softlock 방지)
+    Entities.clear(); let after = 0;
+    TT.mk({ type: '격리D', x: 100, y: 400, update() { throw new Error('씬 격리'); } });
+    Scenes.T = { update() { Entities.updateAll(); after++; } }; Game.scene = 'T';
+    TT.grabErrors(); Loop.step(50); o.sceneErrs = TT.releaseErrors().length; o.scene = after;
+    return o;
+  });
+  check('Events.emit: 앞 핸들러가 던져도 뒤 핸들러는 실행되고 emit 은 던지지 않음 (3번 emit → 앞 3번·뒤 3번)', r.events.first === 3 && r.events.ran === 3 && r.events.thrown === false, JSON.stringify(r.events));
+  check('Events.emit: 같은 오류는 한 번만 console.error (3번 던져도 1번), 이벤트 이름이 메시지에 들어감', r.events.errs === 1 && /zz\.격리/.test(r.events.msg), JSON.stringify([r.events.errs, r.events.msg]));
+  check('Events.emit: 다른 오류가 나면 다시 기록됨', r.newMsg === 1, String(r.newMsg));
+  check('Entities.updateAll: update/tick 이 던지는 엔티티가 있어도 정상 엔티티는 5틱 모두 update/tick 실행, updateAll 은 던지지 않음, 오류는 던지는 엔티티·훅마다 1번씩(3번)', r.ents.u === 5 && r.ents.t === 5 && r.ents.thrown2 === false && r.ents.errs === 3, JSON.stringify(r.ents));
+  check('Entities.updateAll: update 가 던져도 그 엔티티의 물리(이동)는 계속, 정상 엔티티도 이동', r.ents.x > 300 && r.ents.thrownX > 50, JSON.stringify([r.ents.x, r.ents.thrownX]));
+  check('씬 update 안에서 엔티티 하나가 계속 던져도 updateAll 뒤의 코드가 매 틱 실행됨 (50틱 모두) — Stage 가 멈추지 않는 이유', r.scene === 50 && r.sceneErrs === 1, JSON.stringify([r.scene, r.sceneErrs]));
+});
+
+// =====================================================================
+await section('Loop.draw: 그리기 오류가 캔버스 상태(save/clip)를 남기지 않음', async () => {
+  await reset();
+  const r = await ev(() => {
+    const o = {}; TT.grabErrors();
+    const ctx = Loop.canvas.getContext('2d');
+    const green = () => { Scenes.GR = { draw(c) { c.fillStyle = '#00ff00'; c.fillRect(0, 0, W, H); } }; Game.scene = 'GR'; Loop.draw(); return TT.px(480, 270).join(); };
+    o.baseline = green();
+    // (a) 씬 안의 try/catch 가 오류를 삼켜도 (Scenes.play.draw 가 HUD/배경/오버레이에 하는 것처럼) 남은 clip 이 이후 모든 프레임을 자르지 않음
+    Scenes.LK = { draw(c) { try { c.save(); c.beginPath(); c.rect(0, 0, 50, 50); c.clip(); throw new Error('clip 누수'); } catch (e) { /* 씬이 삼킴 */ } } };
+    Game.scene = 'LK'; for (let i = 0; i < 6; i++) Loop.draw();
+    o.afterSwallowedClip = green();
+    // (b) 같은 일이 여러 프레임 계속돼도 (save 가 프레임마다 하나씩 새도) 그 다음 프레임은 깨끗하게 칠해짐
+    Scenes.LK2 = { draw(c) { try { c.save(); c.save(); c.globalAlpha = 0.2; c.translate(300, 300); c.beginPath(); c.rect(0, 0, 10, 10); c.clip(); throw new Error('누수 둘'); } catch (e) { /* 삼킴 */ } } };
+    Game.scene = 'LK2'; for (let i = 0; i < 200; i++) Loop.draw();
+    o.afterManyLeaks = green();
+    // (c) 오류가 씬 밖으로 나온 경우: 돌아오자마자(다음 프레임 전) 변환·알파가 원래대로 (짝 안 맞는 save 를 restore 로 정리)
+    Scenes.TH = { draw(c) { c.save(); c.save(); c.globalAlpha = 0.1; c.translate(500, 500); c.scale(2, 2); throw new Error('draw 밖으로 예외'); } };
+    Game.scene = 'TH'; Loop.draw();
+    const tr = ctx.getTransform(); o.afterThrow = [tr.a, tr.e, tr.f, ctx.globalAlpha, Loop.dpr];
+    o.errs = TT.releaseErrors().length;
+    Game.scene = 'GR';
+    return o;
+  });
+  check('기준: 평소에는 전체 화면이 칠해짐', r.baseline === '0,255,0', r.baseline);
+  check('씬이 삼킨 clip(save+clip 뒤 예외)이 남아도 다음 프레임이 화면 전체를 칠함 (leaked clip 으로 화면이 얼어붙지 않음)', r.afterSwallowedClip === '0,255,0', r.afterSwallowedClip);
+  check('save/clip 이 프레임마다 새는 씬을 200프레임 그려도 그 다음 프레임은 정상', r.afterManyLeaks === '0,255,0', r.afterManyLeaks);
+  check('scene.draw 가 예외를 밖으로 던지면 곧바로 save 를 정리 (변환 = 배율만, 이동 0, 알파 1)', Math.abs(r.afterThrow[0] - r.afterThrow[4]) < 1e-6 && r.afterThrow[1] === 0 && r.afterThrow[2] === 0 && r.afterThrow[3] === 1, JSON.stringify(r.afterThrow));
+  check('  └ 삼킨 오류와 던진 오류가 각각 한 번씩만 기록됨 (같은 메시지는 반복 안 함)', r.errs === 1, String(r.errs));   // LK/LK2 는 씬이 삼켜서 로그 없음, TH 만 1번
+
+  // ctx.reset() 이 없는 구형 브라우저: 캔버스 크기를 다시 대입하는 대체 경로로도 같은 결과
+  const t = await openCustom({ init: () => { delete CanvasRenderingContext2D.prototype.reset; } });
+  const fb = await t.page.evaluate(() => {
+    const o = { hasReset: typeof Loop.canvas.getContext('2d').reset };
+    const green = () => { Scenes.GR = { draw(c) { c.fillStyle = '#00ff00'; c.fillRect(0, 0, W, H); } }; Game.scene = 'GR'; Loop.draw(); const c = Loop.canvas, d = Loop.ctx.getImageData(Math.round(480 * Loop.dpr), Math.round(270 * Loop.dpr), 1, 1).data; return [d[0], d[1], d[2]].join(); };
+    Scenes.LK = { draw(c) { try { c.save(); c.beginPath(); c.rect(0, 0, 50, 50); c.clip(); throw new Error('clip 누수 (reset 없음)'); } catch (e) { /* 삼킴 */ } } };
+    Game.scene = 'LK'; for (let i = 0; i < 5; i++) Loop.draw();
+    o.afterClip = green();
+    const t0 = performance.now(); for (let i = 0; i < 60; i++) Loop.draw(); o.ms = (performance.now() - t0) / 60;
+    o.size = [Loop.canvas.width, Loop.canvas.height]; o.dpr = Loop.dpr;
+    const tr = Loop.ctx.getTransform(); o.tr = [tr.a, tr.d, tr.e, tr.f];
+    return o;
+  });
+  check('ctx.reset 이 없어도(구형 브라우저) 삼킨 clip 이 남지 않고, 캔버스 크기·변환이 유지되고 한 프레임 그리기도 느리지 않음', fb.hasReset === 'undefined' && fb.afterClip === '0,255,0' && fb.size[0] === Math.round(960 * fb.dpr) && fb.tr[0] === fb.dpr && fb.tr[1] === fb.dpr && fb.tr[2] === 0 && fb.tr[3] === 0 && fb.ms < 25, JSON.stringify(fb));
+  check('  └ 오류 없음', t.errors.length === 0, t.errors.join('|'));
+  await t.close();
+});
+
+// =====================================================================
+await section('Loop: 실제 시간 경로 (rAF 콜백에 합성 타임스탬프) — 틱 속도 · 떨림 보정 · 100ms 상한', async () => {
+  const g = await openGame({ rafStub: true });
+  await g.page.evaluate(() => { Scenes.T = {}; Game.scene = 'T'; Game.paused = false; Loop.hooks.length = 0; });
+  const rates = [30, 56, 57, 58, 59, 59.94, 60, 61, 62, 63, 64, 75, 120, 144, 240];
+  const res = {};
+  for (const hz of rates) res[hz] = await simulateFrames(g.page, { hz, seconds: 10 });
+  const bad = rates.filter(hz => Math.abs(res[hz].rate / 60 - 1) > 0.01);
+  check(`주사율 ${rates.join('/')}Hz 에서 10초 동안 초당 틱이 60 의 ±1% 안 (56~64Hz 에서도 게임 속도가 화면에 끌려가지 않음)`, bad.length === 0, bad.map(hz => `${hz}Hz=${res[hz].rate.toFixed(2)}`).join(' ') || rates.map(hz => `${hz}:${res[hz].rate.toFixed(1)}`).join(' '));
+  const keyRates = [59, 60, 62, 64, 144].map(hz => `${hz}Hz=${res[hz].ticks}틱`).join(' ');
+  check(`  └ 10초(= 600틱 기준) 틱 수: ${keyRates}`, [59, 60, 62, 64, 144].every(hz => res[hz].ticks >= 594 && res[hz].ticks <= 606));
+  check('  └ 한 프레임에 몰아서 도는 틱은 56~64Hz 에서 최대 2개, 그 이상 주사율에서는 1개 이하 (소나기처럼 몰리지 않음)', [56, 57, 58, 59, 60, 61, 62, 63, 64].every(hz => Math.max(...res[hz].perFrame) <= 2) && [75, 120, 144, 240].every(hz => Math.max(...res[hz].perFrame) <= 1), rates.map(hz => `${hz}:${Math.max(...res[hz].perFrame)}`).join(' '));
+  const ex = res[60].perFrame;
+  check('정확히 60Hz: 프레임마다 틱이 딱 1개 (0개나 2개가 섞이는 떨림 없음)', ex.every(x => x === 1), `${ex.filter(x => x !== 1).length}개 프레임이 1틱이 아님`);
+  const jit = await simulateFrames(g.page, { hz: 60, seconds: 10, jitter: 0.5 });
+  check('60Hz + 시각 측정 오차 ±0.5ms: 그래도 프레임마다 틱 1개 (떨림 보정이 살아 있음) 이고 평균 60/초', jit.perFrame.every(x => x === 1) && Math.abs(jit.rate / 60 - 1) < 0.01, `1틱 아닌 프레임 ${jit.perFrame.filter(x => x !== 1).length}개, ${jit.rate.toFixed(2)}/초`);
+  const j62 = await simulateFrames(g.page, { hz: 62, seconds: 10, jitter: 0.4 });
+  check('62Hz + 오차 ±0.4ms: 평균 60/초, 한 프레임 최대 2틱', Math.abs(j62.rate / 60 - 1) < 0.01 && Math.max(...j62.perFrame) <= 2, `${j62.rate.toFixed(2)}/초 최대 ${Math.max(...j62.perFrame)}`);
+  // 오래 멈췄다 와도 (백그라운드 탭) 한 프레임에 100ms(≈6틱) 이상 몰아서 돌지 않음, 짧은 멈춤은 따라잡음
+  const gap = await simulateFrames(g.page, { hz: 60, seconds: 1, gaps: [{ at: 30, ms: 5000 }] });
+  check('5초 멈췄다 돌아와도 그 프레임의 틱은 6개 이하 (폭주 방지: dt 상한 100ms)', Math.max(...gap.perFrame) <= 6 && gap.perFrame[29] <= 6, `프레임 30: ${gap.perFrame[29]}틱, 최대 ${Math.max(...gap.perFrame)}`);
+  const hitch = await simulateFrames(g.page, { hz: 60, seconds: 1, gaps: [{ at: 30, ms: 33 }] });
+  check('프레임 하나가 33ms 늦으면(한 번 버벅임) 그 프레임에서 2~3틱으로 따라잡음', hitch.perFrame[29] >= 2 && hitch.perFrame[29] <= 3, `프레임 30: ${hitch.perFrame[29]}틱`);
+  const manual = await g.page.evaluate(() => { Loop.manual = true; const b = Loop.tickCount; const cb = window.__rafCb; const t0 = performance.now(); for (let i = 1; i <= 60; i++) cb(t0 + i * 16.667); return Loop.tickCount - b; });
+  check('Loop.manual=true 면 rAF 콜백이 와도 틱은 0', manual === 0, String(manual));
+  check('실시간 경로 시험 중 페이지 오류 없음', g.errors.length === 0, g.errors.join('|'));
+  await g.close();
+});
+
+// =====================================================================
+await section('오디오 생명주기: 탭이 숨겨지면 AudioContext 를 멈추고, 멈춰 있는 동안은 소리를 만들지 않음', async () => {
+  const t = await openCustom({ init: () => {
+    const Base = window.AudioContext; if (!Base) return;
+    window.__acs = []; window.__nodes = 0;
+    window.AudioContext = class extends Base {
+      constructor(...a) { super(...a); window.__acs.push(this); }
+      createOscillator(...a) { window.__nodes++; return super.createOscillator(...a); }
+      createBufferSource(...a) { window.__nodes++; return super.createBufferSource(...a); }
+    };
+  } });
+  const state = () => t.page.evaluate(() => (window.__acs[0] || {}).state);
+  const until = async (want, ms = 3000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if ((await state()) === want) return true; await t.page.waitForTimeout(40); } return false; };
+  const setHidden = h => t.page.evaluate(h => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => h }); document.dispatchEvent(new Event('visibilitychange')); }, h);
+  await t.page.evaluate(() => SFX.init());
+  check('SFX.init 뒤 AudioContext 가 실행 중(running)', await until('running'), String(await state()));
+  const n0 = await t.page.evaluate(() => { const b = window.__nodes; SFX.play('hit'); return window.__nodes - b; });
+  check('실행 중에는 SFX.play 가 소리 부품(oscillator/noise)을 만듦', n0 > 0, String(n0));
+  await setHidden(true);
+  check('탭이 숨겨지면(visibilitychange) AudioContext 가 suspended — 음악이 백그라운드에서 계속 나오지 않음', await until('suspended'), String(await state()));
+  const n1 = await t.page.evaluate(() => { const b = window.__nodes; ['coin', 'swing', 'jump', 'ui'].forEach(n => SFX.play(n)); return window.__nodes - b; });
+  check('멈춰 있는 동안(suspended) SFX.play 는 소리 부품을 하나도 만들지 않음 (풀리는 순간 한꺼번에 터지는 것 방지)', n1 === 0, String(n1));
+  await setHidden(false);
+  check('탭이 다시 보이면 AudioContext 가 running 으로 돌아옴', await until('running'), String(await state()));
+  await t.page.waitForTimeout(60);
+  const n2 = await t.page.evaluate(() => { const b = window.__nodes; SFX.play('heal'); return window.__nodes - b; });
+  check('돌아온 뒤에는 다시 소리를 만듦', n2 > 0, String(n2));
+  check('오디오 생명주기 시험 중 페이지 오류 없음', t.errors.length === 0, t.errors.join('|'));
+  await t.close();
+});
+
+// =====================================================================
+await section('tools/build-local.mjs: 깨진 빌드를 "성공"이라고 하지 않음 (src 임시 복사본으로 시험)', async () => {
+  const mkEnv = () => {
+    const dir = mkTmp('jd-build-');
+    mkdirSync(join(dir, 'tools')); mkdirSync(join(dir, 'src'));
+    copyFileSync(join(root, 'tools', 'build-local.mjs'), join(dir, 'tools', 'build-local.mjs'));
+    for (const f of readdirSync(join(root, 'src'))) if (/\.html$/.test(f)) copyFileSync(join(root, 'src', f), join(dir, 'src', f));
+    return dir;
+  };
+  const edit = (dir, file, fn) => { const p = join(dir, 'src', file); writeFileSync(p, fn(readFileSync(p, 'utf8'))); };
+  const build = (dir, ...a) => spawnSync(process.execPath, [join(dir, 'tools', 'build-local.mjs'), ...a], { encoding: 'utf8', cwd: dir });
+  const outOf = (dir, name = 'x.html') => join(dir, 'dist', name);
+  const fails = (r, dir, re, name = 'x.html') => r.status === 1 && re.test(r.stderr) && !existsSync(outOf(dir, name));
+  const msg = r => (r.stderr + r.stdout).split('\n').slice(0, 4).join(' | ').slice(0, 400);
+  const openTag = '<script>';
+
+  // 기준: 복사본이 그대로 빌드되고, 결과가 진짜 src 로 빌드한 것과 같음
+  let dir = mkEnv();
+  let r = build(dir, '--out', 'dist/x.html');
+  const real = spawnSync(process.execPath, [join(root, 'tools', 'build-local.mjs'), '--out', join(dir, 'dist', 'real.html')], { encoding: 'utf8' });
+  check('기준: src 복사본이 문제없이 빌드됨 (종료 0, 결과 파일 생성)', r.status === 0 && existsSync(outOf(dir)) && /✓/.test(r.stdout), msg(r));
+  check('  └ 복사본 빌드 결과 = 진짜 저장소 src 로 빌드한 결과 (복사가 충실함)', real.status === 0 && readFileSync(outOf(dir), 'utf8') === readFileSync(join(dir, 'dist', 'real.html'), 'utf8'));
+
+  // 1) 파일끼리 최상위 이름 충돌 (R-05 재현 1): const / let / class / function / 구조분해 / 쉼표 선언
+  const dup = (label, code, re) => {
+    const d = mkEnv(); edit(d, 'js_ui.html', t => t.replace(openTag, openTag + '\n' + code));
+    const x = build(d, '--out', 'dist/x.html');
+    check(`최상위 이름 충돌 — ${label}: 빌드 실패(종료 1), 두 파일 이름과 선언 이름을 알려줌, 결과 파일 없음`, fails(x, d, re) && /js_ui\.html/.test(x.stderr), msg(x));
+  };
+  dup('js_stage 의 const Stage 를 js_ui 에서 또 선언', 'const Stage = {};', /'Stage'.*js_stage\.html.*js_ui\.html|'Stage'.*js_ui\.html.*js_stage\.html/);
+  dup('core 의 const 를 let 으로', 'let Loop = 1;', /'Loop'/);
+  dup('class 로 core 의 이름을', 'class Cam {}', /'Cam'/);
+  dup('function 이 core 의 const clamp 와', 'function clamp() {}', /'clamp'/);
+  dup('구조분해 const { a, W } = x 의 W', 'const { q: W2, W } = {};', /'W'/);
+  dup('배열 구조분해 const [Zed, FX] = …', 'const [Zed, FX] = [1, 2];', /'FX'/);
+  dup('쉼표 선언 const a1 = 1, Game = 2', 'const a1 = 1, Game = 2;', /'Game'/);
+  dup('var 로 core 이름을', 'var Entities = 1;', /'Entities'/);
+  dup('브라우저가 이미 쓰는 전역 이름(location)', 'const location = 1;', /'location'/);
+  // 같은 파일 안의 함수/블록 안 선언, 주석/문자열/템플릿/정규식 안의 글자는 충돌이 아님 (오탐 없음)
+  dir = mkEnv();
+  edit(dir, 'js_ui.html', t => t.replace(openTag, openTag + `
+const UI_NOFALSE = { a: 1 };
+function uiHelper() { const W = 1, Loop = 2; let clamp = 3; return W + Loop + clamp; }
+{ const blockScoped = 1; }
+for (const Stage of [1]) { void Stage; }
+// const Game = 1;   /* class Cam {} */
+const uiStr = 'const Stage = 1; function clamp() {}', uiTpl = \`const Loop = \${ \`function Cam() {} \${ 1 } \` }\`, uiRe = /const Game = [}]/g, uiDiv = 4 / 2 / 1;
+const uiObj = { Game: 1, W: 2, method() { const FX = 1; return FX; } };
+`));
+  r = build(dir, '--out', 'dist/x.html');
+  check('오탐 없음: 함수/블록/for 안의 선언과 주석·문자열·템플릿·정규식 안의 "const Stage" 같은 글자는 충돌로 보지 않음', r.status === 0 && existsSync(outOf(dir)), msg(r));
+
+  // 2) 속성이 붙은 <script> (R-05 재현 2)
+  dir = mkEnv();
+  edit(dir, 'js_main.html', t => t.replace(openTag, '<script type="text/javascript">').replace('</script>', 'let = = ;\n</script>'));
+  r = build(dir, '--out', 'dist/x.html');
+  check('속성이 붙은 <script type="text/javascript"> 안의 문법 오류도 잡음 (파일 이름과 줄 번호)', fails(r, dir, /js_main\.html:\d+/), msg(r));
+  dir = mkEnv();
+  edit(dir, 'js_main.html', t => t.replace(openTag, '<script type="text/javascript">'));
+  r = build(dir, '--out', 'dist/x.html');
+  check('type="text/javascript" 는 속성 없는 <script> 와 같은 뜻이라 허용 (정상 코드면 빌드 성공)', r.status === 0 && existsSync(outOf(dir)), msg(r));
+  for (const [label, tag] of [['type="module"', '<script type="module">'], ['src=', '<script src="https://example.com/x.js">'], ['async', '<script async>'], ['defer', '<script defer>'], ['type=text/template', '<script type="text/template">'], ['대문자 태그 + type=module', '<SCRIPT TYPE="module">']]) {
+    dir = mkEnv(); edit(dir, 'js_main.html', t => t.replace(openTag, tag));
+    r = build(dir, '--out', 'dist/x.html');
+    check(`속성이 붙은 script 태그 ${label} 는 거부 (Apps Script 가 다르게 처리할 수 있음)`, fails(r, dir, /js_main\.html.*속성이 붙은 script/), msg(r));
+  }
+  dir = mkEnv(); edit(dir, 'js_ui.html', t => t.replace('</script>', '</script>\n<script>\nlet = = ;\n</script>'));
+  r = build(dir, '--out', 'dist/x.html');
+  check('한 파일에 <script> 가 여러 개여도 전부 검사 (두 번째의 문법 오류)', fails(r, dir, /js_ui\.html:\d+/), msg(r));
+  dir = mkEnv(); edit(dir, 'js_ui.html', t => t.replace('</script>', "const s = '</script>';\n</script>"));
+  r = build(dir, '--out', 'dist/x.html');
+  check('JS 문자열 안의 </script> 는 짝이 안 맞는다고 실패', fails(r, dir, /js_ui\.html/), msg(r));
+  dir = mkEnv(); edit(dir, 'index.html', t => t.replace('</body>', '<script>var x = 1;</script>\n</body>'));
+  r = build(dir, '--out', 'dist/x.html');
+  check('index.html 에 직접 쓴 <script> 는 거부 (코드는 js_*.html 로)', fails(r, dir, /index\.html.*<script>/), msg(r));
+  dir = mkEnv(); edit(dir, 'js_ui.html', t => t.replace(openTag, openTag + "\nconst bad = '<?= 1 ?>';"));
+  r = build(dir, '--out', 'dist/x.html');
+  check('JS 문자열 안의 "<?" (Apps Script 템플릿을 깨뜨림) 는 실패', fails(r, dir, /스크립틀릿/), msg(r));
+
+  // 3) include 가 빠지거나 겹치거나 없는 파일 (R-05 재현 3)
+  dir = mkEnv(); edit(dir, 'index.html', t => t.replace("<?!= include('js_main') ?>\n", ''));
+  r = build(dir, '--out', 'dist/x.html');
+  check("index.html 에서 include('js_main') 가 빠지면 실패 (src/js_main.html 이 게임에 안 들어간다고 알려줌)", fails(r, dir, /js_main\.html.*include/), msg(r));
+  dir = mkEnv(); edit(dir, 'index.html', t => t.replace("<?!= include('style') ?>\n", ''));
+  r = build(dir, '--out', 'dist/x.html');
+  check("style.html 이 빠져도 실패 (js 가 아닌 파일도 마찬가지)", fails(r, dir, /style\.html.*include/), msg(r));
+  dir = mkEnv(); edit(dir, 'index.html', t => t.replace("<?!= include('js_ui') ?>", "<?!= include('js_ui') ?>\n<?!= include('js_ui') ?>"));
+  r = build(dir, '--out', 'dist/x.html');
+  check("같은 include('js_ui') 가 두 번 들어가면 실패 (const 가 두 번 선언돼 깨짐)", fails(r, dir, /include\('js_ui'\).*2번/), msg(r));
+  dir = mkEnv(); edit(dir, 'index.html', t => t.replace("<?!= include('js_main') ?>", "<?!= include('js_main') ?>\n<?!= include('js_nope') ?>"));
+  r = build(dir, '--out', 'dist/x.html');
+  check("없는 파일을 include 하면 실패 (파일 이름을 알려줌)", fails(r, dir, /js_nope/), msg(r));
+  dir = mkEnv(); edit(dir, 'index.html', t => t.replace("<?!= include('js_main') ?>\n", '').replace("<?!= include('js_core') ?>", "<?!= include('js_main') ?>\n<?!= include('js_core') ?>"));
+  r = build(dir, '--out', 'dist/x.html');
+  check("js_main 이 js_core 앞에 오도록 순서를 바꾸면 실패 (core 가 맨 먼저, main 이 맨 마지막이어야 함)", fails(r, dir, /js_core.*맨 먼저/) && /js_main.*맨 마지막/.test(r.stderr), msg(r));
+  dir = mkEnv(); edit(dir, 'index.html', t => t.replace("<?!= include('js_ui') ?>\n", '').replace("<?!= include('js_main') ?>", "<?!= include('js_main') ?>\n<?!= include('js_ui') ?>"));
+  r = build(dir, '--out', 'dist/x.html');
+  check("js_main 뒤에 다른 모듈을 include 해도 실패", fails(r, dir, /js_main.*맨 마지막/), msg(r));
+  dir = mkEnv(); writeFileSync(join(dir, 'src', 'js_extra.html'), '<script>\nconst Extra = 1;\n</script>\n');
+  r = build(dir, '--out', 'dist/x.html');
+  check("src 에 새 js_extra.html 을 만들고 index.html 에 안 붙이면 실패", fails(r, dir, /js_extra\.html.*include/), msg(r));
+  dir = mkEnv(); edit(dir, 'js_ui.html', t => t.replace('</script>', '}\n</script>'));
+  r = build(dir, '--out', 'dist/x.html');
+  check('기존 검사 유지: 일반 문법 오류는 파일 이름과 함께 실패', fails(r, dir, /js_ui\.html/), msg(r));
+  r = build(dir, '--out');
+  check('--out 뒤에 경로가 없으면 안내하고 실패', r.status === 1 && /--out/.test(r.stderr), msg(r));
+
+  // 4) --check: 이미 있는 dist 파일이 src 로 새로 빌드한 것과 같은지 (R-11)
+  dir = mkEnv();
+  r = build(dir);
+  check('기본 출력은 dist/index.html', r.status === 0 && existsSync(join(dir, 'dist', 'index.html')), msg(r));
+  r = build(dir, '--check');
+  check('--check: 방금 빌드한 dist/index.html 과 같으면 종료 0', r.status === 0 && /똑같아요/.test(r.stdout), msg(r));
+  edit(dir, 'js_main.html', t => t.replace('Loop.start();', 'Loop.start(); // 빌드 안 한 수정'));
+  const before = readFileSync(join(dir, 'dist', 'index.html'), 'utf8');
+  r = build(dir, '--check');
+  check('--check: src 를 고치고 빌드를 안 했으면 종료 1 + npm run build 안내 + dist 는 건드리지 않음', r.status === 1 && /npm run build/.test(r.stderr) && /최신이 아니에요/.test(r.stderr) && readFileSync(join(dir, 'dist', 'index.html'), 'utf8') === before, msg(r));
+  r = build(dir); r = build(dir, '--check');
+  check('--check: 다시 빌드하면 통과', r.status === 0, msg(r));
+  r = build(dir, '--check', '--out', 'dist/없는파일.html');
+  check('--check: 파일이 없으면 종료 1 + npm run build 안내', r.status === 1 && /없어요/.test(r.stderr) && /npm run build/.test(r.stderr), msg(r));
+  edit(dir, 'js_ui.html', t => t.replace(openTag, openTag + '\nconst Stage = 1;'));
+  r = build(dir, '--check');
+  check('--check: src 자체가 깨져 있으면 그 문제를 보여주고 종료 1', r.status === 1 && /'Stage'/.test(r.stderr), msg(r));
+});
+
+// =====================================================================
 await section('tools/test-all.mjs', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'jd-testall-'));
+  const dir = mkTmp('jd-testall-');
   mkdirSync(join(dir, 'tools', 'tests'), { recursive: true });
   copyFileSync(join(root, 'tools', 'test-all.mjs'), join(dir, 'tools', 'test-all.mjs'));
   const T = (name, body) => writeFileSync(join(dir, 'tools', 'tests', name), body);
@@ -1700,6 +2131,45 @@ await section('tools/test-all.mjs', async () => {
 });
 
 // =====================================================================
+await section('test-all / npm 스크립트: 커밋되는 dist/index.html 이 src 와 다르면 테스트 전에 실패 (R-11)', async () => {
+  // 임시 저장소: tools/test-all.mjs + tools/build-local.mjs + src 복사본 + 통과하는 가짜 테스트 하나
+  const dir = mkTmp('jd-dist-');
+  mkdirSync(join(dir, 'tools', 'tests'), { recursive: true }); mkdirSync(join(dir, 'src'));
+  for (const f of ['test-all.mjs', 'build-local.mjs']) copyFileSync(join(root, 'tools', f), join(dir, 'tools', f));
+  for (const f of readdirSync(join(root, 'src'))) if (/\.html$/.test(f)) copyFileSync(join(root, 'src', f), join(dir, 'src', f));
+  writeFileSync(join(dir, 'tools', 'tests', 'ok.test.mjs'), `console.log('PASS 가짜'); console.log('\\n1/1 통과'); process.exit(0);`);
+  const run = (env, ...a) => spawnSync(process.execPath, [join(dir, 'tools', 'test-all.mjs'), ...a], { encoding: 'utf8', cwd: dir, env: { ...process.env, GAME_HTML: '', ...env } });
+  const build = (...a) => spawnSync(process.execPath, [join(dir, 'tools', 'build-local.mjs'), ...a], { encoding: 'utf8', cwd: dir });
+  const all = r => r.stdout + r.stderr;
+
+  let r = run({});
+  check('dist/index.html 이 아예 없으면 테스트를 돌리지 않고 종료 1 + npm run build 안내', r.status === 1 && /npm run build/.test(all(r)) && !/ok\.test\.mjs/.test(r.stdout), all(r).slice(-300));
+  build();
+  r = run({});
+  check('방금 빌드한 dist/index.html 이면 확인 통과 → 테스트 실행 (종료 0)', r.status === 0 && /똑같아요/.test(r.stdout) && /ok\.test\.mjs\s+PASS/.test(r.stdout), all(r).slice(-300));
+  const p = join(dir, 'src', 'js_main.html'); writeFileSync(p, readFileSync(p, 'utf8').replace('Loop.start();', 'Loop.start(); // 빌드 안 한 수정'));
+  r = run({});
+  check('src 만 고치고 빌드를 안 하면: 테스트 시작 전에 종료 1, "dist/index.html 이 src/ 와 달라" + npm run build 안내, 테스트 파일은 실행 안 함', r.status === 1 && /최신이 아니에요/.test(all(r)) && /npm run build/.test(all(r)) && !/ok\.test\.mjs\s+(PASS|FAIL)/.test(r.stdout), all(r).slice(-400));
+  r = run({}, '--quick');
+  check('--quick (npm run test:quick) 도 같은 확인을 함', r.status === 1 && /npm run build/.test(all(r)), all(r).slice(-200));
+  r = run({}, 'ok');
+  check('이름 필터를 줘도 확인함', r.status === 1 && /npm run build/.test(all(r)));
+  r = run({ GAME_HTML: 'dist/_mine.html' });
+  check('GAME_HTML 로 다른 빌드를 지정하면(개발 중 각자 빌드) 이 확인은 건너뜀', r.status === 0 && /ok\.test\.mjs\s+PASS/.test(r.stdout) && !/최신이 아니에요/.test(all(r)), all(r).slice(-200));
+  r = run({}, '--no-dist-check');
+  check('--no-dist-check 로 건너뛸 수 있음', r.status === 0 && /ok\.test\.mjs\s+PASS/.test(r.stdout));
+  build();
+  r = run({ GAME_HTML: 'dist/index.html' });
+  check('GAME_HTML 이 dist/index.html 이면 그래도 확인함 (다시 빌드한 뒤라 통과)', r.status === 0 && /똑같아요/.test(r.stdout), all(r).slice(-200));
+
+  // package.json: npm test / test:quick 은 test-all 을 직접 실행 (먼저 빌드하면 dist 를 덮어써서 확인이 의미가 없음), check:dist 가 따로 있음
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
+  check('package.json: test = test-all (빌드로 dist 를 덮어쓰지 않음), test:quick = test-all --quick', pkg.test === 'node tools/test-all.mjs' && pkg['test:quick'] === 'node tools/test-all.mjs --quick', JSON.stringify(pkg));
+  check('package.json: build 와 check:dist (= build-local --check) 스크립트가 있음', pkg.build === 'node tools/build-local.mjs' && pkg['check:dist'] === 'node tools/build-local.mjs --check', JSON.stringify(pkg));
+});
+
+// =====================================================================
 check('테스트 전체에서 예상 밖의 페이지 오류(pageerror/console.error)가 없음', errors.length === 0, errors.slice(0, 5).join(' | '));
+for (const d of tmpDirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* 무시 */ } }
 await close();
 finish('core');

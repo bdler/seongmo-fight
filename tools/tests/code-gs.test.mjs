@@ -27,7 +27,7 @@ function makeEnv(opts = {}) {
     spreadsheets: {}, created: 0, props: { ...(opts.props || {}) }, bound: null,
     cache: new Map(), cachePuts: [], cacheBroken: false, cacheRemoves: [],
     lockBusy: false, lockHeld: false, lockAcquired: 0, lockReleased: 0, appendsWhileLocked: 0, appendsUnlocked: 0,
-    reads: 0, appends: 0, failAppend: false,
+    reads: 0, readsWhileLocked: 0, opens: 0, opensWhileLocked: 0, appends: 0, failAppend: false,
     html: null, files: { index: '<html>INDEX</html>', js_core: '/* core */', style: '<style></style>' },
     logs: [],
   };
@@ -37,6 +37,7 @@ function makeEnv(opts = {}) {
     constructor(sheet, row, col, nr, nc) { Object.assign(this, { sheet, row, col, nr, nc }); }
     getValues() {
       st.reads++;
+      if (st.lockHeld) st.readsWhileLocked++;
       const out = [];
       for (let r = 0; r < this.nr; r++) {
         const src = this.sheet.rows[this.row - 1 + r] || [];
@@ -54,16 +55,25 @@ function makeEnv(opts = {}) {
       return this;
     }
     setFontWeight() { return this; }
-    setNumberFormat(f) { this.sheet.formats.push({ col: this.col, format: f }); return this; }
+    setNumberFormat(f) { this.sheet.formats.push({ col: this.col, format: f, rows: this.nr }); return this; }
   }
   class MockSheet {
-    constructor(ss, name) { this.ss = ss; this.name = name; this.rows = []; this.formats = []; this.frozen = 0; }
+    constructor(ss, name) { this.ss = ss; this.name = name; this.rows = []; this.formats = []; this.frozen = 0; this.maxRows = 1000; this.inserted = []; }
     getName() { return this.name; }
     setName(n) { this.name = n; return this; }
     getParent() { return this.ss; }
-    getMaxRows() { return 1000; }
+    getMaxRows() { return this.maxRows; }
+    insertRowsAfter(pos, n) { this.maxRows += n; this.inserted.push(n); }
+    insertRowBefore(pos) { this.rows.splice(pos - 1, 0, []); this.maxRows++; }
     getLastRow() { let last = 0; this.rows.forEach((r, i) => { if (r && r.some(v => v !== '' && v !== null && v !== undefined)) last = i + 1; }); return last; }
-    getRange(row, col, nr = 1, nc = 1) { return new MockRange(this, row, col, nr, nc); }
+    getRange(row, col, nr = 1, nc = 1) {
+      if (typeof row === 'string') {                     // A1 표기: 'B:B' (열 전체)
+        const m = /^([A-Z]):([A-Z])$/.exec(row);
+        if (!m) throw new Error('가짜 시트는 열 전체 A1 표기만 알아요: ' + row);
+        return new MockRange(this, 1, m[1].charCodeAt(0) - 64, this.maxRows, m[2].charCodeAt(0) - m[1].charCodeAt(0) + 1);
+      }
+      return new MockRange(this, row, col, nr, nc);
+    }
     appendRow(arr) {
       if (st.failAppend) throw new Error('append 실패(가짜)');
       st.appends++;
@@ -89,7 +99,7 @@ function makeEnv(opts = {}) {
   };
 
   const SpreadsheetApp = {
-    openById(id) { if (!st.spreadsheets[id]) throw new Error('Exception: 문서를 열 수 없습니다 (가짜): ' + id); return st.spreadsheets[id]; },
+    openById(id) { st.opens++; if (st.lockHeld) st.opensWhileLocked++; if (!st.spreadsheets[id]) throw new Error('Exception: 문서를 열 수 없습니다 (가짜): ' + id); return st.spreadsheets[id]; },
     getActiveSpreadsheet() { return st.bound; },
     create(name) { st.created++; return addSpreadsheet('NEWID' + st.created, name); },
   };
@@ -294,12 +304,12 @@ function plainProblem(v, path = 'root') {
 // ===========================================================================
 {
   const env = makeEnv();
-  const res = save(env, { nickname: '  젤리   왕  ', score: 12345, stars: 3, difficulty: 'hard', stageId: 'stage2', timeSec: 421.6, cleared: false });
+  const res = save(env, { nickname: '  젤리   왕  ', score: 12345, stars: 3, difficulty: 'hard', stageId: 'stage1', timeSec: 421.6, cleared: true });   // (별 3 은 클리어했을 때만: 예전 값 stage2 / cleared:false 는 이제 거절돼요 - 아래 '말이 되는 기록' 구역)
   const row = env.rows()[0];
   check('[저장] 정상 저장은 정확히 1줄 추가', env.rows().length === 1 && env.st.appends === 1);
   check('[저장] 시간 칸에는 시각이 들어감 (가짜 시계 값)', row[0] && typeof row[0].getTime === 'function' && row[0].getTime() === START, String(row[0]));
   check('[저장] 닉네임은 공백을 정리한 값', row[1] === '젤리 왕', JSON.stringify(row[1]));
-  check('[저장] 점수/별/난이도/스테이지가 그대로', row[2] === 12345 && row[3] === 3 && row[4] === 'hard' && row[5] === 'stage2');
+  check('[저장] 점수/별/난이도/스테이지가 그대로', row[2] === 12345 && row[3] === 3 && row[4] === 'hard' && row[5] === 'stage1');
   check('[저장] 시간(초)는 정수로 반올림', row[6] === 422, String(row[6]));
   check('[저장] 한 줄은 정확히 7칸 (머리글과 같음)', env.sheet().rows[1].length === 7);
   check('[저장] 응답은 { ok:true, rank } 뿐이고 Date 가 없음', plainProblem(res) === '' && Object.keys(res).sort().join() === 'ok,rank' && res.ok === true && res.rank === 1, JSON.stringify(res));
@@ -308,11 +318,11 @@ function plainProblem(v, path = 'root') {
 
   // 경계값
   const e2 = makeEnv();
-  check('[저장] 점수 0 과 999999 는 통과', msgOf(() => save(e2, { nickname: '경계일', score: 0 })) === null && msgOf(() => save(e2, { nickname: '경계이', score: 999999 })) === null);
+  check('[저장] 점수 0 과 99999(상한) 는 통과', msgOf(() => save(e2, { nickname: '경계일', score: 0 })) === null && msgOf(() => save(e2, { nickname: '경계이', score: 99999 })) === null);
   check('[저장] 별 0..3 통과, 별/클리어/시간/스테이지 생략하면 기본값', msgOf(() => save(e2, { nickname: '기본값', stars: undefined, cleared: undefined, timeSec: undefined, stageId: undefined })) === null);
   const dflt = e2.rows().find(r => r[1] === '기본값');
   check('[저장] 생략한 값의 기본: 별 0, 스테이지 stage1, 시간 0', dflt[3] === 0 && dflt[5] === 'stage1' && dflt[6] === 0);
-  check('[저장] timeSec 0 과 86400 은 통과, stageId 20자는 통과', msgOf(() => save(e2, { nickname: '시간영', timeSec: 0 })) === null && msgOf(() => save(e2, { nickname: '시간끝', timeSec: 86400, stageId: 'a'.repeat(20) })) === null);
+  check('[저장] timeSec 0 (클리어 안 한 판) 과 86400 은 통과', msgOf(() => save(e2, { nickname: '시간영', timeSec: 0, cleared: false, stars: 0 })) === null && msgOf(() => save(e2, { nickname: '시간끝', timeSec: 86400 })) === null);
 
   // 추가로 보낸 필드(이메일/IP 등)는 저장되지 않음
   const e3 = makeEnv();
@@ -345,12 +355,21 @@ function plainProblem(v, path = 'root') {
     ['금칙어 sh1t (숫자로 바꿔 쓰기)', { nickname: 'sh1t' }, NICK_BAD], ['금칙어 S H I T', { nickname: 'S H I T' }, NICK_BAD],
     ['금칙어 시1발 (숫자 끼우기)', { nickname: '시1발' }, NICK_BAD], ['금칙어가 들어간 긴 이름', { nickname: '착한fuck12' }, NICK_BAD],
     ['금칙어 병신', { nickname: '병신' }, NICK_BAD], ['금칙어 앞의 = 를 지워도 걸림', { nickname: '=시발' }, NICK_BAD],
+    ['한글 채움 문자(U+3164)만 있는 이름', { nickname: String.fromCharCode(0x3164).repeat(2) }, NICK_EMPTY],
+    ['금칙어 사이에 한글 채움 문자(U+3164)', { nickname: '시' + String.fromCharCode(0x3164) + '발' }, NICK_BAD],
+    ['금칙어 사이에 폭 없는 공백(U+200B)', { nickname: 'fu' + String.fromCharCode(0x200b) + 'ck' }, NICK_BAD],
+    ['옛 자모(U+3165)는 글자 종류에서 거절', { nickname: String.fromCharCode(0x3165).repeat(2) }, NICK_CHARS],
     // 점수
     ['점수 -1', { score: -1 }, /점수가 올바르지/], ['점수 1000000', { score: 1000000 }, /점수가 올바르지/], ['점수 1e9', { score: 1e9 }, /점수가 올바르지/],
     ['점수 NaN', { score: NaN }, /점수가 올바르지/], ['점수 Infinity', { score: Infinity }, /점수가 올바르지/], ['점수 -Infinity', { score: -Infinity }, /점수가 올바르지/],
     ["점수 '12abc'", { score: '12abc' }, /점수가 올바르지/], ["점수 '123' (글자는 안 받음)", { score: '123' }, /점수가 올바르지/], ['점수 12.5 (소수)', { score: 12.5 }, /점수가 올바르지/],
     ['점수 없음', { score: undefined }, /점수가 올바르지/], ['점수 null', { score: null }, /점수가 올바르지/], ['점수 true', { score: true }, /점수가 올바르지/],
     ['점수 배열', { score: [5] }, /점수가 올바르지/], ['점수 -0.0001', { score: -0.0001 }, /점수가 올바르지/],
+    ['점수 100000 (상한 99999 초과)', { score: 100000 }, /점수가 올바르지/], ['점수 999999 (예전 상한)', { score: 999999 }, /점수가 올바르지/],
+    // 말이 되는 기록 (GAS-06 / KIDS-10)
+    ['별 2개인데 클리어 안 함', { cleared: false }, /별 개수/], ['별 3개 + cleared 생략', { cleared: undefined, stars: 3 }, /별 개수/],
+    ['클리어인데 44초', { timeSec: 44 }, /플레이 시간/], ['클리어인데 0초', { timeSec: 0 }, /플레이 시간/], ['클리어인데 44.4초(반올림 44)', { timeSec: 44.4 }, /플레이 시간/],
+    ['모르는 스테이지 stage2', { stageId: 'stage2' }, /스테이지/], ['모르는 스테이지 zzz', { stageId: 'zzz' }, /스테이지/], ['모르는 스테이지 20자', { stageId: 'a'.repeat(20) }, /스테이지/], ['스테이지 대문자 STAGE1', { stageId: 'STAGE1' }, /스테이지/],
     // 별
     ['별 5', { stars: 5 }, /별 개수/], ['별 4', { stars: 4 }, /별 개수/], ['별 -1', { stars: -1 }, /별 개수/], ['별 1.5', { stars: 1.5 }, /별 개수/],
     ["별 '3'", { stars: '3' }, /별 개수/], ['별 NaN', { stars: NaN }, /별 개수/],
@@ -417,11 +436,11 @@ function plainProblem(v, path = 'root') {
     const len = 1 + Math.floor(rnd() * 12);
     let s = '';
     for (let k = 0; k < len; k++) s += alphabet[Math.floor(rnd() * alphabet.length)];
-    const m = msgOf(() => save(fz, { nickname: s, score: i, timeSec: 1 }));
+    const m = msgOf(() => save(fz, { nickname: s, score: i, timeSec: 60 }));   // (클리어한 판은 45초 이상이라 60초로)
     if (m === null) {
       stored++;
       const last = fz.rows()[fz.rows().length - 1][1];
-      if (!/^[0-9A-Za-zㄱ-ㆎ가-힣 ]{2,8}$/.test(last) || /^[=+\-@ ]/.test(last) || / $/.test(last)) badStored++;
+      if (!/^[0-9A-Za-zㄱ-ㅣ가-힣 ]{2,8}$/.test(last) || /^[=+\-@ ]/.test(last) || / $/.test(last)) badStored++;
     } else rejected++;
   }
   check('[정리] 무작위 입력 400개: 저장된 닉네임은 전부 규칙을 지키고 =+-@ 나 공백으로 시작하지 않음', badStored === 0 && stored > 20 && rejected > 20, `저장 ${stored} / 거절 ${rejected} / 위반 ${badStored}`);
@@ -501,7 +520,7 @@ function plainProblem(v, path = 'root') {
   // 개수 제한 (60명 저장)
   const e4 = makeEnv();
   const nm = i => 'q' + String.fromCharCode(97 + Math.floor(i / 26)) + String.fromCharCode(97 + (i % 26)) + 'z';   // 숫자를 쓰면 sh1t 같은 변환 검사에 우연히 걸릴 수 있어서 글자만
-  for (let i = 0; i < 60; i++) save(e4, { nickname: nm(i), score: 1000 + i, timeSec: i });
+  for (let i = 0; i < 60; i++) save(e4, { nickname: nm(i), score: 1000 + i, timeSec: 60 + i });   // (클리어한 판은 45초 이상)
   const lens = [[100, 50], [50, 50], [51, 50], [5, 5], [1, 1], [0, 1], [-3, 1], ['7', 7], [3.9, 3], [undefined, 10], [null, 10], ['abc', 10], ['', 10], [NaN, 10]];
   for (const [n, want] of lens) check(`[랭킹] getTopScores(${typeof n === 'string' ? JSON.stringify(n) : String(n)}) → ${want}명`, e4.ctx.getTopScores(n).length === want, String(e4.ctx.getTopScores(n).length));
   const t4 = jsonClone(e4.ctx.getTopScores(100));
@@ -549,7 +568,11 @@ function plainProblem(v, path = 'root') {
 // ===========================================================================
 {
   const env = makeEnv();
-  save(env, { nickname: '캐시일', score: 100 }); env.advance(11);
+  save(env, { nickname: '캐시일', score: 100 });
+  const warm0 = env.st.reads;
+  env.ctx.getTopScores(10);
+  check('[캐시] 저장 직후에는 랭킹 캐시가 이미 데워져 있어서, 바로 조회해도 시트를 다시 읽지 않음 (등수 계산이 만든 캐시를 다음 조회가 씀)', env.st.reads === warm0);
+  env.advance(31);                                                   // (캐시 만료 후부터 확인)
   const r0 = env.st.reads;
   env.ctx.getTopScores(10);
   const r1 = env.st.reads;
@@ -623,29 +646,294 @@ function plainProblem(v, path = 'root') {
 }
 
 // ===========================================================================
-// 11. 클라이언트(js_server.html)와 같은 규칙인지 비교
+// 11. 닉네임 필터: 걸려야 하는 이름 / 괜히 막으면 안 되는 이름 (아이들이 보는 공개 랭킹이라 가장 꼼꼼히)
 // ===========================================================================
 {
-  const between = (text, from = '==== BLOCKLIST START ====', to = '==== BLOCKLIST END ====') => text.slice(text.indexOf(from), text.indexOf(to));
-  const arrayFrom = text => vm.runInNewContext(text.slice(text.indexOf('['), text.lastIndexOf(']') + 1));
-  const serverList = arrayFrom(between(CODE)), clientList = arrayFrom(between(CLIENT_HTML));
-  check('[동기화] 금칙어 목록이 Code.gs 와 js_server.html 에서 똑같음', JSON.stringify(serverList) === JSON.stringify(clientList) && serverList.length >= 40, `${serverList.length} vs ${clientList.length}`);
-  check('[금칙어] 모두 소문자이고 띄어쓰기/중복이 없음 (매칭이 소문자·공백 제거 기준이라서)', serverList.every(w => w === w.toLowerCase() && !/\s/.test(w) && w.length >= 1) && new Set(serverList).size === serverList.length);
-  check('[금칙어] 흔한 단어를 괜히 막지 않음 (grape, class, pass, 새끼고양이, 젤리, 사탕 …)', (() => {
-    const e = makeEnv();
-    return ['grape', 'class', 'pass', 'Jelly', '새끼고양이', '젤리왕', '사탕', 'Candy', 'Mia', 'Tom', 'Sunny', 'Cucumber', 'Scrape', 'Nazia', 'Dickens', 'Essen'].every((n, i) => msgOf(() => save(e, { nickname: n, score: i })) === null);
-  })());
+  const env = makeEnv();
+  const FILL = String.fromCharCode(0x3164), ZW = String.fromCharCode(0x200b), ZWJ = String.fromCharCode(0x200d), BOM = String.fromCharCode(0xfeff), HFILL = String.fromCharCode(0xffa0);
+  const verdict = n => { try { return { ok: true, value: env.ctx.checkNickname_(n) }; } catch (e) { return { ok: false, error: e.message }; } };
+  const BAD = '이 이름은 쓸 수 없어요. 다른 이름을 적어 줄래요?';
 
-  // 클라이언트 Server.validateNickname 과 서버 checkNickname_ 이 같은 결론을 내는지 (같은 표를 둘 다에 넣어 봄)
+  // ---- (a) 보이지 않는 글자 (GAS-01 / KIDS-02): 지워서 보고, 이름이 비면 빈 이름으로 거절
+  const only = verdict(FILL + FILL);
+  check('[필터] 한글 채움 문자(U+3164)만 있는 이름은 "이름을 적어 주세요" (빈 줄로 랭킹에 나오지 않음)', !only.ok && /이름을 적어 주세요/.test(only.error), JSON.stringify(only));
+  check('[필터] 폭 없는 공백/ZWJ/BOM/반각 채움만 있는 이름도 빈 이름', [ZW + ZW, ZWJ + ZWJ, BOM + BOM, HFILL + HFILL, FILL + ZW + BOM].every(n => !verdict(n).ok && /이름을 적어 주세요/.test(verdict(n).error)));
+  check('[필터] 맨 앞에 채움 문자를 붙여 남의 이름 흉내 내기: 채움 문자를 지운 값이 저장돼서 그냥 같은 이름이 됨', verdict(FILL + '민준').value === '민준' && verdict('민' + FILL + ZW + '준').value === '민준' && verdict('민준' + FILL).value === '민준');
+  for (const [label, name] of [['한글 채움(U+3164)', '시' + FILL + '발'], ['폭 없는 공백(U+200B)', '시' + ZW + '발'], ['ZWJ', '병' + ZWJ + '신'], ['BOM', 'fu' + BOM + 'ck'], ['반각 채움(U+FFA0)', 'fu' + HFILL + 'ck'], ['채움 여러 개', 'f' + FILL + 'u' + FILL + 'c' + FILL + 'k']]) {
+    check(`[필터] 금칙어 사이에 ${label} 를 끼워 넣어도 걸림`, verdict(name).error === BAD, JSON.stringify(verdict(name)));
+  }
+  check('[필터] 옛 자모(U+3165~U+318E)는 글자 종류에서 거절 (눈에 안 보이거나 안 쓰는 글자)', [0x3165, 0x3186, 0x318d, 0x318e].every(c => /한글, 영어, 숫자만/.test(verdict(String.fromCharCode(c).repeat(2)).error || '')));
+  check('[필터] 보이는 자모 U+3131~U+3163 (ㄱ ㅋ ㅎ ㅏ ㅠ ㅣ) 는 그대로 쓸 수 있음', verdict('ㅋㅋ').value === 'ㅋㅋ' && verdict('ㅠㅠ').value === 'ㅠㅠ' && verdict('ㅎㅎㅎ').value === 'ㅎㅎㅎ' && verdict('ㄱㅏ').value === 'ㄱㅏ' && verdict('ㅣㅣ').value === 'ㅣㅣ');
+
+  // ---- (b) 걸려야 하는 이름 (소리 비슷한 것, 자모로 풀어 쓴 것, 늘여 쓴 것, 숫자/띄어쓰기/ㅋㅋ 끼운 것 ...)
+  const mustBlock = [
+    // 한국어 욕설과 변형
+    '시발', '씨발', '씨바', '시바', '씨빨', '씨벌', '씨팔', '시팔', '시벌', '쉬발', '슈발', '시이발', '시이이발', '씨바알', 'ㅅㅣㅂㅏㄹ', 'ㅆㅣㅂㅏㄹ', 'ㅅㅣ발', '시ㅂㅏㄹ', '씨ㅂㅏ', 'ㅅㅂ', 'ㅆㅂ', 'ㅅㅅㅂㅂ', 'ㅄㅄ', 'ㅄ1', 'ㅂㅅ',
+    '시1발', 'ㅅ1ㅂ', 'ㅅ ㅂ', '시 발', '시ㅋ발', '시ㅋㅋ발', 'ㅅㅂ아', '아ㅅㅂ', '씨발놈', '시바새끼', '시발1', '십발', '씹발', '시부럴',
+    '병신', '빙신', '븅신', '뼝신', '별신', 'ㅂㅅ', '병 신', '병1신', '지랄', '찌랄', 'ㅈㄹ', '염병', '옘병', '엠창',
+    '개새끼', '개새키', '개세끼', '개쉐이', '개색', '십새', '십새끼', '씹새끼', '새끼', '쌔끼', '새키', '색기', '쉐기', '새끼ㅋㅋ', '새끼2',
+    '미친', '미친놈', '미친년', 'ㅁㅊ', 'ㅁㅊㄴ', '또라이', '돌아이', '졸라', '조낸', '존나', '존내', '존니', '쫀나', 'ㅈㄴ', '좆1', '좆같네', '좃같네', '좆밥', '십팔',
+    '뒤져', '디져', '뒈져', '죽어', '죽여', '죽일', '죽어버려', '뒤질래', '닥쳐', '꺼져', 'ㄲㅈ', 'ㄷㅊ', 'ㅅㅋ', 'ㅅㄲ', '찐따', '느금마', '니애미', '니미', '니미럴', 'ㅗㅗ', 'ㅗ1', '썅1', '썅년', '쌍년',
+    // 성적/폭력/위험
+    '보지', '자지', 'ㅋㅋ보지', '보지ㅋㅋ', '보지12', '보 지', '걸레', '성기', '자위', '강간', '변태', '섹스', '섹쓰', '쎅스', '섹시', '야동', '포르노', '창녀', '불알', '몰카', '자살', '자해', '죽고싶어', '살인마',
+    // 차별/혐오/약물
+    '한남충', '김치녀', '맘충', '틀딱', '급식충', '짱깨', '쪽바리', '깜둥이', '장애인', '게이', '호모', '메갈', '일베', '나치', '히틀러', '마약', '대마초',
+    // 영어와 변형
+    'fuck', 'FUCK', 'f u c k', 'fuuck', 'fuuuck', 'fck', 'fvck', 'phuck', 'fuk', 'fuc', 'shit', 'S H I T', 'sh1t', 'shiit', 'bitch', 'b1tch', 'asshole', 'assshole', 'ass', 'a55', 'dick', 'dickhead', 'cock', 'tits', 'boobs',
+    'p0rn', 'p 0 r n', 'porn', 'sex', 'sexy', 'sex123', 'nazi', 'Nazi99', 'kkk', 'rape', 'gay', 'wtf', 'kys', 'suicide', 'killme', 'Hitler', 'hit1er', 'h1tler', 'nigga', 'cunt', 'pussy', 'slut', 'whore', 'jackass',
+    'tlqkf', 'qudtls', 'sibal', 'ssibal', 'shibal',
+  ];
+  const slipped = mustBlock.filter(n => verdict(n).error !== BAD);
+  check(`[필터] 걸려야 하는 이름 ${mustBlock.length}개가 전부 "쓸 수 없어요" 로 거절됨`, slipped.length === 0, slipped.slice(0, 12).join(' / '));
+  for (const n of ['시발', '씨바', 'ㅅㅣㅂㅏㄹ', 'ㅆㅣㅂㅏㄹ', '시이발', '쉬발', 'ㅅㅣ발', '시ㅂㅏㄹ', '씨ㅂㅏ', 'fuuck', 'shiit', 'fuuuck', 'phuck', 'fvck', 'fuk', 'ㅁㅊ', 'ㅅㅂ', '졸라', '새끼', '뒤져', '죽어']) {
+    check(`[필터] QA 가 찾아낸 우회: ${JSON.stringify(n)} → 거절`, verdict(n).error === BAD);   // (GAS-02 / KIDS-01 에 적힌 이름들)
+  }
+
+  // ---- (c) 괜히 막으면 안 되는 이름 (표로 확인: 하나라도 걸리면 어떤 이름인지 보여 줘요)
+  const innocent = [
+    // 한국어: 흔한 이름·낱말·귀여운 이름
+    '말랑이', '말랑젤리', '사과', '시간', '젤리왕', '사탕공주', '별빛용사', '구름이', '푸딩왕', '마카롱', '솜사탕', '아이스크림', '초코쿠키', '딸기우유', '젤리곰', '용사', '민준', '서연', '하늘', '철수',
+    '새끼고양이', '새끼곰', '호랑이새끼', '고양이새끼', '시바견', '시바이누', '걸레질', '씹던껌', '보지 못함', '나보지마', '잘자지마', '가자 지금', '보지마', '자지마',
+    '조나단', '메갈로돈', '샹크스', '게이머', '게이트', '십자가', '오십', '십년후', '열한시', '장애물달리기', '마약김밥', '진달래', '창녕', '옷방', '밥사', '없는', '값진', '시바람', '시계', '시장', '신발', '신바람', '지렁이', '지우개', '개구쟁이', '개나리', '새벽', '졸업', '존경', '조사', '조선', '한남동', '한강', '변신', '변호사', '성공', '성인', '성냥', '자전거', '자유', '보름달', '보석', '걸그룹', '검둥이', '쫓아', '쫓기', '쌍둥이', '상놈', '샹들리에', '찐빵', '진단', 'ㅅㄱ', 'ㅋㅋ', 'ㅠㅠ', 'ㅎㅎㅎ', 'ㅇㅇ', 'ㅂㅂ', '아ㅋㅋ',
+    // 영어: 흔한 이름·낱말 (안에 금칙어가 들어 있는 것들)
+    'Jelly', 'Candy', 'Sunny', 'Mia', 'Tom', 'Cucumber', 'Scrape', 'Nazia', 'Dickens', 'Essen', 'grape', 'class', 'pass', 'Anna', 'Bobby', 'Aaron', 'Hannah', 'Jessica', 'Hancock', 'Peacock', 'Cocktail', 'Cockatoo', 'Dickie', 'Dickson',
+    'Grassy', 'Assist', 'Bass', 'Cumin', 'Analysis', 'Canal', 'Gayle', 'Gaylord', 'Homer', 'Homework', 'Fukuoka', 'Fuki', 'Drape', 'Scrap', 'Banana', 'Japan', 'Raccoon', 'Pakistan', 'Niger', 'Diego', 'Shoe', 'Titan', 'Little', 'Kitty',
+    'Spicy', 'Cocoon', 'Moronic', 'Soldier', 'Swank', 'Prickly', 'Shiba', 'Max', 'Alex', 'Texas',
+  ];
+  const wrong = innocent.filter(n => !verdict(n).ok);
+  check(`[필터] 괜히 막으면 안 되는 이름 ${innocent.length}개가 전부 통과 (오탐 없음)`, wrong.length === 0, wrong.slice(0, 12).map(n => n + ' → ' + verdict(n).error).join(' / '));
+  check('[필터] 통과한 이름은 정리된 값이 입력 그대로 (공백만 정리)', innocent.every(n => !verdict(n).ok || verdict(n).value === n.replace(/\s+/g, ' ').trim()));
+  for (const n of ['말랑이', '사과', '시간', '시바견', '보지 못함', '가자 지금', '걸레질', '진달래', '창녕', '옷방', 'Cucumber', 'Essen', 'Dickens', 'grape', 'class', 'Nazia']) {
+    check(`[필터] 괜찮은 이름 ${JSON.stringify(n)} → 통과`, verdict(n).ok === true, JSON.stringify(verdict(n)));
+  }
+
+  // ---- (d) 규칙의 경계 (일부러 이렇게 정했어요: 문서 docs/DEPLOY.md '금칙어 규칙')
+  check('[필터] 짧고 뜻이 둘인 낱말은 "이름 전체"일 때만: 시바(걸림) / 시바견 · 시바이누(통과), 보지(걸림) / 보지마(통과), 걸레(걸림) / 걸레질(통과)', verdict('시바').error === BAD && verdict('시바견').ok && verdict('시바이누').ok && verdict('보지').error === BAD && verdict('보지마').ok && verdict('걸레').error === BAD && verdict('걸레질').ok);
+  check('[필터] 이름 전체 규칙에서는 숫자·띄어쓰기·ㅋㅋ ㅎㅎ ㅠㅠ 는 무시: 보지2 / 보 지 / 보지ㅋㅋ / ㅎㅎ보지ㅠㅠ 모두 걸림', ['보지2', '보 지', '보지ㅋㅋ', 'ㅎㅎ보지ㅠㅠ', '시바1', '씨바ㅋㅋ'].every(n => verdict(n).error === BAD));
+  check('[필터] 마지막 글자에 받침이 더 붙으면 다른 글자: 창녀(걸림) / 창녕(통과), 존나(걸림) / 존남(통과) — 자모로 따로 쓴 받침은 계속 걸림(창녀ㅇ)', verdict('창녀').error === BAD && verdict('창녕').ok && verdict('존나').error === BAD && verdict('존남').ok && verdict('창녀ㅇ').error === BAD);
+  check('[필터] 글자 경계는 넘어가지 않음: 시바람 · 조나단 · 진달래 통과 (ㅂㅏ|ㄹ 이나 ㄴ|ㄴ 이 이어 붙어 보이는 오탐 없음)', verdict('시바람').ok && verdict('조나단').ok && verdict('진달래').ok);
+  check('[필터] 자음만 쓴 줄임말은 자음 낱글자로 쓴 것만: ㅅㅂ 걸림 / 옷방 · 밥사 · 없는 · 값진 통과 (받침 ㅅ+ㅂ, ㅂ+ㅅ 오탐 없음)', verdict('ㅅㅂ').error === BAD && verdict('아ㅂㅅ').error === BAD && ['옷방', '밥사', '없는', '값진', '법사', '입사'].every(n => verdict(n).ok));
+  check('[필터] 된소리: 예사소리로 적은 낱말은 된소리도 걸림(시발=씨발), 된소리로 적은 낱말은 된소리만(찐따 걸림 / 진달래 · 진단 통과, 쌍년 걸림 / 상놈 통과)', verdict('씨발').error === BAD && verdict('찐따').error === BAD && verdict('진단').ok && verdict('쌍년').error === BAD && verdict('상놈').ok);
+  check('[필터] 영어: 같은 글자를 늘여 써도 걸림(fuuuck) 하지만 글자가 모자라거나 다른 낱말은 통과(Niger != nigger, Bob != boob, As != ass, Anna, Bobby)', verdict('fuuuck').error === BAD && verdict('nigger').error === BAD && verdict('Niger').ok && verdict('Bob').ok && verdict('boob').error === BAD && verdict('As').ok && verdict('ass').error === BAD && verdict('Anna').ok && verdict('Bobby').ok);
+  check('[필터] 알려진 오탐은 일부러 막아 둠 (아이들 안전이 먼저): 시발점 · 병신년 · 꺼져라용 · Essex · Sussex · pussycat · Shiitake — 바꾸려면 이 줄을 같이 고쳐요', ['시발점', '병신년', '꺼져라용', 'Essex', 'Sussex', 'pussycat', 'Shiitake'].every(n => verdict(n).error === BAD));
+
+  // ---- (e) 금칙어 목록 자체: 모든 단어가 (따로 입력해도) 걸리고, 흔한 모양으로 바꿔도 걸림 / 새 단어를 넣으면 바로 적용
+  const strong = env.const('BLOCKLIST_'), whole = env.const('BLOCKLIST_WHOLE_');
+  const notBlocked = [...strong, ...whole].filter(w => !env.ctx.nickBlocked_(w));
+  check(`[필터] 목록의 모든 단어(${strong.length + whole.length}개)가 자기 자신을 거름`, notBlocked.length === 0, notBlocked.join(','));
+  const variantsOf = w => [w + 'ㅋㅋ', w.split('').join(' '), 'ㅋ' + w + '1'];
+  const escapes = [...strong, ...whole].flatMap(w => variantsOf(w).filter(v => !env.ctx.nickBlocked_(env.ctx.nickClean_(v))).map(v => w + ' → ' + v));
+  check('[필터] 목록의 모든 단어는 끝에 ㅋㅋ / 글자마다 띄어쓰기 / 앞뒤에 ㅋ·숫자를 붙여도 걸림', escapes.length === 0, escapes.slice(0, 6).join(' | '));
+  check('[필터] 목록 배열에 단어를 넣으면 바로 적용됨 (정규식은 처음 쓸 때 만들어 기억)', (() => {
+    const before = !env.ctx.nickBlocked_('젤리괴물');
+    strong.push('괴물');
+    const mid = env.ctx.nickBlocked_('젤리괴물');
+    strong.pop(); whole.push('괴수'); const w1 = env.ctx.nickBlocked_('괴수'), w2 = env.ctx.nickBlocked_('괴수왕'); whole.pop();
+    return before && mid && w1 && !w2 && !env.ctx.nickBlocked_('젤리괴물');
+  })());
+  check('[필터] 빈 단어/공백 단어를 목록에 실수로 넣어도 모든 이름을 막아 버리지 않음', (() => { strong.push(''); strong.push('  '); whole.push(''); const r = env.ctx.nickBlocked_('말랑이'); strong.pop(); strong.pop(); whole.pop(); return r === false; })());
+  check('[필터] 정규식 특수문자가 들어간 단어를 넣어도 오류 없이 동작', (() => { strong.push('a.b(c'); const r = [env.ctx.nickBlocked_('abc'), env.ctx.nickBlocked_('xa.b(cx')]; strong.pop(); return r[0] === false && r[1] === true; })());
+}
+
+// ===========================================================================
+// 12. 말이 되는 기록 (GAS-06 / KIDS-10): 점수 상한 99999, 별은 클리어해야, 클리어는 45초 이상, 모르는 스테이지는 거절
+// ===========================================================================
+{
+  const L = jsonClone(makeEnv().const('LIMITS_')), S = jsonClone(makeEnv().const('STAGE_IDS_'));
+  check('[기록] 설정: 점수 상한 99999, 클리어 최소 45초, 스테이지는 stage1 뿐', L.scoreMax === 99999 && L.clearTimeMin === 45 && JSON.stringify(S) === '["stage1"]', JSON.stringify([L.scoreMax, L.clearTimeMin, S]));
+  const env = makeEnv();
+  const honest = [
+    ['클리어 3별 4만 점 (정직한 최고 기록 근처)', { nickname: '정직일', score: 40000, stars: 3, cleared: true, timeSec: 420, difficulty: 'hard' }],
+    ['클리어 1별 낮은 점수', { nickname: '정직이', score: 1200, stars: 1, cleared: true, timeSec: 180, difficulty: 'easy' }],
+    ['클리어 0별 (죽어서 깬 판)', { nickname: '정직삼', score: 900, stars: 0, cleared: true, timeSec: 200, difficulty: 'normal' }],
+    ['클리어 45초 딱 (경계)', { nickname: '정직사', score: 500, stars: 1, cleared: true, timeSec: 45 }],
+    ['클리어 44.5초 → 반올림 45초', { nickname: '정직오', score: 500, stars: 1, cleared: true, timeSec: 44.5 }],
+    ['게임 오버: 별 0, 짧은 시간도 정직함', { nickname: '정직육', score: 30, stars: 0, cleared: false, timeSec: 5 }],
+    ['게임 오버: 점수 0, 시간 0', { nickname: '정직칠', score: 0, stars: 0, cleared: false, timeSec: 0 }],
+    ['점수 상한 99999 딱', { nickname: '정직팔', score: 99999, stars: 3, cleared: true, timeSec: 600 }],
+  ];
+  for (const [name, rec] of honest) check(`[기록] 정직한 기록은 통과: ${name}`, msgOf(() => save(env, rec)) === null);
+  check('[기록] 통과한 기록이 전부 시트에 한 줄씩', env.rows().length === honest.length);
+  const before = env.rows().length;
+  const forged = [
+    ['999999점 + 별 3 + cleared 거짓 + 0초 + 이상한 스테이지 (QA 가 만든 위조 기록)', { nickname: 'hacker', score: 999999, stars: 3, cleared: false, timeSec: 0, difficulty: 'easy', stageId: 'zzz' }],
+    ['콘솔 위조: 99999 초과', { nickname: '번개왕', score: 100000, stars: 3, cleared: true, timeSec: 300, stageId: 'stage1', difficulty: 'hard' }],
+    ['콘솔 위조: 클리어 0초', { nickname: '번개왕', score: 50, stars: 3, cleared: true, timeSec: 0, stageId: 'stage1', difficulty: 'hard' }],
+    ['별만 3개 (클리어 안 함)', { nickname: '번개왕', score: 50, stars: 3, cleared: false, timeSec: 100 }],
+    ['스테이지 이름만 바꿔 보내기', { nickname: '번개왕', score: 50, stageId: 'stage99' }],
+  ];
+  for (const [name, rec] of forged) check(`[기록] 말이 안 되는 기록은 거절: ${name}`, msgOf(() => save(env, rec)) !== null && /[가-힣]/.test(msgOf(() => save(env, rec))));
+  check('[기록] 거절된 위조 기록은 시트에 쓰이지 않고 잠금도 안 잡음', env.rows().length === before && env.st.lockAcquired === honest.length, `rows ${env.rows().length} lock ${env.st.lockAcquired}`);
+}
+
+// ===========================================================================
+// 13. 잠금은 짧게 + 폭주 막기 (GAS-04 / GAS-05)
+// ===========================================================================
+{
+  // (a) 잠금 안에서는 시트 전체를 읽지 않음 (등수 계산은 잠금을 푼 뒤)
+  const env = makeEnv({ props: { SHEET_ID: 'BIG' } });
+  const big = env.addSpreadsheet('BIG', 'big', ['Scores']);
+  big.sheets[0].rows = [['시간', '닉네임', '점수', '별', '난이도', '스테이지', '시간(초)']];
+  for (let i = 0; i < 3000; i++) big.sheets[0].rows.push([new Date(START - i * 1000), 'u' + i + 'q', 100 + i, 1, 'normal', 'stage1', 60]);
+  env.st.reads = 0; env.st.opens = 0;
+  const res = save(env, { nickname: '새친구', score: 3055 });                  // (3000명 중 46등: 랭킹은 50등까지만 보여서 그 안에 들어오는 점수로. 3055점은 이미 있어서 동점이면 먼저 낸 쪽이 위)
+  check('[잠금] 3000줄 시트에서도 잠금 안에서는 시트를 한 번도 읽지 않음 (getValues 는 잠금을 푼 뒤 등수 계산에서만)', env.st.readsWhileLocked === 0 && env.st.reads === 1, `잠금 중 읽기 ${env.st.readsWhileLocked} / 전체 ${env.st.reads}`);
+  check('[잠금] 잠금 안에서는 스프레드시트를 한 번만 열고 (등수 계산용으로 한 번 더는 잠금 밖에서)', env.st.opensWhileLocked === 1 && env.st.opens === 2, `잠금 중 ${env.st.opensWhileLocked} / 전체 ${env.st.opens}`);
+  check('[잠금] 그래도 결과는 { ok:true, rank } (등수는 정확: 3055점은 위에 44명 + 같은 점수를 먼저 낸 1명 = 46등)', res.ok === true && res.rank === 46 && Object.keys(res).sort().join() === 'ok,rank', JSON.stringify(res));
+  env.st.reads = 0;
+  const dup = save(env, { nickname: '새친구', score: 3055 });
+  check('[잠금] 중복 저장도 잠금 안에서 시트를 읽지 않고 { ok, duplicate, rank } 를 돌려줌', dup.duplicate === true && dup.ok === true && dup.rank === res.rank && env.st.readsWhileLocked === 0, JSON.stringify(dup));
+  check('[잠금] 저장 뒤 랭킹 캐시가 데워져서 다음 조회는 시트를 읽지 않음', (() => { const r = env.st.reads; env.ctx.getTopScores(10); return env.st.reads === r; })());
+  check('[잠금] 잠금은 저장 한 번에 한 번만 잡고 풀었음 (저장 2번 = 2번)', env.st.lockAcquired === 2 && env.st.lockReleased === 2);
+
+  // (b) 폭주 막기: 1분에 BURST_MAX_PER_MIN_(300)번을 넘으면 잠금 전에 [busy]
+  const e2 = makeEnv();
+  const max = e2.const('BURST_MAX_PER_MIN_');
+  check('[폭주] 1분 상한은 300 (한 반 30명이 한꺼번에 눌러도 한참 못 미침)', max === 300);
+  let failed = -1;
+  for (let i = 0; i < max; i++) { if (msgOf(() => save(e2, { nickname: '연타', score: i })) !== null) { failed = i; break; } }
+  check('[폭주] 300번까지는 전부 저장됨 (정직한 사용을 막지 않음)', failed === -1 && e2.rows().length === max, `실패 ${failed} 줄 ${e2.rows().length}`);
+  const locks = e2.st.lockAcquired;
+  const m = msgOf(() => save(e2, { nickname: '연타', score: 5000 }));
+  check('[폭주] 301번째는 [busy] 한글 오류 (클라이언트가 한 번 다시 시도하고 안 되면 내 기기에 저장)', m !== null && m.includes('[busy]') && /[가-힣]/.test(m), String(m));
+  check('[폭주] 걸러진 요청은 잠금을 잡지도 시트에 쓰지도 않음 (잠금 시간을 쓰지 않으니 진짜 저장이 밀리지 않음)', e2.st.lockAcquired === locks && e2.rows().length === max);
+  check('[폭주] 잘못된 요청은 검사에서 먼저 한글 오류로 돌아감 (상한에 걸려도 [busy] 가 아니라 이유를 알려 줌)', /쓸 수 없어요/.test(msgOf(() => save(e2, { nickname: '시발', score: 1 })) || ''));
+  e2.advance(61);
+  check('[폭주] 1분이 지나면 다시 저장됨', msgOf(() => save(e2, { nickname: '연타', score: 6000 })) === null);
+  check('[폭주] 요청 수 캐시는 90초만 기억 (캐시가 쌓이지 않음)', e2.st.cachePuts.some(p => /^jd:burst:\d+$/.test(p.key) && p.seconds === 90));
+  const e3 = makeEnv();
+  e3.st.cacheBroken = true;
+  check('[폭주] 캐시가 고장 나면 상한 없이 그냥 통과 (저장이 멈추지 않음)', msgOf(() => save(e3, { nickname: '캐시고장', score: 1 })) === null && e3.rows().length === 1);
+
+  // (c) setup 은 할 일이 없으면 잠금을 잡지 않음 (웹에서 아무나 불러도 저장을 막지 못하게)
+  const e4 = makeEnv();
+  e4.ctx.setup();
+  const l1 = e4.st.lockAcquired;
+  for (let i = 0; i < 20; i++) e4.ctx.setup();
+  check('[setup] 처음 한 번만 잠금을 잡고(시트 만들기), 이미 준비된 시트에서는 몇 번을 불러도 잠금을 잡지 않음', l1 === 1 && e4.st.lockAcquired === 1 && e4.st.created === 1, `lock ${l1} → ${e4.st.lockAcquired}`);
+  check('[setup] 시트가 이미 있으면 잠금이 다른 사람에게 잡혀 있어도 바로 끝남 (기다리다 실패하지 않음)', (() => { e4.st.lockBusy = true; const r = msgOf(() => e4.ctx.setup()); e4.st.lockBusy = false; return r === null; })());
+  const e5 = makeEnv();
+  check('[잠금] 클라이언트 제한(10초)보다 서버 잠금 대기가 짧음: [busy] 가 먼저 도착해서 한 번 더 시도할 수 있음', e5.const('LOCK_WAIT_MS_') === 6000);
+}
+
+// ===========================================================================
+// 14. 시트 손질: 머리글이 지워진 시트 (GAS-08) / 칸 서식과 빈 줄 (GAS-09)
+// ===========================================================================
+{
+  const DATE = new Date(START);
+  const rec = (nick, score) => [DATE, nick, score, 3, 'hard', 'stage1', 100];
+  // (a) 머리글이 지워진 시트: 첫 기록이 랭킹에서 사라지지 않음
+  let env = makeEnv({ props: { SHEET_ID: 'H' } });
+  let sh = env.addSpreadsheet('H', 'h', ['Scores']).sheets[0];
+  sh.rows = [rec('일등이', 9000), rec('이등이', 100)];
+  const top = jsonClone(env.ctx.getTopScores(10));
+  check('[머리글] 머리글(1행)이 지워져도 첫 줄 기록이 랭킹에 나옴 (일등이 9000)', top.map(r => r.nickname).join() === '일등이,이등이' && top[0].score === 9000, JSON.stringify(top));
+  save(env, { nickname: '삼등이', score: 50 });
+  check('[머리글] 그 뒤 저장해도 기록이 뒤에 붙고 랭킹은 전부 보임 (머리글은 setup 이 복구)', env.sheet().data().length === 3 && jsonClone(env.ctx.getTopScores(10)).length === 3);
+  env.advance(31);
+  const lockBefore = env.st.lockAcquired;
+  env.ctx.setup();
+  const d = env.sheet().data();
+  check('[머리글] setup 을 실행하면 지워진 머리글을 맨 위에 다시 끼워 넣고 기록은 그대로', d[0][1] === '닉네임' && d[0][2] === '점수' && d.length === 4 && d[1][1] === '일등이' && d[3][1] === '삼등이', JSON.stringify(d.map(r => r[1])));
+  check('[머리글] 복구는 잠금 안에서 하고, 머리글 줄 고정(frozen)도 다시 켬', env.st.lockAcquired === lockBefore + 1 && env.sheet().frozen === 1);
+  check('[머리글] 복구 뒤에도 랭킹이 같음 (일등이 9000 이 그대로 1등)', (() => { env.advance(31); const t = jsonClone(env.ctx.getTopScores(10)); return t.length === 3 && t[0].nickname === '일등이'; })());
+  env.ctx.setup();
+  check('[머리글] 한 번 더 setup 해도 머리글을 또 끼워 넣지 않음', env.sheet().data().length === 4);
+
+  // (b) 손으로 고친 머리글(HEAD1, HEAD2) 은 건드리지 않음
+  env = makeEnv({ props: { SHEET_ID: 'X' } });
+  sh = env.addSpreadsheet('X', 'x', ['Scores']).sheets[0];
+  sh.rows = [['HEAD1', 'HEAD2'], rec('옛날친구', 777)];
+  env.ctx.setup();
+  check('[머리글] 사람이 바꾼 머리글(점수 칸이 숫자가 아님)은 그대로 둠', env.sheet().data().length === 2 && env.sheet().data()[0][0] === 'HEAD1');
+
+  // (c) 새 시트: 빈 줄을 미리 만들고 닉네임/스테이지 열 전체를 글자 서식으로
+  env = makeEnv();
+  save(env);
+  sh = env.sheet();
+  const need = env.const('SHEET_ROWS_');
+  const fmt = col => sh.formats.filter(f => f.col === col);
+  check('[서식] 새 시트에는 빈 줄을 3000줄쯤 미리 만들어 둠', need === 3000 && sh.maxRows >= need && sh.maxRows - sh.getLastRow() >= need - 10, `줄 ${sh.maxRows} 기록 ${sh.getLastRow()}`);
+  check('[서식] 닉네임(B) 열 전체와 스테이지(F) 열 전체가 글자(@) 서식, 시간(A) 열은 날짜 서식', fmt(2).some(f => f.format === '@' && f.rows >= need) && fmt(6).some(f => f.format === '@' && f.rows >= need) && fmt(1).some(f => /yyyy/.test(f.format) && f.rows >= need));
+  check('[서식] 서식을 입힌 줄 수가 실제 시트 줄 수 전체 (미리 만든 빈 줄까지 서식이 입혀짐)', fmt(2).every(f => f.rows === sh.maxRows) && fmt(6).every(f => f.rows === sh.maxRows));
+  check('[서식] 처음 저장한 뒤 setup 은 손볼 게 없음 (서식을 또 입히지 않고 잠금도 안 잡음)', (() => { const n = sh.formats.length, l = env.st.lockAcquired; env.ctx.setup(); return sh.formats.length === n && env.st.lockAcquired === l; })());
+
+  // (d) 빈 줄이 거의 다 찬 시트: setup 이 빈 줄을 늘리고 서식을 다시 입힘
+  env = makeEnv({ props: { SHEET_ID: 'F' } });
+  sh = env.addSpreadsheet('F', 'f', ['Scores']).sheets[0];
+  sh.rows = [['시간', '닉네임', '점수', '별', '난이도', '스테이지', '시간(초)']];
+  for (let i = 0; i < 900; i++) sh.rows.push(rec('q' + i + 'z', i));
+  const ins0 = sh.inserted.length;
+  env.ctx.setup();
+  check('[서식] 빈 줄이 200줄 밑으로 남은 시트(1000줄 중 901줄 사용)는 setup 이 빈 줄을 3000줄 이상으로 늘리고 서식을 다시 맞춤', sh.inserted.length === ins0 + 1 && sh.maxRows - sh.getLastRow() >= 3000 && sh.formats.some(f => f.col === 2 && f.format === '@' && f.rows === sh.maxRows));
+  check('[서식] 늘린 뒤에도 기록 901줄은 그대로', sh.getLastRow() === 901 && jsonClone(env.ctx.getTopScores(50)).length === 50);
+}
+
+// ===========================================================================
+// 15. 클라이언트(js_server.html)와 같은 규칙인지 비교
+// ===========================================================================
+{
+  const between = (text, from, to) => text.slice(text.indexOf(from), text.indexOf(to) + to.length);
+  const lists = (text, names) => vm.runInNewContext(between(text, '// ==== BLOCKLIST START ====', '// ==== BLOCKLIST END ====').replace(/\bconst\b/g, 'var') + `\n[${names.join(',')}]`);
+  const [serverList, serverWhole] = lists(CODE, ['BLOCKLIST_', 'BLOCKLIST_WHOLE_']), [clientList, clientWhole] = lists(CLIENT_HTML, ['NICKNAME_BLOCKLIST', 'NICKNAME_BLOCKLIST_WHOLE']);
+  check('[동기화] 금칙어 목록(이름에 들어 있으면 / 이름 전체)이 Code.gs 와 js_server.html 에서 똑같음', JSON.stringify(serverList) === JSON.stringify(clientList) && JSON.stringify(serverWhole) === JSON.stringify(clientWhole) && serverList.length >= 150 && serverWhole.length >= 80, `${serverList.length}+${serverWhole.length} vs ${clientList.length}+${clientWhole.length}`);
+  const all = [...serverList, ...serverWhole];
+  check('[금칙어] 모두 소문자이고 띄어쓰기가 없고 비어 있지 않음 (매칭이 소문자·공백 제거 기준이라서)', all.every(w => w === w.toLowerCase() && !/\s/.test(w) && w.length >= 1));
+  check('[금칙어] 같은 단어가 두 번 적혀 있거나 두 목록에 다 있지 않음', new Set(serverList).size === serverList.length && new Set(serverWhole).size === serverWhole.length && !serverList.some(w => serverWhole.includes(w)));
+  const hygieneEnv = makeEnv();
+  const bodies = (list, key) => list.map(w => hygieneEnv.ctx.nickPattern_(w)[key].source);
+  const dupBody = (list, key) => { const b = bodies(list, key); return list.filter((w, i) => b.indexOf(b[i]) !== i); };
+  check('[금칙어] 소리 규칙으로 같아지는 군더더기 단어가 없음 (예: 시발 과 씨발 을 따로 적으면 안 돼요 - 예사소리로 적은 것 하나면 돼요)', dupBody(serverList, 'strong').length === 0 && dupBody(serverWhole, 'whole').length === 0, dupBody(serverList, 'strong').concat(dupBody(serverWhole, 'whole')).join(','));
+  check('[금칙어] 한글/영어 글자 외의 글자는 목록에 없음', all.every(w => /^[0-9a-zㄱ-ㅣ가-힣]+$/.test(w)));
+
+  // 정리·필터 도구 블록은 두 파일에서 들여쓰기만 빼고 글자 하나까지 같아야 해요
+  const norm = text => between(text, '// ==== NICK-FILTER START ====', '// ==== NICK-FILTER END ====').split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+  const nb = norm(CODE);
+  check('[동기화] 닉네임 정리·금칙어 도구(NICK-FILTER 블록)가 Code.gs 와 js_server.html 에서 글자 하나까지 똑같음', nb.length > 3000 && nb === norm(CLIENT_HTML), `${nb.length} vs ${norm(CLIENT_HTML).length}`);
+
   const script = CLIENT_HTML.match(/<script>([\s\S]*)<\/script>/)[1];
   const cctx = vm.createContext({ Store: { get: (k, d) => d, set() {}, remove() {} }, console });
   vm.runInContext(script, cctx, { filename: 'js_server.html' });
   const Client = vm.runInContext('Server', cctx);
   const env = makeEnv();
+
+  // 도구가 같은 결과를 내는지: 모든 완성형 글자 11172개, 모든 자모, 영어/숫자, 무작위 문자열
+  const bad = [];
+  for (let c = 0xAC00; c <= 0xD7A3; c++) { const ch = String.fromCharCode(c); if (env.ctx.nickSkeleton_(ch) !== Client.nickSkeleton(ch)) bad.push(ch); }
+  for (let c = 0x20; c <= 0x7e; c++) { const ch = String.fromCharCode(c); if (env.ctx.nickSkeleton_(ch) !== Client.nickSkeleton(ch)) bad.push(ch); }
+  for (let c = 0x3100; c <= 0x3190; c++) { const ch = String.fromCharCode(c); if (env.ctx.nickSkeleton_(ch) !== Client.nickSkeleton(ch)) bad.push(ch); }
+  check('[동기화] 한글 완성형 11172자 + 자모 + 영어/숫자 낱글자의 "뼈대"가 클라이언트와 서버에서 똑같음', bad.length === 0, bad.slice(0, 8).join(''));
+
+  const FILL = String.fromCharCode(0x3164), ZW = String.fromCharCode(0x200b);
+  const alphabet = ['시', '발', '씨', '바', '병', '신', '새', '끼', '보', '지', '자', '존', '나', '가', '민', '준', '창', '녀', '녕', '이', '아', '알', '옷', '방', '없', 'ㅅ', 'ㅂ', 'ㅈ', 'ㄹ', 'ㅁ', 'ㅊ', 'ㅋ', 'ㅎ', 'ㅣ', 'ㅏ', 'ㅓ', 'ㅇ', 'ㅄ', 'ㅆ', 'ㄲ', 'ㅠ',
+    'f', 'u', 'c', 'k', 's', 'h', 'i', 't', 'a', 'A', 'S', '1', '5', '0', '7', ' ', ' ', '=', '-', FILL, ZW, '😀', '_'];
+  let seed = 777;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  let skelDiff = 0, verdictDiff = 0, blockedN = 0, passedN = 0;
+  const diffs = [];
+  for (let i = 0; i < 6000; i++) {
+    const len = 1 + Math.floor(rnd() * 9);
+    let s = '';
+    for (let k = 0; k < len; k++) s += alphabet[Math.floor(rnd() * alphabet.length)];
+    if (env.ctx.nickSkeleton_(s) !== Client.nickSkeleton(s)) { skelDiff++; diffs.push('skeleton ' + JSON.stringify(s)); }
+    const c = Client.validateNickname(s);
+    let sv; try { sv = { ok: true, value: env.ctx.checkNickname_(s) }; } catch (e) { sv = { ok: false, error: e.message }; }
+    if (c.ok !== sv.ok || (c.ok ? c.value !== sv.value : c.error !== sv.error)) { verdictDiff++; diffs.push(JSON.stringify(s)); }
+    if (!sv.ok && /쓸 수 없어요/.test(sv.error)) blockedN++; else if (sv.ok) passedN++;
+  }
+  check('[동기화] 무작위 문자열 6000개(한글/자모/영어/숫자/채움 문자/이모지 섞음)에 대해 뼈대와 판단(통과 여부, 정리된 값, 오류 문구)이 똑같음', skelDiff === 0 && verdictDiff === 0, diffs.slice(0, 4).join(' | '));
+  check('[동기화] (그 무작위 표가 걸림/통과 양쪽을 골고루 건드림)', blockedN > 60 && passedN > 200, `걸림 ${blockedN} / 통과 ${passedN}`);
+
+  // 클라이언트 쪽 판단도 위의 표(걸려야 함/괜찮아야 함)와 같은지 한 번 더
+  const spot = ['시발', '씨바', 'ㅅㅣㅂㅏㄹ', '시' + FILL + '발', 'fuuuck', '보지', '보지마', '시바견', '창녕', '진달래', 'Cucumber', 'Essen', 'ㅤㅤ'];
+  const sdiff = spot.filter(s => { const c = Client.validateNickname(s); let sv; try { sv = { ok: true, value: env.ctx.checkNickname_(s) }; } catch (e) { sv = { ok: false, error: e.message }; } return JSON.stringify(c) !== JSON.stringify(sv); });
+  check('[동기화] 대표 이름 13개(채움 문자 포함)의 클라이언트/서버 결과 전체(JSON)가 똑같음', sdiff.length === 0, sdiff.join(','));
+
   const table = [
     '', '   ', '가', 'a', '가나', '가나다라마바사아', '가나다라마바사아자', 'ABCDEFGHI', 'ab cd ef gh', 'a b', '  가  나  ', '=abc', '+abc', '@abc', '-abc', '=cmd()', '+1', '@x', '-a', '===',
     '=HYPERLINK("x")', 'ab!', 'a<b>c', 'a_b', '😀😀', '＝cmd', '漢字', "a'b", 'ㅋㅋ', 'ㅋㅋㅋㅋㅋㅋㅋㅋㅋ', '1234', '시발', '씨발놈', 'ㅅㅂ', 'FUCK', 'f u c k', 'sh1t', 'S H I T', '시1발', '착한fuck12', '=시발',
     'Jelly', 'jelly 99', 'grape', '새끼고양이', '\u1112\u1161\u11ab\u1100\u1173\u11af', 'a\tb', 'a\u3000b', '\u00a0\u00a0gh', '   =  =   mm', 'hit1er', 'h1tler', 'nazi', 'Nazi99', '0123', 'p0rn', 'p 0 r n',
+    FILL + FILL, '시' + FILL + '발', FILL + '민준', '민' + ZW + '준', 'fu' + FILL + 'ck', String.fromCharCode(0x3165).repeat(2), '씨바', '시바견', '보지 못함', '창녀', '창녕',
   ];
   const mismatches = [];
   for (const s of table) {
@@ -654,11 +942,14 @@ function plainProblem(v, path = 'root') {
     if (c.ok !== sv.ok || (c.ok ? c.value !== sv.value : c.error !== sv.error)) mismatches.push(`${JSON.stringify(s)}: 클라 ${JSON.stringify(c)} / 서버 ${JSON.stringify(sv)}`);
   }
   check(`[동기화] 닉네임 ${table.length}개에 대해 클라이언트와 서버의 판단(통과 여부, 정리된 값, 오류 문구)이 똑같음`, mismatches.length === 0, mismatches.slice(0, 3).join(' | '));
+
   // 설정값도 같은지
   const T = Client.config, L = jsonClone(env.const('LIMITS_'));
-  check('[동기화] 글자 수/점수/별/시간/스테이지/랭킹 한도가 클라이언트 설정과 같음', T.nick.min === L.nickMin && T.nick.max === L.nickMax && T.scoreMax === L.scoreMax && T.starsMax === L.starsMax && T.timeSecMax === L.timeSecMax && T.stageIdMax === L.stageIdMax && T.rankMax === L.rankMax && T.rankDefault === L.rankDefault);
+  check('[동기화] 글자 수/점수/별/시간/클리어 최소 시간/스테이지/랭킹 한도가 클라이언트 설정과 같음', T.nick.min === L.nickMin && T.nick.max === L.nickMax && T.scoreMax === L.scoreMax && T.starsMax === L.starsMax && T.timeSecMax === L.timeSecMax && T.clearTimeMin === L.clearTimeMin && T.stageIdMax === L.stageIdMax && T.rankMax === L.rankMax && T.rankDefault === L.rankDefault);
   check('[동기화] 난이도 목록이 클라이언트와 같음', JSON.stringify(T.difficulties) === JSON.stringify(jsonClone(env.const('DIFFICULTIES_'))));
-  check('[동기화] 기본 스테이지 이름이 같음', T.defaultStage === env.const('DEFAULT_STAGE_'));
+  check('[동기화] 스테이지 목록이 클라이언트와 같음', JSON.stringify(T.stageIds) === JSON.stringify(jsonClone(env.const('STAGE_IDS_'))));
+  check('[동기화] 기본 스테이지 이름이 같고 허용 목록 안에 있음', T.defaultStage === env.const('DEFAULT_STAGE_') && T.stageIds.includes(T.defaultStage));
+  check('[동기화] 서버 잠금 대기(6초) < 클라이언트 호출 제한(10초) < 전체 상한(11초)', env.const('LOCK_WAIT_MS_') < T.timeoutMs && T.timeoutMs < T.totalMs);
 }
 
 finish('code-gs');

@@ -6,11 +6,16 @@
 //   node tools/test-all.mjs --quick         *.slow.test.mjs 는 건너뜀
 //   node tools/test-all.mjs core stage      파일 이름에 core / stage 가 들어간 것만
 //   node tools/test-all.mjs --verbose       통과한 테스트의 출력도 보여줌
+//   node tools/test-all.mjs --no-dist-check dist/index.html 이 최신인지 확인하는 단계를 건너뜀
 //
 // 환경변수는 그대로 자식 프로세스에 넘어가므로 GAME_HTML=dist/_내이름.html 도 그대로 적용됩니다.
 // 하나라도 실패(또는 시간 초과)하면 종료 코드 1.
-import { readdirSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+//
+// 테스트는 기본으로 커밋되는 dist/index.html 을 검사하므로, 시작하기 전에 그 파일이 "지금 src/ 를 새로 빌드한 것"과
+// 똑같은지 먼저 확인해요. 다르면 (src 만 고치고 빌드를 안 한 경우) 테스트를 돌리지 않고 `npm run build` 를 안내하며 종료 코드 1.
+// (GAME_HTML 로 다른 빌드를 지정했거나 tools/build-local.mjs 가 없으면 이 확인은 건너뜀)
+import { readdirSync, existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,6 +24,7 @@ const testsDir = resolve(root, 'tools', 'tests');
 const args = process.argv.slice(2);
 const quick = args.includes('--quick');
 const verbose = args.includes('--verbose');
+const skipDist = args.includes('--no-dist-check');
 const filters = args.filter(a => !a.startsWith('--'));
 const TIMEOUT_MS = Number(process.env.TEST_TIMEOUT_MS) || 180000;   // 한 파일당 최대 시간
 
@@ -29,6 +35,20 @@ if (filters.length) files = files.filter(f => filters.some(q => f.includes(q)));
 if (!files.length) {
   console.error('실행할 테스트 파일이 없어요 (tools/tests/*.test.mjs)');
   process.exit(1);
+}
+
+// dist/index.html 이 src/ 와 같은지 (tools/build-local.mjs --check 에 맡김: 메모리에서 새로 빌드해 비교)
+const buildTool = resolve(root, 'tools', 'build-local.mjs');
+const customBuild = !!process.env.GAME_HTML && resolve(root, process.env.GAME_HTML) !== resolve(root, 'dist', 'index.html');
+if (!skipDist && !customBuild && existsSync(buildTool)) {
+  const r = spawnSync(process.execPath, [buildTool, '--check'], { cwd: root, encoding: 'utf8' });
+  if (r.status !== 0) {
+    process.stdout.write(r.stdout || '');
+    process.stderr.write(r.stderr || '');
+    console.error('\n✗ dist/index.html 이 src/ 와 달라서 테스트를 시작하지 않았어요. 먼저 `npm run build` 를 실행한 다음 다시 해 주세요.');
+    process.exit(1);
+  }
+  process.stdout.write(r.stdout || '');
 }
 
 // 한 파일 실행 → { code, out, ms, timedOut }

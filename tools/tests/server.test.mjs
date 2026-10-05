@@ -183,12 +183,12 @@ await section('서버없음', async () => {
   const fixed = await g.ev(async () => {
     Server.local.clear();
     await Server.saveScore({ nickname: '  =가나다  ', score: 5e9, stars: 9, difficulty: 'cheat', stageId: '../x', timeSec: -5, cleared: 'yes' });
-    await Server.saveScore({ nickname: '문자점수', score: '77', stars: '2', timeSec: '12.6' });
+    await Server.saveScore({ nickname: '문자점수', score: '77', stars: '2', timeSec: '12.6', cleared: true });   // (별은 클리어했을 때만 남아요 - 아래 '말이 되는 기록' 구역)
     await Server.saveScore({ nickname: '엔에이엔', score: NaN, stars: NaN, timeSec: NaN });
     return Server.local.load();
   });
   const f1 = fixed.find(e => e.nickname === '가나다'), f2 = fixed.find(e => e.nickname === '문자점수'), f3 = fixed.find(e => e.nickname === '엔에이엔');
-  check('[서버없음] 이상한 값은 범위 안으로 고침: 닉네임 정리, 점수 999999, 별 3, 난이도 normal, 스테이지 stage1, 시간 0, 클리어 true', f1 && f1.score === 999999 && f1.stars === 3 && f1.difficulty === 'normal' && f1.stageId === 'stage1' && f1.timeSec === 0 && f1.cleared === true, J(f1));
+  check('[서버없음] 이상한 값은 범위 안으로 고침: 닉네임 정리, 점수 99999, 별 3, 난이도 normal, 스테이지 stage1, 시간 0, 클리어 true', f1 && f1.score === 99999 && f1.stars === 3 && f1.difficulty === 'normal' && f1.stageId === 'stage1' && f1.timeSec === 0 && f1.cleared === true, J(f1));
   check('[서버없음] 숫자 모양 글자는 숫자로 (77, 2, 13), NaN 은 0', f2 && f2.score === 77 && f2.stars === 2 && f2.timeSec === 13 && f3 && f3.score === 0 && f3.stars === 0 && f3.timeSec === 0, J([f2, f3]));
 
   // 망가진 저장소 값은 버림
@@ -211,6 +211,7 @@ await section('서버없음', async () => {
 // ===========================================================================
 await section('닉네임', async () => {
   const g = await open();
+  const FILL = String.fromCharCode(0x3164), ZW = String.fromCharCode(0x200b);                  // 한글 채움 문자 / 폭 없는 공백 (눈에 안 보여요)
   const EMPTY = '이름을 적어 주세요!', CHARS = '이름에는 한글, 영어, 숫자만 쓸 수 있어요.', SHORT = '이름은 2글자 이상으로 적어 주세요.', LONG = '이름은 8글자까지만 쓸 수 있어요.', BAD = '이 이름은 쓸 수 없어요. 다른 이름을 적어 줄래요?';
   const table = [
     // 통과
@@ -226,6 +227,13 @@ await section('닉네임', async () => {
     // 괜히 막으면 안 되는 이름
     ['grape', 'grape'], ['class', 'class'], ['새끼고양이', '새끼고양이'], ['Sunny', 'Sunny'], ['사탕공주', '사탕공주'], ['Nazia', 'Nazia'], ['Dickens', 'Dickens'], ['Essen', 'Essen'],
     ['dickhead', null, BAD], ['Hitler', null, BAD],
+    // 눈에 안 보이는 글자 (GAS-01 / KIDS-02): 지워서 보고, 이름이 비면 빈 이름
+    [FILL + FILL, null, EMPTY], [ZW + FILL + ZW, null, EMPTY], ['시' + FILL + '발', null, BAD], ['fu' + ZW + 'ck', null, BAD], ['f' + FILL + 'u' + FILL + 'c' + FILL + 'k', null, BAD],
+    [FILL + '민준', '민준'], ['민' + ZW + '준', '민준'], [String.fromCharCode(0x3165).repeat(2), null, CHARS], ['ㅋㅋ', 'ㅋㅋ'], ['ㅠㅠ', 'ㅠㅠ'],
+    // 소리 비슷한 것·자모로 풀어 쓴 것·늘여 쓴 것 (GAS-02 / KIDS-01)
+    ['씨바', null, BAD], ['시바', null, BAD], ['ㅅㅣㅂㅏㄹ', null, BAD], ['ㅆㅣㅂㅏㄹ', null, BAD], ['쉬발', null, BAD], ['시이발', null, BAD], ['ㅅㅣ발', null, BAD], ['시ㅂㅏㄹ', null, BAD], ['fuuck', null, BAD], ['shiit', null, BAD], ['fvck', null, BAD], ['phuck', null, BAD], ['fuk', null, BAD], ['ㅁㅊ', null, BAD], ['졸라', null, BAD], ['새끼', null, BAD], ['뒤져', null, BAD], ['죽어', null, BAD], ['ㅅ1ㅂ', null, BAD], ['시ㅋ발', null, BAD],
+    // 괜히 막으면 안 되는 이름 (짧고 뜻이 둘인 낱말은 이름 전체일 때만 걸러요)
+    ['시바견', '시바견'], ['보지마', '보지마'], ['보지 못함', '보지 못함'], ['걸레질', '걸레질'], ['가자 지금', '가자 지금'], ['말랑이', '말랑이'], ['사과', '사과'], ['시간', '시간'], ['조나단', '조나단'], ['진달래', '진달래'], ['옷방', '옷방'], ['Cucumber', 'Cucumber'], ['Anna', 'Anna'], ['Bobby', 'Bobby'], ['Shiba', 'Shiba'],
   ];
   const got = await g.ev(rows => rows.map(([input]) => Server.validateNickname(input)), table);
   table.forEach(([input, want, err], i) => {
@@ -238,7 +246,9 @@ await section('닉네임', async () => {
   check('[닉네임] 숫자/객체/배열이 와도 throw 하지 않고 결과를 돌려줌', odd.length === 3 && odd[0][0] === true && odd[0][1] === '12345' && odd[1][0] === false);
   check('[닉네임] 오류 문구는 전부 한글이고 친절한 말투 (영어/내부 이름 없음)', got.filter(r => !r.ok).every(r => /[가-힣]/.test(r.error) && !/undefined|NaN|object|error/i.test(r.error)));
   const meta = await g.ev(() => ({ same: Server.blocklist === NICKNAME_BLOCKLIST, n: Server.blocklist.length, lower: Server.blocklist.every(w => w === w.toLowerCase() && !/\s/.test(w)), diffs: JSON.stringify(Object.keys(CFG.difficulty)) === JSON.stringify(Server.config.difficulties) }));
-  check('[닉네임] 금칙어 목록은 한 군데(NICKNAME_BLOCKLIST)에 있고 소문자·공백 없음', meta.same && meta.n >= 40 && meta.lower);
+  check('[닉네임] 금칙어 목록은 한 군데(NICKNAME_BLOCKLIST + NICKNAME_BLOCKLIST_WHOLE)에 있고 소문자·공백 없음', meta.same && meta.n >= 150 && meta.lower);
+  const meta2 = await g.ev(() => ({ same: Server.blocklistWhole === NICKNAME_BLOCKLIST_WHOLE, n: Server.blocklistWhole.length, lower: Server.blocklistWhole.every(w => w === w.toLowerCase() && !/\s/.test(w)) }));
+  check('[닉네임] "이름 전체일 때만 거르는" 목록(blocklistWhole)도 노출되고 소문자·공백 없음', meta2.same && meta2.n >= 80 && meta2.lower, J(meta2));
   check('[설정] 난이도 목록이 게임의 CFG.difficulty 키와 같음', meta.diffs);
   // 목록을 늘리면 바로 걸러지는지 (쉽게 확장 가능)
   const ext = await g.ev(() => { const before = Server.validateNickname('젤리괴물').ok; Server.blocklist.push('괴물'); const after = Server.validateNickname('젤리괴물'); Server.blocklist.pop(); return [before, after.ok, after.error]; });
@@ -282,7 +292,7 @@ await section('서버성공', async () => {
 
   const r2 = await g.ev(p => Server.saveScore(p), { ...GOOD, nickname: '점수크게', score: 5e9, stars: 9, difficulty: 'cheat' });
   const sent2 = (await g.ev(() => window.__calls)).filter(c => c.name === 'saveScore')[1];
-  check('[서버성공] 범위를 벗어난 값은 고쳐서 보냄 (점수 999999, 별 3, 난이도 normal)', r2.source === 'server' && sent2.args[0].score === 999999 && sent2.args[0].stars === 3 && sent2.args[0].difficulty === 'normal', J(sent2.args));
+  check('[서버성공] 범위를 벗어난 값은 고쳐서 보냄 (점수 99999, 별 3, 난이도 normal)', r2.source === 'server' && sent2.args[0].score === 99999 && sent2.args[0].stars === 3 && sent2.args[0].difficulty === 'normal', J(sent2.args));
   const n0 = (await g.ev(() => window.__calls)).length;
   const r3 = await g.ev(() => Server.saveScore({ nickname: '시발', score: 1 }));
   check('[서버성공] 닉네임이 규칙에 어긋나면 서버에 보내지 않고 { ok:false } 로 끝', r3.ok === false && r3.source === 'none' && (await g.ev(() => window.__calls)).length === n0, J(r3));
@@ -538,6 +548,111 @@ await section('UI연동', async () => {
   const nv = await g.ev(() => ({ ui: ['시발', '=abc', 'a', '  가  나  ', '민준'].map(s => UI.validateNickname(s)), sv: ['시발', '=abc', 'a', '  가  나  ', '민준'].map(s => Server.validateNickname(s)) }));
   check('[UI연동] UI.validateNickname 이 Server.validateNickname 의 결과(오류 문구/정리된 값)를 그대로 사용', nv.ui.every((r, i) => r.ok === nv.sv[i].ok && (r.ok ? r.value === nv.sv[i].value : r.error === nv.sv[i].error)) && nv.ui[1].value === 'abc' && nv.ui[3].value === '가 나', J(nv));
   await g.done('UI연동-닉네임');
+});
+
+// ===========================================================================
+// 9. 닉네임 만들어 주기 Server.randomNickname() (주사위 버튼·기본 이름용)
+// ===========================================================================
+await section('랜덤닉네임', async () => {
+  const g = await open();
+  const first = await g.ev(() => { RNG.seed(1); return Server.randomNickname(); });
+  check('[랜덤닉네임] 문자열을 돌려주고 낱말 둘 + 숫자 두 개 모양 (예: 말랑젤리37)', typeof first === 'string' && /^[가-힣]{4,5}[0-9]{2}$/.test(first), first);
+
+  // 시드를 바꿔 가며 3000번: 늘 2~8글자이고 늘 validateNickname 을 통과하고 정리해도 값이 그대로
+  const many = await g.ev(() => {
+    const seen = new Set(), out = { bad: [], badLen: [], changed: [], n: 0 };
+    for (let seed = 1; seed <= 3000; seed++) {
+      RNG.seed(seed);
+      const name = Server.randomNickname(), r = Server.validateNickname(name);
+      out.n++; seen.add(name);
+      if (!r.ok) out.bad.push(name);
+      else if (r.value !== name) out.changed.push(name);
+      if (typeof name !== 'string' || name.length < 2 || name.length > 8) out.badLen.push(name);
+    }
+    return { n: out.n, bad: out.bad.slice(0, 5), badLen: out.badLen.slice(0, 5), changed: out.changed.slice(0, 5), distinct: seen.size };
+  });
+  check('[랜덤닉네임] 시드 3000개: 전부 validateNickname 통과 + 2~8글자 + 정리해도 그대로', many.n === 3000 && many.bad.length === 0 && many.badLen.length === 0 && many.changed.length === 0, J(many));
+  check('[랜덤닉네임] 이름이 골고루 달라짐 (3000번 중 서로 다른 이름 2000개 이상)', many.distinct > 2000, String(many.distinct));
+
+  // 같은 시드 = 같은 이름 (게임 난수 rand/pick 을 써서 테스트에서 재현돼요), 난수열을 실제로 씀
+  const det = await g.ev(() => { RNG.seed(42); const a = Server.randomNickname(); RNG.seed(42); const b = Server.randomNickname(); RNG.seed(43); const c = Server.randomNickname(); RNG.seed(7); Server.randomNickname(); const x = rand(); RNG.seed(7); const y = rand(); return [a === b, a !== c, x !== y]; });
+  check('[랜덤닉네임] 같은 시드는 같은 이름, 다른 시드는 다른 이름, 게임 난수열(rand)을 소비함 (Math.random 안 씀)', det.every(Boolean), J(det));
+
+  // 낱말 × 낱말 × 숫자 전부 (24 x 26 x 90 = 5만 6천 개): 어떤 짝이 나와도 막히지 않아야 해요
+  const words = await g.ev(() => ({ adj: Server.nickWords.adj.slice(), noun: Server.nickWords.noun.slice() }));
+  check('[랜덤닉네임] 낱말 목록: 꾸미는 말과 이름 말이 각각 20개 이상, 중복 없음, 한글 2~3글자, 예시(말랑·폭신·반짝·젤리·사탕·구름·별빛·용사)가 들어 있음',
+    words.adj.length >= 20 && words.noun.length >= 20 && new Set(words.adj).size === words.adj.length && new Set(words.noun).size === words.noun.length &&
+    [...words.adj, ...words.noun].every(w => /^[가-힣]{2,3}$/.test(w)) && ['말랑', '폭신', '반짝'].every(w => words.adj.includes(w)) && ['젤리', '사탕', '구름', '별빛', '용사'].every(w => words.noun.includes(w)), J([words.adj.length, words.noun.length]));
+  const t0 = Date.now();
+  const exhaustive = await g.ev(() => {
+    const bad = []; let n = 0, maxLen = 0;
+    for (const a of Server.nickWords.adj) for (const b of Server.nickWords.noun) for (let d = 10; d <= 99; d++) {
+      const name = a + b + d; n++; maxLen = Math.max(maxLen, name.length);
+      const r = Server.validateNickname(name);
+      if (!r.ok || r.value !== name) bad.push(name);
+    }
+    return { n, maxLen, bad: bad.slice(0, 10), nbad: bad.length };
+  });
+  check(`[랜덤닉네임] 낱말 × 낱말 × 숫자(10~99) 전부 ${exhaustive.n}개가 validateNickname 을 통과 (가장 긴 이름 ${exhaustive.maxLen}글자 ≤ 8)  [${Math.round((Date.now() - t0) / 1000)}초]`, exhaustive.nbad === 0 && exhaustive.maxLen <= 8, J(exhaustive));
+  check('[랜덤닉네임] UI 의 닉네임 검사(UI.validateNickname)도 통과하고, 저장도 됨', await g.ev(async () => { RNG.seed(9); const n = Server.randomNickname(); const u = UI.validateNickname(n); const s = await Server.saveScore({ nickname: n, score: 5, difficulty: 'easy' }); return u.ok && u.value === n && s.ok === true; }));
+  await g.done('랜덤닉네임');
+});
+
+// ===========================================================================
+// 10. 말이 되는 기록 (GAS-06 / KIDS-10): 클라이언트 쪽 정리 + 서버와 같은 설정
+// ===========================================================================
+await section('말이되는기록', async () => {
+  const g = await open({ mode: 'ok' });
+  check('[기록] 점수 상한 99999 · 클리어 최소 45초 · 허용 스테이지가 게임의 STAGES 와 같음', await g.ev(() => Server.config.scoreMax === 99999 && Server.config.clearTimeMin === 45 && JSON.stringify(Server.config.stageIds) === JSON.stringify(STAGES.map(s => s.id)) && Server.config.stageIds.includes(Server.config.defaultStage)));
+  await g.ev(() => { Server.local.clear(); window.__calls.length = 0; window.__srv.count = {}; window.__srv.saved = []; });
+  await g.ev(async () => {
+    await Server.saveScore({ nickname: '별만있음', score: 100, stars: 3, cleared: false, timeSec: 20, difficulty: 'easy' });          // 클리어 안 했는데 별 3
+    await Server.saveScore({ nickname: '이상한곳', score: 100, stars: 1, cleared: true, timeSec: 100, stageId: 'stage9' });             // 없는 스테이지
+    await Server.saveScore({ nickname: '큰점수', score: 123456, stars: 3, cleared: true, timeSec: 100 });                            // 상한 초과
+    await Server.saveScore({ nickname: '빠른클리어', score: 100, stars: 1, cleared: true, timeSec: 30 });                             // 45초 미만 클리어: 클라이언트는 그대로 보내고 서버가 판단
+  });
+  const sent = (await g.ev(() => window.__calls)).filter(c => c.name === 'saveScore').map(c => c.args[0]);
+  check('[기록] 별은 클리어했을 때만 서버로 보냄 (클리어 안 한 판의 별 3 → 0)', sent[0].stars === 0 && sent[0].cleared === false && sent[2].stars === 3, J(sent.slice(0, 3)));
+  check('[기록] 모르는 스테이지는 stage1 로 고쳐서 보냄', sent[1].stageId === 'stage1', J(sent[1]));
+  check('[기록] 점수는 99999 로 줄여서 보냄', sent[2].score === 99999, J(sent[2]));
+  check('[기록] 45초 미만 클리어는 클라이언트가 고치지 않고 그대로 보냄 (서버가 거절 → 내 기기에 저장 + warning)', sent[3].timeSec === 30 && sent[3].cleared === true, J(sent[3]));
+  const local = await g.ev(() => Server.local.load());
+  check('[기록] 내 기기 기록에도 같은 정리(별 0, stage1, 99999)가 적용됨', local.find(e => e.nickname === '별만있음').stars === 0 && local.find(e => e.nickname === '이상한곳').stageId === 'stage1' && local.find(e => e.nickname === '큰점수').score === 99999);
+  await g.done('말이되는기록');
+});
+
+// ===========================================================================
+// 11. UI 가 쓰는 결과 모양 (GAS-03 / GAS-07: 다음 작업이 이 값을 읽어요)
+// ===========================================================================
+await section('UI계약', async () => {
+  // saveScore: 서버에 못 올렸을 때는 늘 ok:true + source:local + warning:'server_failed' + error(이유). 서버가 없는 환경은 warning:'no_server'.
+  for (const [mode, label] of [['fail', '시스템 오류'], ['rejectKo', '서버가 거절'], ['busyKo', '서버가 바쁨'], ['saveNotOk', '서버가 ok:false']]) {
+    const g = await open({ mode });
+    await g.ev(() => { Server.local.clear(); Server.config.retryDelayMs = 20; });
+    const r = await g.ev(p => Server.saveScore(p), { ...GOOD, nickname: '실패' + mode.length, score: 11 });
+    check(`[UI계약] 서버 실패(${label}) → { ok:true, source:'local', warning:'server_failed', error:문자열 } (UI 가 "다시 보내 볼까요?" 단추를 보일 근거)`, r.ok === true && r.source === 'local' && r.warning === 'server_failed' && typeof r.error === 'string' && r.error.length > 0, J(r));
+    await g.done('UI계약-' + mode);
+  }
+  let g = await open();
+  const nr = await g.ev(p => Server.saveScore(p), { ...GOOD, nickname: '서버없음' });
+  check("[UI계약] 서버가 아예 없는 환경은 warning:'no_server' (재시도 단추가 필요 없는 경우와 구별됨)", nr.ok === true && nr.source === 'local' && nr.warning === 'no_server', J(nr));
+  await g.done('UI계약-서버없음');
+
+  // getTopScores: 배열 + 숨은 속성 rows.source ('server' | 'local') - 같은 배열을 그대로 넘겨받아야 읽을 수 있어요 (복사하면 사라져요)
+  g = await open({ mode: 'ok' });
+  const okRows = await g.ev(async () => { const r = await Server.getTopScores(5); const d = Object.getOwnPropertyDescriptor(r, 'source'); return [Array.isArray(r), r.source, d && d.enumerable, JSON.stringify(r).includes('source'), r.slice().source === undefined]; });
+  check("[UI계약] getTopScores 결과는 배열이고 rows.source === 'server' (숨은 속성: 목록에 끼지 않고 JSON 에도 안 나옴, slice() 하면 사라짐)", J(okRows) === J([true, 'server', false, false, true]), J(okRows));
+  await g.done('UI계약-성공랭킹');
+  for (const mode of ['fail', 'hang']) {
+    g = await open({ mode });
+    await g.ev(() => { Server.config.retryDelayMs = 20; Server.config.timeoutMs = 200; Server.config.totalMs = 600; Server.local.clear(); });
+    const lr = await g.ev(async () => { await Server.saveScore({ nickname: '내기록', score: 77, difficulty: 'easy' }); const r = await Server.getTopScores(5); return [Array.isArray(r), r.source, r.map(x => x.nickname)]; });
+    check(`[UI계약] 서버 ${mode === 'fail' ? '오류' : '멈춤'}이면 내 기기 랭킹 + rows.source === 'local' ("이 기기의 기록이에요" 표시의 근거)`, J(lr) === J([true, 'local', ['내기록']]), J(lr));
+    await g.done('UI계약-로컬랭킹-' + mode);
+  }
+  g = await open();
+  check("[UI계약] 서버가 없는 환경의 랭킹도 rows.source === 'local'", (await g.ev(async () => (await Server.getTopScores()).source)) === 'local');
+  await g.done('UI계약-서버없음랭킹');
 });
 
 await browser.close();
