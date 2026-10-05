@@ -16,13 +16,17 @@ const UI_TUNE = {
   nick: { min: 2, max: 8 },                         // 닉네임 글자 수 (서버 검증이 없을 때의 기준)
   hud: {
     lowHpRatio: 0.3,                                // 체력이 이 비율 이하면 "위험!" 표시 + 화면 가장자리가 은은하게 붉어짐
-    vignetteMax: 0.2,                               // 위험 표시의 최대 진하기 (깜빡임 없이 천천히 숨 쉬듯)
+    vignetteMax: 0.26,                               // 위험 표시의 최대 진하기 (깜빡임 없이 천천히 숨 쉬듯)
     hitFlashFrames: 24, hitFlashAlpha: 0.26,        // 맞았을 때 가장자리 붉은 번쩍 (한 번, 부드럽게)
     comboMin: 2,                                    // 이 콤보부터 "N HIT!" 표시
     maxHearts: 5,                                   // 목숨 하트 최대 표시 수
+    // 바닥 띠(y 330~500)는 게임이 벌어지는 곳이라 HUD 로 가리면 안 돼요 (예고 마커·발밑이 가려지면 억울하게 맞아요). 그래서 HUD 는 전부 위쪽에 둬요
+    skillTop: 106,                                  // 스킬 칸 3개의 위쪽 y (체력판 바로 아래, 왼쪽)
+    bossBarY: 122,                                  // 보스 체력바의 y (방 이름·진행도 점 아래, 가운데)
   },
   touch: { stickOn: 0.38, stickOff: 0.2 },          // 조이스틱: 이 정도(반지름 비율) 넘게 밀면 방향키 눌림, 이 아래로 돌아오면 뗌
-  result: { startDelay: 36, starGap: 26, countFrames: 80 },   // 결과 화면: 첫 별 / 별 사이 / 점수 세어 올리는 시간(프레임)
+  result: { startDelay: 36, starGap: 26, countFrames: 80,     // 결과 화면: 첫 별 / 별 사이 / 점수 세어 올리는 시간(프레임)
+            keyLockMs: 900 },                                  // 결과가 뜬 직후 이 시간 동안은 Space/Enter 로 버튼이 눌리지 않음 (공격 버튼을 연타하다가 결과 화면의 「다시 하기」가 눌려 버리는 사고 방지)
   saveTimeoutMs: 12000,                             // 저장이 이만큼 걸리면 "실패"로 보고 다시 시도 버튼을 보여줌
   confirmMs: 3000,                                  // 일시정지 화면의 「다시 시작/처음으로」: 첫 클릭 뒤 이 시간 안에 한 번 더 눌러야 실행
   toastMs: 2500, breakToastMs: 7000,
@@ -237,7 +241,7 @@ const UI = (() => {
   function hudVignette(ctx, p, now, calm) {
     let a = 0;
     if (p && !p.dead && p.maxHp > 0 && p.hp / p.maxHp <= T.hud.lowHpRatio) {
-      a += calm ? 0.14 : 0.07 + (T.hud.vignetteMax - 0.07) * (0.5 + 0.5 * Math.sin(now * 0.07));   // 1.5초 주기로 천천히 (깜빡임 아님)
+      a += calm ? 0.16 : 0.09 + (T.hud.vignetteMax - 0.09) * (0.5 + 0.5 * Math.sin(now * 0.07));   // 1.5초 주기로 천천히 (깜빡임 아님)
     }
     const age = now - HUD.hitT;
     if (age >= 0 && age < T.hud.hitFlashFrames) a += (calm ? 0.1 : T.hud.hitFlashAlpha) * (1 - age / T.hud.hitFlashFrames);
@@ -360,7 +364,7 @@ const UI = (() => {
       const info = skillInfo(sk || { cd: 0, cdMax: 1 });
       if (HUD.lastCd[i] > 0 && info.cd <= 0) HUD.readyAt[i] = now;                      // 준비되는 순간 반짝!
       HUD.lastCd[i] = info.cd;
-      const s = 62, bx = 18 + i * 74, by = H - 84, cx = bx + s / 2, cy = by + s / 2;
+      const s = 62, bx = 18 + i * 74, by = T.hud.skillTop, cx = bx + s / 2, cy = by + s / 2;
       ctx.save();
       if (dead) ctx.globalAlpha = 0.55;
       Draw.roundRect(ctx, bx, by, s, s, 15); ctx.fillStyle = 'rgba(43,27,58,.78)'; ctx.fill();
@@ -400,11 +404,12 @@ const UI = (() => {
   function hudBoss(ctx, now, calm) {
     const b = Game.boss;
     if (!b || !(b.maxHp > 0)) { HUD.boss = null; return; }
+    if (typeof Stage !== 'undefined' && Stage.state === 'intro') return;                 // "보스 등장!" 경고 배너가 떠 있는 동안은 기다렸다가, 싸움이 시작되면 스르륵 내려와요
     if (HUD.boss !== b) { HUD.boss = b; HUD.bossT = now; HUD.bossLag = clamp(b.hp / b.maxHp, 0, 1); }
     const ratio = clamp(b.hp / b.maxHp, 0, 1);
     HUD.bossLag = ratio > HUD.bossLag ? ratio : HUD.bossLag + (ratio - HUD.bossLag) * 0.05;   // 깎인 부분이 천천히 따라 내려옴
     const slide = calm ? 1 : easeOut((now - HUD.bossT) / 24);
-    const w = 460, x = (W - w) / 2, y = H - 50 + (1 - slide) * 70;
+    const w = 420, x = (W - w) / 2, y = T.hud.bossBarY - (1 - slide) * 90;      // 위에서 아래로 미끄러져 내려옴
     ctx.save();
     Draw.roundRect(ctx, x - 14, y - 40, w + 28, 76, 20); ctx.fillStyle = 'rgba(43,27,58,.66)'; ctx.fill();
     ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke();
@@ -1088,7 +1093,7 @@ const UI = (() => {
     enter() {
       if (Game.paused) Game.pause(false);
       const res = Game.result || defaultResult(), e = S.els;
-      S.res = { data: res, f: 0, shown: 0, total: 0, score: Math.max(0, Math.round(Number(res.score) || 0)), cleared: !!res.cleared, lastText: '0' };
+      S.res = { data: res, f: 0, shown: 0, total: 0, score: Math.max(0, Math.round(Number(res.score) || 0)), cleared: !!res.cleared, lastText: '0', t0: performance.now() };
       S.res.total = fillResult(res);
       try { FX.clear(); } catch (err) { /* 무시 */ }
       show(e.result);
@@ -1167,6 +1172,8 @@ const UI = (() => {
       ev.preventDefault(); selectDiff(keys[nx], true); sfx('ui');
       ev.stopPropagation(); return;
     }
+    // 결과 화면이 막 떴을 때는 Space/Enter 로 버튼이 눌리지 않게 삼켜요 (마우스/터치 클릭은 그대로)
+    if (Game.scene === 'result' && S.res && (ev.code === 'Space' || ev.code === 'Enter') && t && t.tagName === 'BUTTON' && S.els.result && S.els.result.contains(t) && performance.now() - S.res.t0 < T.result.keyLockMs) { ev.preventDefault(); ev.stopPropagation(); return; }
     // 화면(오버레이)이 떠 있는 동안 포커스된 버튼의 Space/방향키는 게임 입력으로 보내지 않아요 → 버튼이 Space 로도 눌려요
     if (overlayActive() && t && t.tagName === 'BUTTON' && S.els.root && S.els.root.contains(t)) ev.stopPropagation();
   }, true);

@@ -1,4 +1,334 @@
 <script>
-/* server 모듈 — 소유 모듈이 구현하기 전까지의 빈 스텁 */
-const Server = {};
+/* =============================================================================
+   server 모듈 - 닉네임 검사 / 점수 저장 / 랭킹 (구글 Apps Script 서버 + 내 기기 기록)
+
+   공개 API (docs/ARCHITECTURE.md 5-5)
+     Server.available                      google.script.run 을 쓸 수 있는지 (게임을 파일로 열면 false)
+     Server.validateNickname(raw)          -> { ok:true, value } | { ok:false, error:'한글 문구' }
+     Server.saveScore({ nickname, score, stageId, difficulty, stars, cleared, timeSec })
+                                           -> Promise<{ ok:true, source:'server'|'local', rank?, warning? }>  (절대 reject 안 함)
+     Server.getTopScores(n=10, difficulty?) -> Promise<[{ rank, nickname, score, stars, difficulty }]>        (절대 reject 안 함)
+     Server.call(fn, ...args)              google.script.run 을 Promise 로 (10초 타임아웃, 서버가 없으면 reject)
+
+   저장 흐름
+     1) 내 기기(Store 'scores')에는 항상 먼저 적어 둬요. (인터넷이 없어도 내 기록은 남아요)
+     2) 서버가 있으면 보내고, 실패하면 '내 기기에만 저장' 으로 알려 줘요.  (서버가 없거나 실패해도 게임은 멈추지 않아요)
+
+   Apps Script 규칙: google.script.run 은 이 파일에서만 써요. 서버로는 숫자/문자열/객체/배열만 보내요(Date, 함수 금지).
+   ============================================================================= */
+
+// ===== 숫자/설정 표 (아이가 고쳐 봐도 되는 곳) =====
+const SERVER_TUNE = {
+  timeoutMs: 10000,        // 서버가 이 시간(밀리초) 안에 답이 없으면 실패로 봐요
+  retries: 1,              // 잠깐 실패(네트워크 끊김 등)하면 이 횟수만큼 다시 해 봐요
+  retryDelayMs: 1500,      // 다시 해 보기 전에 기다리는 시간
+  totalMs: 11000,          // 재시도까지 합쳐 saveScore/getTopScores 가 서버를 기다리는 최대 시간 (결과 화면의 저장 제한 12초보다 짧게!)
+  minRetryWindowMs: 1000,  // 재시도하려면 (기다린 뒤) 남은 시간이 최소 이만큼은 있어야 해요
+  nick: { min: 2, max: 8 },                  // 닉네임 글자 수
+  scoreMax: 999999,                          // 점수 0 ~ 999999
+  starsMax: 3,                               // 별 0 ~ 3
+  timeSecMax: 86400,                         // 플레이 시간(초) 0 ~ 24시간
+  stageIdMax: 20,                            // 스테이지 이름 길이
+  defaultStage: 'stage1',
+  difficulties: ['easy', 'normal', 'hard'],  // CFG.difficulty 의 키와 같아야 해요 (Code.gs 의 DIFFICULTIES_ 도 같아야 해요)
+  rankDefault: 10, rankMax: 50,              // 랭킹 기본 10명, 최대 50명
+  localMax: 50,                              // 내 기기에 보관하는 기록 수
+};
+
+// ===== 닉네임 금칙어 (Code.gs 의 BLOCKLIST_ 와 똑같이 유지해요 - 테스트가 비교해요) =====
+//   * 영어는 소문자, 띄어쓰기 없이. 숫자를 글자 대신 쓴 것(sh1t)과 숫자를 끼워 넣은 것도 걸러요.
+//   * 시작용 목록이에요. 완벽하지 않으니 어른이 가끔 랭킹을 훑어봐 주세요.
+//   * 새 단어는 아래에 한 줄 추가하고, Code.gs 에도 똑같이 추가해요.
+// ==== BLOCKLIST START ====
+const NICKNAME_BLOCKLIST = [
+  // 한국어 욕설
+  '시발', '씨발', '씨팔', '시팔', 'ㅅㅂ', 'ㅆㅂ', '병신', '븅신', 'ㅂㅅ', '지랄', 'ㅈㄹ',
+  '개새끼', '좆', '존나', 'ㅈㄴ', '썅', '쌍년', '염병', '엠창', '느금마', '니애미', '씹',
+  '미친놈', '미친년', '또라이', '돌아이', '닥쳐', '꺼져',
+  // 한국어 성적 표현 / 위험한 말
+  '섹스', '야동', '포르노', '자지', '보지', '창녀', '걸레', '자살',
+  // 한국어 차별/혐오 표현
+  '한남충', '김치녀', '맘충', '틀딱', '급식충',
+  // 영어
+  'fuck', 'shit', 'bitch', 'asshole', 'bastard', 'dickhead', 'cunt', 'pussy', 'slut', 'whore',
+  'nigger', 'nigga', 'faggot', 'retard', 'porn', 'sex', 'penis', 'vagina', 'hitler',
+];
+// ==== BLOCKLIST END ====
+
+const Server = (() => {
+  const T = SERVER_TUNE;
+  const LOCAL_KEY = 'scores';
+  const BUSY_TAG = '[busy]';                                            // Code.gs 가 "잠깐 뒤에 다시" 라고 알려 주는 표시
+  const RUN_HELPERS = ['withSuccessHandler', 'withFailureHandler', 'withUserObject', 'withLogger'];   // google.script.run 의 도우미 (서버 함수가 아님)
+  const NICK_ALLOWED = /^[0-9A-Za-z\u3131-\u318E\uAC00-\uD7A3 ]+$/;     // 숫자, 영어, 한글 자모, 한글 완성형, 공백
+  const LEET = { '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '8': 'b' };   // sh1t -> shit
+
+  const warn = (...a) => { try { console.warn('[Server]', ...a); } catch (e) { /* 무시 */ } };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const clock = () => (typeof api.now === 'function' ? api.now() : Date.now());   // 테스트에서 api.now 를 바꿔 끼울 수 있어요
+
+  // ---------------------------------------------------------------------------
+  // 1. 닉네임 검사 (Code.gs 의 checkNickname_ 과 같은 규칙)
+  //    순서: 정리(NFC, 공백) -> 앞의 = + - @ 제거(시트 수식 주입 방지) -> 글자 종류 -> 길이 -> 금칙어
+  // ---------------------------------------------------------------------------
+  const nickBad = error => ({ ok: false, error });
+  const nickKey = s => String(s).normalize('NFC').toLowerCase();         // 닉네임 비교용 (대소문자 무시)
+
+  function hasBadWord(s) {                                              // 그대로 / 숫자를 글자로 바꿔서 / 숫자를 빼고 - 세 모양으로 살펴봐요
+    const lower = s.toLowerCase().replace(/ /g, '');
+    const forms = [lower, lower.replace(/[0-9]/g, c => LEET[c] || c), lower.replace(/[0-9]/g, '')];
+    return forms.some(f => NICKNAME_BLOCKLIST.some(w => f.indexOf(w) >= 0));
+  }
+
+  function validateNickname(raw) {
+    let s = raw === undefined || raw === null ? '' : String(raw);
+    s = s.normalize('NFC').replace(/\s+/g, ' ').trim();
+    s = s.replace(/^[=+\-@ ]+/, '');                                    // 맨 앞의 수식 문자와 그 뒤 공백 제거
+    if (!s) return nickBad('이름을 적어 주세요!');
+    if (!NICK_ALLOWED.test(s)) return nickBad('이름에는 한글, 영어, 숫자만 쓸 수 있어요.');
+    if (s.length < T.nick.min) return nickBad('이름은 ' + T.nick.min + '글자 이상으로 적어 주세요.');
+    if (s.length > T.nick.max) return nickBad('이름은 ' + T.nick.max + '글자까지만 쓸 수 있어요.');
+    if (hasBadWord(s)) return nickBad('이 이름은 쓸 수 없어요. 다른 이름을 적어 줄래요?');
+    return { ok: true, value: s };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2. 순위 만들기 (내 기기 기록용. 서버(Code.gs)의 buildRanking_ 과 같은 규칙)
+  //    닉네임별 최고 점수만 / 점수 높은 순 / 같으면 먼저 달성한 쪽이 위
+  // ---------------------------------------------------------------------------
+  const betterThan = (a, b) => a.score !== b.score ? a.score > b.score : a.t < b.t;
+
+  function makeRanking(entries, n, difficulty) {
+    const best = new Map();
+    for (const e of entries) {
+      if (difficulty && e.difficulty !== difficulty) continue;
+      const k = nickKey(e.nickname), cur = best.get(k);
+      if (!cur || betterThan(e, cur)) best.set(k, e);
+    }
+    return [...best.values()]
+      .sort((a, b) => betterThan(a, b) ? -1 : (betterThan(b, a) ? 1 : 0))     // (정렬은 안정적이라 완전히 같으면 들어온 순서 유지)
+      .slice(0, n)
+      .map((e, i) => ({ rank: i + 1, nickname: e.nickname, score: e.score, stars: e.stars, difficulty: e.difficulty }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. 내 기기 랭킹 (Store 'scores', 최대 50개)
+  //    "닉네임 + 난이도" 마다 가장 좋은 기록 하나만 보관해요. (난이도별 랭킹도 서버처럼 볼 수 있게)
+  // ---------------------------------------------------------------------------
+  function cleanEntry(r) {                                              // 깨진 기록은 버려요 (Store 값은 믿지 않아요)
+    if (!r || typeof r !== 'object') return null;
+    const nickname = typeof r.nickname === 'string' ? r.nickname.trim() : '';
+    const score = Number(r.score);
+    if (!nickname || !isFinite(score) || !T.difficulties.includes(r.difficulty)) return null;
+    const stars = Math.round(Number(r.stars));
+    return {
+      nickname, score: Math.round(score), stars: isFinite(stars) ? clamp(stars, 0, T.starsMax) : 0, difficulty: r.difficulty,
+      stageId: typeof r.stageId === 'string' ? r.stageId : T.defaultStage,
+      timeSec: isFinite(Number(r.timeSec)) ? Math.max(0, Math.round(Number(r.timeSec))) : 0,
+      cleared: !!r.cleared, t: isFinite(Number(r.t)) ? Number(r.t) : 0,
+    };
+  }
+
+  function localLoad() {
+    const raw = Store.get(LOCAL_KEY, []);
+    return Array.isArray(raw) ? raw.map(cleanEntry).filter(Boolean) : [];
+  }
+
+  const rankOf = (rows, nickname) => { const k = nickKey(nickname), row = rows.find(r => nickKey(r.nickname) === k); return row ? row.rank : 0; };
+
+  function localRecord(p) {                                             // 기록 하나 추가 -> 내 기기 안에서의 등수(전체 난이도 기준)
+    const list = localLoad(), k = nickKey(p.nickname);
+    const entry = { nickname: p.nickname, score: p.score, stars: p.stars, difficulty: p.difficulty, stageId: p.stageId, timeSec: p.timeSec, cleared: p.cleared, t: clock() };
+    const i = list.findIndex(e => nickKey(e.nickname) === k && e.difficulty === p.difficulty);
+    if (i < 0) list.push(entry);
+    else if (p.score > list[i].score) list[i] = entry;                  // 더 높을 때만 바꿔요 (같은 점수면 먼저 달성한 기록 유지)
+    list.sort((a, b) => betterThan(a, b) ? -1 : (betterThan(b, a) ? 1 : 0));
+    if (list.length > T.localMax) list.length = T.localMax;
+    Store.set(LOCAL_KEY, list);
+    return rankOf(makeRanking(list, T.localMax, null), p.nickname);
+  }
+
+  const localTop = (n, difficulty) => makeRanking(localLoad(), n, difficulty);
+  const local = {
+    load: localLoad,
+    record: localRecord,
+    top: localTop,
+    clear() { Store.set(LOCAL_KEY, []); },
+  };
+
+  // ---------------------------------------------------------------------------
+  // 4. google.script.run -> Promise
+  // ---------------------------------------------------------------------------
+  function getRun() {
+    try { return (typeof google !== 'undefined' && google && google.script && google.script.run) || null; } catch (e) { return null; }
+  }
+
+  function makeError(code, message, extra) {
+    const err = new Error(message);
+    err.code = code;                                                    // 'unavailable' | 'timeout' | 'nofunction' | 'failed'
+    return Object.assign(err, extra);
+  }
+
+  // 서버가 던진 오류 -> 메시지 정리. rejected: Code.gs 가 일부러 거절한 것(한글 문구, [busy] 아님) → 다시 해도 소용없어요.
+  function failureError(err) {
+    let msg = err && err.message !== undefined ? err.message : err;
+    msg = String(msg === undefined || msg === null ? '' : msg).replace(/^\s*(Error|Exception):\s*/i, '');
+    return makeError('failed', msg || 'server failed', { rejected: /[가-힣]/.test(msg) && !msg.includes(BUSY_TAG) });
+  }
+
+  function toPlain(v) {                                                 // 숫자/문자열/객체/배열만 보내요 (함수 제거, Date 는 글자로)
+    const json = JSON.stringify(v);
+    return json === undefined ? null : JSON.parse(json);
+  }
+
+  function callOnce(timeoutMs, fn, args) {
+    return new Promise((resolve, reject) => {
+      const run = getRun();
+      if (!run) { reject(makeError('unavailable', 'google.script.run 을 쓸 수 없어요')); return; }
+      let done = false, timer = 0;
+      const settle = (ok, value) => { if (done) return; done = true; clearTimeout(timer); (ok ? resolve : reject)(value); };   // 먼저 온 쪽만 인정
+      timer = setTimeout(() => settle(false, makeError('timeout', '서버가 ' + Math.max(1, Math.round(timeoutMs / 1000)) + '초 안에 답하지 않았어요')), timeoutMs);
+      try {
+        // 서버 함수 이름 검사: 밑줄로 끝나면 비공개, Object 기본 이름(constructor 등)·with… 도우미는 서버 함수가 아니라서 답이 영영 안 와요
+        if (typeof fn !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/.test(fn) || fn.endsWith('_') || fn in Object.prototype || RUN_HELPERS.includes(fn)) throw makeError('nofunction', '서버 함수 이름이 올바르지 않아요: ' + fn);
+        const plain = args.map(toPlain);
+        const runner = run.withSuccessHandler(v => settle(true, v)).withFailureHandler(err => settle(false, failureError(err)));
+        if (typeof runner[fn] !== 'function') throw makeError('nofunction', '서버에 ' + fn + ' 함수가 없어요');
+        runner[fn](...plain);
+      } catch (err) {
+        settle(false, err && err.code ? err : failureError(err));
+      }
+    });
+  }
+
+  const call = (fn, ...args) => callOnce(T.timeoutMs, fn, args);                // 공개 API: T.timeoutMs(10초) 안에 답이 없으면 reject
+
+  const isTransient = err => !!err && err.code === 'failed' && !err.rejected;     // 시간 초과·함수 없음·일부러 거절한 것은 다시 해도 소용없어요
+
+  async function callWithRetry(fn, ...args) {                           // 한 번 실패하면 잠깐 뒤 다시 (전체 시간은 T.totalMs 를 넘기지 않아요)
+    const t0 = Date.now();
+    const left = () => T.totalMs - (Date.now() - t0);
+    let last = null;
+    for (let attempt = 0; attempt <= T.retries; attempt++) {
+      try { return await callOnce(Math.max(1, Math.min(T.timeoutMs, left())), fn, args); }
+      catch (err) {
+        last = err;
+        if (!isTransient(err) || attempt >= T.retries) break;
+        if (left() - T.retryDelayMs < T.minRetryWindowMs) break;        // 남은 시간이 너무 짧으면 포기
+        await sleep(T.retryDelayMs);
+      }
+    }
+    throw last;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. 점수 저장
+  // ---------------------------------------------------------------------------
+  function cleanPayload(raw) {                                          // 클라이언트 쪽 정리(친절하게 고쳐 줌). 진짜 검사는 서버가 다시 해요.
+    const p = raw && typeof raw === 'object' ? raw : {};
+    const nick = validateNickname(p.nickname);
+    if (!nick.ok) return { ok: false, error: nick.error };
+    const int = (v, lo, hi, d) => { const x = Math.round(Number(v)); return isFinite(x) ? clamp(x, lo, hi) : d; };
+    const stageId = String(p.stageId === undefined || p.stageId === null ? '' : p.stageId);
+    return {
+      ok: true,
+      payload: {
+        nickname: nick.value,
+        score: int(p.score, 0, T.scoreMax, 0),
+        stars: int(p.stars, 0, T.starsMax, 0),
+        difficulty: T.difficulties.includes(p.difficulty) ? p.difficulty : 'normal',
+        stageId: /^[A-Za-z0-9_-]+$/.test(stageId) && stageId.length <= T.stageIdMax ? stageId : T.defaultStage,
+        cleared: !!p.cleared,
+        timeSec: int(p.timeSec, 0, T.timeSecMax, 0),
+      },
+    };
+  }
+
+  const inflight = new Map();                                           // 저장 중인 기록 (더블클릭하면 같은 약속을 돌려줘요)
+
+  function saveScore(raw) {
+    let c;
+    try { c = cleanPayload(raw); } catch (err) { c = { ok: false, error: '기록을 저장할 수 없어요.' }; }
+    if (!c.ok) return Promise.resolve({ ok: false, source: 'none', error: c.error });
+    const p = c.payload;
+    const key = [nickKey(p.nickname), p.score, p.difficulty, p.stageId, p.stars, p.cleared, p.timeSec].join('|');
+    if (inflight.has(key)) return inflight.get(key);
+    const job = doSave(p).finally(() => inflight.delete(key));
+    inflight.set(key, job);
+    return job;
+  }
+
+  async function doSave(p) {                                            // 무슨 일이 있어도 reject 하지 않아요 (맨 아래 catch 가 마지막 안전망)
+    try { return await doSaveInner(p); }
+    catch (err) { warn('저장 중 예상 못 한 오류', err); return { ok: true, source: 'local', warning: 'server_failed', error: String((err && err.message) || err) }; }
+  }
+
+  async function doSaveInner(p) {
+    let localRank = 0;
+    try { localRank = localRecord(p); } catch (err) { warn('내 기기 저장 실패', err); }   // 내 기기에 먼저 (실패해도 서버 저장은 계속)
+    if (!getRun()) return { ok: true, source: 'local', rank: localRank || undefined, warning: 'no_server' };
+    try {
+      const res = await callWithRetry('saveScore', p);
+      if (!res || res.ok !== true) throw makeError('failed', '서버가 저장하지 못했어요');
+      return { ok: true, source: 'server', rank: Number.isInteger(res.rank) && res.rank > 0 ? res.rank : undefined };
+    } catch (err) {
+      warn('서버 저장 실패 → 내 기기에만 저장', err && err.message);
+      return { ok: true, source: 'local', rank: localRank || undefined, warning: 'server_failed', error: String((err && err.message) || err) };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. 랭킹 조회 (서버 먼저, 안 되면 내 기기)
+  // ---------------------------------------------------------------------------
+  function normalizeRows(rows, n) {                                     // 서버 응답이 이상하면 null (→ 내 기기 랭킹으로)
+    if (!Array.isArray(rows)) return null;
+    const out = [];
+    rows.forEach((r, i) => {
+      if (!r || typeof r !== 'object' || !isFinite(Number(r.score)) || r.nickname === undefined || r.nickname === null) return;
+      const stars = Math.round(Number(r.stars));
+      out.push({
+        rank: Number.isInteger(r.rank) && r.rank > 0 ? r.rank : i + 1,
+        nickname: String(r.nickname), score: Math.round(Number(r.score)),
+        stars: isFinite(stars) ? clamp(stars, 0, T.starsMax) : 0, difficulty: String(r.difficulty === undefined ? '' : r.difficulty),
+      });
+    });
+    if (rows.length && !out.length) return null;
+    return out.slice(0, n);
+  }
+
+  const tagSource = (rows, source) => Object.defineProperty(rows, 'source', { value: source, enumerable: false });   // rows.source: 'server' | 'local'
+
+  async function getTopScores(n, difficulty) {                          // 무슨 일이 있어도 reject 하지 않아요
+    try { return await getTopScoresInner(n, difficulty); }
+    catch (err) { warn('랭킹 조회 중 예상 못 한 오류', err); return tagSource([], 'local'); }
+  }
+
+  async function getTopScoresInner(n, difficulty) {
+    const num = Math.floor(Number(n === undefined || n === null || n === '' ? T.rankDefault : n));
+    const limit = isFinite(num) ? clamp(num, 1, T.rankMax) : T.rankDefault;
+    const diff = T.difficulties.includes(difficulty) ? difficulty : null;
+    if (getRun()) {
+      try {
+        const rows = normalizeRows(await callWithRetry('getTopScores', limit, diff), limit);
+        if (rows) return tagSource(rows, 'server');
+        warn('서버 랭킹 응답이 이상해요');
+      } catch (err) { warn('서버 랭킹 실패 → 내 기기 랭킹', err && err.message); }
+    }
+    return tagSource(localTop(limit, diff), 'local');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 공개 API
+  // ---------------------------------------------------------------------------
+  const api = {
+    get available() { return !!getRun(); },
+    validateNickname, saveScore, getTopScores, call,
+    config: T,                                                          // 타임아웃 등 (테스트에서 줄여 쓰기)
+    blocklist: NICKNAME_BLOCKLIST,
+    local,
+    now: () => Date.now(),                                              // 내 기기 기록의 시각 (테스트에서 바꿔 끼움)
+  };
+  return api;
+})();
 </script>
